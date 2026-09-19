@@ -19,8 +19,8 @@ const plugins = ref<DshPluginInfo[]>([])
 const loading = ref(false)
 const busy = ref<string | null>(null)
 
-/** per-plugin new-version hint (name → { available, latest }); latest is an npm version or a git short sha */
-const updates = ref<Record<string, { available: boolean; latest?: string }>>({})
+/** per-plugin new-version hint (name → { available, latest, channel }); channel is which update path to take */
+const updates = ref<Record<string, { available: boolean; latest?: string; channel?: 'npm' | 'git' }>>({})
 const checking = ref(false)
 
 /** profile being managed; dsh ships web/acp/headless/sdk templates */
@@ -55,9 +55,9 @@ async function checkUpdates(): Promise<void> {
   try {
     const res = await window.container.dshCheckUpdates(profile.value)
     if (res.ok) {
-      const map: Record<string, { available: boolean; latest?: string }> = {}
+      const map: Record<string, { available: boolean; latest?: string; channel?: 'npm' | 'git' }> = {}
       for (const u of (res.data as DshPluginUpdate[]) || []) {
-        map[u.name] = { available: u.updateAvailable, latest: u.latest }
+        map[u.name] = { available: u.updateAvailable, latest: u.latest, channel: u.channel }
       }
       updates.value = map
     }
@@ -69,7 +69,7 @@ async function checkUpdates(): Promise<void> {
 }
 
 /** resolved update hint for a plugin row, or a safe "no update" default */
-function updateInfo(name: string): { available: boolean; latest?: string } {
+function updateInfo(name: string): { available: boolean; latest?: string; channel?: 'npm' | 'git' } {
   return updates.value[name] || { available: false }
 }
 
@@ -118,11 +118,24 @@ async function uninstall(p: DshPluginInfo): Promise<void> {
   }
 }
 
+/** Extract the repo portion of a git dependency spec (drops the #ref), so the update dialog can prefill it */
+function gitRepoFromSpec(version: string): string {
+  const gh = /^github:([\w.-]+\/[\w.-]+?)(?:\.git)?/.exec(version)
+  if (gh) return `github:${gh[1]}`
+  const n = /^(?:git\+)?(https?:\/\/[^\s#]+\.git)/.exec(version)
+  if (n) return n[1]
+  return version
+}
+
 function openUpdate(p: DshPluginInfo): void {
+  const info = updateInfo(p.name)
   updateDialog.visible = true
   updateDialog.name = p.name
-  updateDialog.channel = 'npm'
-  updateDialog.gitUrl = ''
+  // route to the channel the new version was detected on
+  updateDialog.channel = info.channel === 'git' ? 'git' : 'npm'
+  // prefill the git URL (repo + latest tag) so a git update is one click
+  updateDialog.gitUrl =
+    info.channel === 'git' ? `${gitRepoFromSpec(p.version)}${info.latest ? '#' + info.latest : ''}` : ''
 }
 
 async function doUpdate(): Promise<void> {
@@ -271,7 +284,7 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' => (s === 'bu
       <el-input
         v-if="updateDialog.channel === 'git'"
         v-model="updateDialog.gitUrl"
-        placeholder="git 仓库地址（将解析远端 HEAD 并以 url#sha 重装）"
+        placeholder="git 仓库地址（如 github:user/repo#v1.2.3，将以 url#ref 重装到最新 tag）"
       />
       <div v-else class="cell-sub">执行 pnpm update {{ updateDialog.name }}（registry 走 npmmirror）</div>
       <template #footer>

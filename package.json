@@ -19,7 +19,7 @@
     "setup:node": "node scripts/setup-node.mjs",
     "setup:openclaw": "node scripts/setup-openclaw.mjs",
     "setup:dsh": "node scripts/setup-dsh.mjs",
-    "prebuild": "npm run setup:openclaw && npm run setup:dsh",
+    "prebuild": "npm run ensure:pages && npm run setup:openclaw && npm run setup:dsh && npm run setup:codex",
     "ensure:pages": "node scripts/ensure-pages.mjs",
     "test": "vitest run && vitest run --config vitest.ui.config.ts",
     "test:unit": "vitest run",
@@ -30,7 +30,6 @@
     "build:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
-    "@deepseek-ai/dsh": "^0.1.6-alpha.2",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@element-plus/icons-vue": "^2.3.1",
@@ -38,11 +37,11 @@
     "@xterm/xterm": "^6.0.0",
     "element-plus": "^2.11.0",
     "node-pty": "^1.1.0",
-    "openclaw": "^2026.9.5",
     "pinia": "^3.0.0",
     "simple-git": "^3.27.0"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh": "^0.1.6-alpha.2",
     "@electron-toolkit/eslint-config-prettier": "3.0.0",
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
@@ -56,6 +55,7 @@
     "eslint": "^9.39.1",
     "eslint-plugin-vue": "^10.6.2",
     "jsdom": "^30.1.0",
+    "openclaw": "^2026.9.5",
     "prettier": "^3.7.4",
     "sharp": "^0.35.4",
     "typescript": "^5.9.3",

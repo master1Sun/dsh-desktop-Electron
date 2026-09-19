@@ -14,6 +14,8 @@
 - **OpenClaw Gateway 托管**：随包自带最新版 `openclaw`（npm 全局安装到 `resources/openclaw/`），把它的 gateway 注册成一个可启停页面，运行后主界面内嵌打开 Control UI；配置目录默认与命令行共用 `~/.openclaw`。详见下文。
 - **打开系统终端**：页面标签栏、DSH 面板与「Pages 管理」都有「终端」按钮，点一下即在对应项目目录拉起一个真实控制台，PATH 已前置内置 node（和 pnpm），不再叠加容器自己的弹窗。
 - **纯 CLI 项目整屏终端**：`kind: "terminal"` 的页面（如 codex）被选中时直接占满主区跑其启动命令，退出即返回，详见「Page 约定」。
+- **启动即运行三件套**：新装实例的 `autoStartPages` 默认 `['codex','openclaw','dsh-web']`（`src/main/store.ts` 的 DEFAULTS）。主进程 `PageRegistry.autoStart()` 启动 openclaw gateway 与 dsh-web，`autoStart()` 会跳过 `kind:"terminal"` 的页；codex 由渲染层在 `App.vue` 挂载后把该页设为当前页，交给 `CliTerminalView` 用内嵌终端真正执行 `codex`（只有它会执行 startCommand，`terminalStore.start()` 只开一个空 shell）。已装实例沿用自己持久化的设置，不会被覆盖。
+- **内置页面随包分发**：`pages/` 经 extraResources 打进 `resources/pages`，首启由 `ensureBuiltinPages()`（仅 `app.isPackaged`）拷贝 codex / dsh-web / dsh-plugin-market 到 userData/pages，升级安装不丢。
 - **顶部细菜单栏**：`视图 / Pages / DSH / OpenClaw / 更新 / 帮助` 收进一条 ~34px 的菜单，点击弹出浮层面板，不占用布局——内容区始终满高展示页面，内嵌 `<webview>` 不会因打开设置而卸载。详见下文。
 - **页面标签栏（第二行）**：紧接菜单栏下方的一条同高工具栏（`components/PageTabs.vue`），把原先左侧 PAGES 侧栏与主界面内的 stage-bar 全部收进来：页面下拉选择器（状态点 + DSH 徽标 + 端口/pid + 启停/自动启动按钮）、外部地址与最近使用、当前标题/URL、重载 / 调试内嵌页 / 打开终端 / 系统浏览器四个按钮。主界面 `HomeView.vue` 由此变成纯内容容器（webview 或欢迎页）。
 - **主题**：`auto / light / dark` 三态，容器界面跟随选择即时切换（`auto` 监听系统 `prefers-color-scheme`）；顶栏右侧图标一键在亮暗间循环。内嵌 page 的主题由该页面自身决定，不受容器影响。
@@ -28,7 +30,12 @@ npm run ensure:pages # 生成 pages/dsh-plugin-market 内置推荐页（DSH 插�
 npm run dev          # 开发模式
 ```
 
-`ensure:pages` 还会生成 **内置 Codex CLI 页**（`pages/codex`，`kind:"terminal"`）：选中它主区整屏直接运行 `codex`（经 shell 解析，PATH 含全局 npm bin；未安装 codex 时启动会报错并返回）。可在「环境目录」里改 `CODEX_HOME`，默认 `~/.codex`。
+`ensure:pages` 还会生成 **内置 Codex CLI 页**（`pages/codex`，`kind:"terminal"`）：选中它主区整屏直接运行 `codex`。
+
+- Codex **随包自带**：`npm run setup:codex` 用内置 node+npm 把 `@openai/codex` 装进 `resources/codex/`（npm 全局 prefix 形态），`prebuild` 自动触发、幂等。运行时由 `src/main/pty.ts` 把 `resources/codex` 前置进 PATH，因此**不要求用户全局安装 codex**；未装（源码直跑且跳过 setup）时会报错并返回。
+- 平台二进制（`node_modules/@openai/codex-win32-x64/vendor/**/codex.exe`，约 300MB）随 optionalDependencies 下发，故 `--ignore-scripts` 安全。
+- 可在「环境目录」里改 `CODEX_HOME`，默认 `~/.codex`。
+- 注意：node-pty（winpty 后端）**不做 PATHEXT 解析**，裸命令 `codex` 会 `CreateProcess failed`；容器先用 PATHEXT 感知的 which 解析出完整 `codex.cmd` 路径再 spawn，改动 `pty.ts` 的 `whichOnPath` 时勿退回裸命令。
 
 ## Page 约定
 
@@ -109,6 +116,7 @@ openclaw 是多渠道 AI 网关，npm 包 `openclaw`（本项目自带 latest）
 | `npm test`                                            | vitest（page 生命周期真进程测试 + git 检测 fixture 测试 + dsh 插件管理真实 CLI 测试 + 终端命令生成）                                           |
 | `E2E_DSH_BOOT=1 npx vitest run test/dsh.boot.test.ts` | 真启动一个 dsh web profile，验证端口发现与带 token 的 URL                                                                                      |
 | `npm run setup:node`                                  | 下载解压内置 Node                                                                                                                              |
+| `npm run setup:codex`                                 | 用内置 node 把 codex（`@openai/codex@latest`）装进 `resources/codex`，随包分发；幂等 + prebuild 自动触发                                      |
 | `npm run setup:openclaw`                              | 用内置 node 把 openclaw（latest）装进 `resources/openclaw`，随包分发；幂等（已装即跳过，`--force` 刷新），`npm run build` 经 prebuild 自动触发 |
 | `npm run setup:dsh`                                   | 用内置 node 把 dsh（alpha）+ pnpm（latest）装进 `resources/dsh`，随包分发；同样幂等 + prebuild 自动触发，并修复 pnpm 的 Windows shim           |
 | `node tools/build-icon.cjs <source.png> [shrink]`     | 由鲸鱼源图重绘图标：裁掉水印带→居中取方→缩放，产出 `resources/icon.png` 与手工组装的 `build/icon.ico`（PNG-in-ICO，7 个尺寸）                  |
@@ -119,3 +127,11 @@ openclaw 是多渠道 AI 网关，npm 包 `openclaw`（本项目自带 latest）
 - Windows 终端用 `powershell.exe`（WinPS 5.1 与 PowerShell 7 均可），不依赖 Windows Terminal 是否安装。
 - `git clone` 安装依赖系统 git 与网络（npmmirror 无法代理 git 协议）。
 - 打包后 `pages/` 迁移到 userData 目录，升级安装不丢已装项目。
+
+## 打包注意事项（易踩坑）
+
+- **`extraResources` 必须整棵 `resources/` 一起拷**：electron-builder 的 filter（`app-builder-lib/out/util/filter.js` 的 `createFilter`）会**主动丢弃拷贝源的根 `node_modules`**（`if (relative === "node_modules") return false`）。若写成 `from: resources/dsh, to: dsh`，相对路径正好是 `node_modules` → 整目录被跳过，安装包里只剩 `.cmd` shim 与 `.npmrc`，运行时必然找不到 CLI。正确写法是 `from: resources, to: .`，此时相对路径变成 `dsh/node_modules`，会被保留。
+- **打包后务必核对入口文件**：`dist/win-unpacked/resources/<runtime>/node_modules/...` 下应能找到真实入口（`openclaw.mjs`、`@deepseek-ai/dsh/lib/bin.js`、`@openai/codex/bin/codex.js`、`node/node_modules/npm/bin/npm-cli.js`）。某个 runtime 目录只有 4 个文件 / 0.0MB 就是上面那条坑复发了。
+- **`resources/**` 不进 app.asar**：`files` 里加了 `!resources/**`，否则同一棵树会同时被打进 `app.asar`、被 `asarUnpack` 再解一遍、又被 extraResources 拷一遍（实测三份合计 >1GB）。运行时解析一律走 `process.resourcesPath`，`app.getPath()/resources/...` 只是 dev 兜底，所以排除是安全的。
+- **`openclaw` 与 `@deepseek-ai/dsh` 放在 devDependencies**：容器自带的是 `resources/` 里的 provisioned 副本，`src/` 从不 import 这两个包；若留在 `dependencies`，electron-builder 会把项目 `node_modules` 里那两份（363MB + 208MB，另加它们的传递依赖）一起塞进 `app.asar`，纯属重复。
+- 本机构建往往要绕开 `npm run`（沙箱里 npm 会去拉 `wsl.exe`）：直接 `node node_modules/electron-vite/bin/electron-vite.js build`、`node node_modules/electron-builder/cli.js --win --x64 --publish never --config.electronDist=<abs node_modules/electron/dist>`。产物 ~1.5GB，`dist/` 请先用 `cmd /c rmdir /s /q dist` 删除（Node 的 `fs.rm` 在数万文件的大目录上会无限阻塞）。

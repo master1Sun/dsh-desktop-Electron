@@ -214,6 +214,18 @@ onMounted(async () => {
     })
   }
   await pagesStore.refresh().catch(() => undefined)
+  // Auto-run terminal-kind auto-start pages (e.g. codex) at launch. Only the full-surface
+  // CLI terminal (CliTerminalView) actually spawns their startCommand, so it must become the
+  // active page; web/server pages are started by the main process and keep running in the
+  // background. When several CLI pages are configured, the last one gets the surface.
+  const cliPage = (settingsStore.settings.autoStartPages || [])
+    .map((id) => pagesStore.pages.find((x) => x.id === id))
+    .filter((p) => p?.kind === 'terminal')
+    .at(-1)
+  if (cliPage) {
+    activePageId.value = cliPage.id
+    webviewSrc.value = ''
+  }
   updatesStore.check().catch(() => undefined)
 })
 

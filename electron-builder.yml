@@ -13,18 +13,28 @@ files:
   - '!test/**'
   - '!pages/**'
   - '!scripts/**'
+  - '!tools/**'
+  # Bundled runtimes (node/openclaw/dsh/codex) ship via extraResources only. Packing
+  # resources/** into app.asar as well would duplicate ~500 MB in the installer.
+  - '!resources/**'
 asarUnpack:
-  - resources/**
   - '**/node_modules/node-pty/**'
 extraResources:
-  - from: resources/node
-    to: node
+  # Ship the whole bundled-runtime tree in ONE matcher.
+  #
+  # Do NOT use per-directory entries (from: resources/dsh, to: dsh): electron-builder's
+  # filter drops the *root* node_modules of every copy source
+  # (createFilter() in app-builder-lib/out/util/filter.js: `if (relative === "node_modules") return false`),
+  # so such an entry silently ships the npm prefix WITHOUT its node_modules — only the
+  # shims/.npmrc land in the installer. Copying `resources/` as a whole moves that
+  # directory to `dsh/node_modules`, which is kept.
+  - from: resources
+    to: .
     filter: ['**/*']
-  - from: resources/openclaw
-    to: openclaw
-    filter: ['**/*']
-  - from: resources/dsh
-    to: dsh
+  # builtin page metas (codex / dsh-web / openclaw / dsh-plugin-market) — seeded into
+  # userData/pages on first launch so they survive packaged updates.
+  - from: pages
+    to: pages
     filter: ['**/*']
 win:
   executableName: dsh-desktop-container

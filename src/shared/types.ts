@@ -146,11 +146,13 @@ export interface DshPluginInfo {
   source: 'bundle' | 'profile'
 }
 
-/** per-plugin new-version hint; latest is a newer npm version, or the remote HEAD short sha for git deps */
+/** per-plugin new-version hint; latest is a newer npm version, or the remote latest semver tag for git deps */
 export interface DshPluginUpdate {
   name: string
   updateAvailable: boolean
   latest?: string
+  /** which channel the update should go through; derived from how the dep is pinned */
+  channel?: DshUpdateChannel
 }
 
 export type DshUpdateChannel = 'npm' | 'git'

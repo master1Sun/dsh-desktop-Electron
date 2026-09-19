@@ -5,7 +5,7 @@ import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
 import { PageRegistry } from './pages'
 import { registerIpc } from './ipc'
-import { ensureDefaultOpenclawPage } from './openclaw'
+import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './openclaw'
 import { getSettings, resolvePagesDir, resolveProjectDir } from './store'
 import { getNodeRuntimeInfo } from './node-runtime'
 import icon from '../../resources/icon.png?asset'
@@ -159,6 +159,7 @@ if (!gotLock) {
     await verifyNodeRuntime()
 
     ensureDefaultOpenclawPage()
+    ensureBuiltinPages()
     registry = new PageRegistry({ pagesDir: resolvePagesDir(), projectDir: resolveProjectDir() })
     registerIpc(registry)
     registry.on('changed', rebuildTrayMenu)

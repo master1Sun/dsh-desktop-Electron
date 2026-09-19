@@ -12,6 +12,9 @@ resources/node/
 resources/openclaw/
 resources/dsh/
 
+# bundled codex CLI (fetched by npm run setup:codex / prebuild, ~389MB)
+resources/codex/
+
 # installed page projects (user-managed, keep the folder itself)
 pages/*
 !pages/.gitkeep

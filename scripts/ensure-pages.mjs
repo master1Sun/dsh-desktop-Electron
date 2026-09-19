@@ -286,7 +286,7 @@ if (!existsSync(join(codexDir, 'container.json'))) {
         name: 'Codex CLI',
         kind: 'terminal',
         startCommand: 'codex',
-        description: 'OpenAI Codex 命令行：选中后主区整屏终端直接运行（PATH 已含全局 npm bin）',
+        description: 'OpenAI Codex 命令行（已随安装包内置，无需全局安装）：选中后主区整屏终端直接运行',
         envVars: [
           {
             key: 'CODEX_HOME',

@@ -8,7 +8,8 @@ const DEFAULTS: ContainerSettings = {
   defaultView: { kind: 'none' },
   openExternalIn: 'embedded',
   minimizeToTray: true,
-  autoStartPages: [],
+  // auto-run the three bundled runtimes on launch: codex (terminal), openclaw (gateway), dsh-web (server)
+  autoStartPages: ['codex', 'openclaw', 'dsh-web'],
   lastExternalUrls: [],
   externalSites: [],
   theme: 'auto',

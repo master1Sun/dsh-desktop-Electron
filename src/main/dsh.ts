@@ -366,7 +366,7 @@ export async function uninstallDshPlugin(name: string, profile = DEFAULT_PROFILE
   await dshPluginForward(['remove', s], profile)
 }
 
-/** update one plugin: npm → pnpm update <name>; git → resolve remote HEAD and re-add <url>#<sha> */
+/** update one plugin: npm → pnpm update <name>; git → re-add <url>#<ref|sha> with the ref resolved to its commit */
 export async function updateDshPlugin(
   name: string,
   channel: DshUpdateChannel,
@@ -375,9 +375,13 @@ export async function updateDshPlugin(
 ): Promise<string> {
   if (channel === 'git') {
     if (!gitUrl) throw new Error('git 更新需要提供仓库地址')
-    const sha = await remoteHeadSha(gitUrl)
-    await dshPluginForward(['add', `${gitUrl}#${sha}`], profile)
-    return `已更新至 ${gitUrl}#${sha.slice(0, 8)}`
+    const parsed = parseGitSpec(gitUrl)
+    const repo = parsed ? parsed.repo : gitUrl
+    const ref = parsed?.ref
+    // a pinned tag/sha installs that exact ref; a bare repo resolves the remote HEAD
+    const installSpec = ref ? `${repo}#${ref}` : `${repo}#${(await remoteHeadSha(repo)).slice(0, 8)}`
+    await dshPluginForward(['add', installSpec], profile)
+    return `已更新至 ${installSpec}`
   }
   const s = validateNpmSpec(name)
   await dshPluginForward(['update', s], profile)
@@ -443,7 +447,8 @@ async function latestGitTag(repo: string): Promise<{ version: string; sha: strin
   }
   if (!bestName) return null
   const sha = commitSha.get(bestName) || tagSha.get(bestName) || ''
-  return { version: bestVer as string, sha }
+  // return the original tag name (keeps the `v` prefix so it doubles as a git ref)
+  return { version: bestName, sha }
 }
 
 function isNewerVersion(installed: string, latest: string): boolean {
@@ -471,10 +476,10 @@ async function npmLatestVersion(name: string): Promise<string> {
 
 /**
  * New-version hints for every profile plugin: npm deps are compared against the
- * mirror registry's latest (semver); git deps surface the remote's latest semver tag as the
- * version number and compare it against the pinned ref (tag semver, or commit sha for sha-pinned
- * deps). Repos with no semver tags fall back to a HEAD-sha comparison. Failed lookups yield no
- * hint instead of an error.
+ * mirror registry's latest (semver); git deps are compared only against the remote's latest
+ * semver tag (not HEAD). A git dep with no semver tags yields no hint. The `channel` field
+ * records which update path the dep should take, so the UI can route "可更新" to the right one.
+ * Failed lookups yield no hint instead of an error.
  */
 export async function checkDshPluginUpdates(profile = DEFAULT_PROFILE): Promise<DshPluginUpdate[]> {
   const plugins = listDshPlugins(profile).filter((p) => p.source === 'profile')
@@ -483,28 +488,23 @@ export async function checkDshPluginUpdates(profile = DEFAULT_PROFILE): Promise<
       const git = parseGitSpec(p.version)
       try {
         if (git) {
+          // git deps: only semver tags matter — never compare HEAD shas
           const tag = await latestGitTag(git.repo)
-          if (tag) {
-            // repo publishes semver tags → show the version number, compare against the pinned ref
-            let updateAvailable: boolean
-            if (git.isSha) updateAvailable = (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
-            else if (git.ref) {
-              const instVer = git.ref.replace(/^v/i, '')
-              updateAvailable = /^\d/.test(instVer)
-                ? isNewerVersion(instVer, tag.version)
-                : (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
-            } else updateAvailable = false
-            return { name: p.name, updateAvailable, latest: tag.version }
-          }
-          // no tags: fall back to a HEAD-sha comparison (only meaningful for sha-pinned deps)
-          if (!git.isSha) return { name: p.name, updateAvailable: false }
-          const head = await remoteHeadSha(git.repo)
-          return { name: p.name, updateAvailable: head !== git.ref, latest: head.slice(0, 8) }
+          if (!tag) return { name: p.name, updateAvailable: false, channel: 'git' }
+          let updateAvailable: boolean
+          if (git.isSha) updateAvailable = (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
+          else if (git.ref) {
+            const instVer = git.ref.replace(/^v/i, '')
+            updateAvailable = /^\d/.test(instVer)
+              ? isNewerVersion(instVer, tag.version)
+              : (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
+          } else updateAvailable = false
+          return { name: p.name, updateAvailable, latest: tag.version, channel: 'git' }
         }
         const latest = await npmLatestVersion(p.name)
         if (latest && isNewerVersion(p.version, latest))
-          return { name: p.name, updateAvailable: true, latest }
-        return { name: p.name, updateAvailable: false }
+          return { name: p.name, updateAvailable: true, latest, channel: 'npm' }
+        return { name: p.name, updateAvailable: false, channel: 'npm' }
       } catch {
         return { name: p.name, updateAvailable: false }
       }

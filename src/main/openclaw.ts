@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
 import { resolveOpenclawHome, resolvePagesDir } from './store'
@@ -159,6 +159,32 @@ export function ensureDefaultOpenclawPage(): void {
     createOpenclawPage(OPENCLAW_DEFAULT_PORT)
   } catch {
     /* best-effort; a writable pages/ dir may be absent in odd setups */
+  }
+}
+
+/**
+ * Seed the remaining builtin pages (codex / dsh-web / dsh-plugin-market) into userData/pages
+ * on first launch of a packaged build. The page metas ship inside the installer under
+ * resources/pages (see electron-builder.yml extraResources) but must live in the writable
+ * userData/pages dir so installs survive updates. openclaw is seeded separately by
+ * ensureDefaultOpenclawPage; dev mode reads pages/ straight from the repo, so this is a
+ * packaged-only, best-effort copy.
+ */
+export function ensureBuiltinPages(): void {
+  if (!app.isPackaged) return
+  const srcRoot = join(process.resourcesPath || '', 'pages')
+  if (!existsSync(srcRoot)) return
+  const destRoot = resolvePagesDir()
+  for (const id of ['codex', 'dsh-web', 'dsh-plugin-market']) {
+    const src = join(srcRoot, id)
+    const dest = join(destRoot, id)
+    if (!existsSync(src) || existsSync(join(dest, 'container.json'))) continue
+    try {
+      mkdirSync(dest, { recursive: true })
+      cpSync(src, dest, { recursive: true })
+    } catch {
+      /* best-effort: a missing builtin page simply won't appear until manually added */
+    }
   }
 }
 

@@ -689,9 +689,13 @@ export class PageRegistry extends EventEmitter {
     return this.start(id)
   }
 
-  /** auto-start configured pages; failures are logged, never thrown */
+  /** auto-start configured pages; failures are logged, never thrown.
+      Terminal-kind pages (e.g. codex) run in the embedded terminal and are opened by the
+      renderer, so they are skipped here to avoid a spurious "run in terminal" error. */
   async autoStart(ids: string[]): Promise<void> {
     for (const id of ids) {
+      const entry = this.entries.get(id)
+      if (entry?.meta.kind === 'terminal') continue
       try {
         await this.start(id)
       } catch (err) {

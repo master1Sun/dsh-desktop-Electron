@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import * as os from 'node:os'
 import * as pty from 'node-pty'
+import { app } from 'electron'
 import { getNodeExePath } from './node-runtime'
 import { pnpmBinDirs } from './dsh'
 
@@ -99,7 +100,31 @@ function whichOnPath(cmd: string, env: NodeJS.ProcessEnv): string | null {
   return null
 }
 
-/** Prepend the bundled node + pnpm bin so an interactive shell resolves them first. */
+/** Bundled codex CLI dirs so the `codex` command resolves inside the embedded terminal
+    even without a global install. npm's global-bin shims live directly in the prefix root
+    on Windows (`codex.cmd`/`codex.ps1`) and in `<prefix>/bin` on POSIX; `node_modules/.bin`
+    is added as a fallback. Mirrors node-runtime's discovery: packaged copies resources/codex
+    -> <resourcesPath>/codex, while in dev `process.resourcesPath` points at electron's own
+    dist/resources, so the project dir is probed as well. */
+function codexBinDirs(): string[] {
+  const marker = process.platform === 'win32' ? 'codex.cmd' : 'codex'
+  const roots = [
+    join(process.resourcesPath || '', 'codex'),
+    join(app.getAppPath(), 'resources', 'codex'),
+    join(process.cwd(), 'resources', 'codex')
+  ].filter(Boolean)
+  for (const root of roots) {
+    // npm global bins: <prefix> on Windows, <prefix>/bin on POSIX; .bin is a local-install fallback.
+    const dirs =
+      process.platform === 'win32'
+        ? [root, join(root, 'node_modules', '.bin')]
+        : [join(root, 'bin'), join(root, 'node_modules', '.bin')]
+    if (dirs.some((d) => existsSync(join(d, marker)))) return dirs.filter((d) => existsSync(d))
+  }
+  return []
+}
+
+/** Prepend the bundled node + pnpm + codex bins so an interactive shell resolves them first. */
 async function terminalEnv(): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...process.env, TERM: 'xterm-256color' }
   let nodeDir = ''
@@ -108,7 +133,7 @@ async function terminalEnv(): Promise<NodeJS.ProcessEnv> {
   } catch {
     nodeDir = dirname(process.execPath)
   }
-  const dirs = [nodeDir, ...(await pnpmBinDirs())].filter(Boolean) as string[]
+  const dirs = [nodeDir, ...(await pnpmBinDirs()), ...codexBinDirs()].filter(Boolean) as string[]
   if (dirs.length) {
     const sep = process.platform === 'win32' ? ';' : ':'
     const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') || 'PATH'
