@@ -1,0 +1,544 @@
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
+import { resolveDshProfileDir, resolveDshRuntimeDirs, resolvePagesDir } from './store'
+import type { DshPluginInfo, DshPluginUpdate, DshUpdateChannel } from '../shared/types'
+
+const DEFAULT_PROFILE = 'web'
+
+/** Run a CLI without blocking the main-process event loop (a frozen UI otherwise). */
+function runCli(
+  cmd: string,
+  args: string[],
+  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; shell?: boolean } = {}
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      env: opts.env,
+      windowsHide: true,
+      shell: opts.shell ?? false,
+      timeout: opts.timeoutMs
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (d) => (stdout += String(d)))
+    child.stderr?.on('data', (d) => (stderr += String(d)))
+    child.on('error', (err) => resolve({ code: -1, stdout, stderr: stderr || err.message }))
+    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }))
+  })
+}
+
+export interface DshStatus {
+  installed: boolean
+  version?: string
+  binPath?: string
+  profile: string
+  profileDir: string
+  pnpmFound: boolean
+  error?: string
+}
+
+/** Roots that may contain a provisioned @deepseek-ai/dsh install, preferred first. */
+function dshRoots(): string[] {
+  return resolveDshRuntimeDirs()
+}
+
+/** The real CLI entry (`lib/bin.js`) — npm's `.cmd` shim is not used for spawning. */
+export function dshBinJs(): string | null {
+  for (const root of dshRoots()) {
+    const p = join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    if (existsSync(p)) return p
+  }
+  return null
+}
+
+function dshBinCandidates(): string[] {
+  const out: string[] = []
+  for (const root of dshRoots()) {
+    // `npm install -g --prefix <root>` puts its shims in <root>/node_modules/.bin,
+    // but with npm_config_prefix they land directly in <root> — probe both.
+    const bin = join(root, 'node_modules', '.bin')
+    if (process.platform === 'win32')
+      out.push(join(bin, 'dsh.cmd'), join(bin, 'dsh'), join(root, 'dsh.cmd'), join(root, 'dsh'))
+    else out.push(join(bin, 'dsh'), join(root, 'dsh'))
+  }
+  return out
+}
+
+/** Package dir of the winning dsh install (reads package.json / resolves bundles there). */
+function dshPackageDir(): string | null {
+  for (const root of dshRoots()) {
+    const p = join(root, 'node_modules', '@deepseek-ai', 'dsh')
+    if (existsSync(join(p, 'package.json'))) return p
+  }
+  return null
+}
+
+/**
+ * `dsh plugin` forwards to a bare `pnpm` on PATH. The bundled node dir is prepended
+ * ahead of the system PATH, so pnpm's own directory must be prepended as well.
+ * Container-managed wins: setup:dsh provisions pnpm next to dsh inside the prefix.
+ */
+let pnpmDirsPromise: Promise<string[]> | undefined
+export function pnpmBinDirs(): Promise<string[]> {
+  return (pnpmDirsPromise ??= probePnpmBinDirs())
+}
+
+async function probePnpmBinDirs(): Promise<string[]> {
+  const marker = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+  const dirs = dshRoots().filter((r) => existsSync(join(r, marker)))
+  if (!dirs.length) {
+    const res = await runCli('npm', ['prefix', '-g'], {
+      timeoutMs: 60_000,
+      shell: process.platform === 'win32'
+    })
+    const prefix = res.code === 0 ? res.stdout.trim() : ''
+    const candidate = process.platform === 'win32' ? prefix : join(prefix, 'bin')
+    if (candidate && existsSync(join(candidate, marker))) dirs.push(candidate)
+  }
+  return dirs
+}
+
+/**
+ * `npm install -g pnpm --ignore-scripts` skips pnpm v12's preinstall, which links
+ * the native `@pnpm/exe.<target>` binary onto the extensionless placeholder bins;
+ * npm's root `pnpm.cmd` then execs `<root>/node_modules/pnpm/pnpm`, a file
+ * CreateProcess cannot resolve — "not recognized as an internal command".
+ * Re-run that linking here (setup-dsh.mjs does the same at build time), and as a
+ * fallback for hosts without the optional platform package, re-point pnpm.cmd at
+ * pnpm's JS entry through node. Runtime self-updates re-install into userData/dsh,
+ * so this must be idempotent and callable after every install.
+ */
+export function repairPnpmCmd(root: string): void {
+  if (process.platform !== 'win32') return
+  linkNativePnpm(root)
+  const mjs = join(root, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+  const cmd = join(root, 'pnpm.cmd')
+  if (!existsSync(mjs) || !existsSync(cmd)) return
+  const desired =
+    '@ECHO off\r\nSETLOCAL\r\nIF EXIST "%~dp0node.exe" (\r\n  "%~dp0node.exe" "%~dp0node_modules\\pnpm\\bin\\pnpm.mjs" %*\r\n) ELSE (\r\n  node "%~dp0node_modules\\pnpm\\bin\\pnpm.mjs" %*\r\n)\r\nENDLOCAL\r\nEXIT /b %ERRORLEVEL%\r\n'
+  try {
+    if (readFileSync(cmd, 'utf-8') === desired) return
+    writeFileSync(cmd, desired, 'utf-8')
+    pnpmDirsPromise = undefined
+  } catch {
+    /* read-only root: probes fall back to other candidates */
+  }
+}
+
+/** Copy the optional-deps native pnpm.exe over the placeholder bins (pnpm/pn/pnpx/pnx). */
+function linkNativePnpm(root: string): void {
+  const pkgDir = join(root, 'node_modules', 'pnpm')
+  const manifest = join(pkgDir, 'package.json')
+  if (!existsSync(manifest)) return
+  let pkg: { optionalDependencies?: Record<string, string> }
+  try {
+    pkg = JSON.parse(readFileSync(manifest, 'utf-8'))
+  } catch {
+    return
+  }
+  const target = Object.keys(pkg.optionalDependencies ?? {}).find((k) => k.startsWith('@pnpm/exe.'))
+  if (!target) return
+  const binFile = target.includes('win32-arm64') ? 'pnpm-arm64.exe' : 'pnpm.exe'
+  const native = join(root, 'node_modules', ...target.split('/'), binFile)
+  if (!existsSync(native)) return
+  try {
+    const buf = readFileSync(native)
+    for (const name of ['pnpm', 'pn', 'pnpx', 'pnx']) {
+      for (const suffix of ['', '.exe']) {
+        const dest = join(pkgDir, name + suffix)
+        if (name !== 'pnpm' && !suffix && !existsSync(dest)) continue
+        writeFileSync(dest, buf)
+      }
+    }
+  } catch {
+    /* EPERM on a running exe: the .cmd rewrite below still restores forwarding */
+  }
+}
+
+function pnpmMissingError(): Error {
+  return new Error('未找到 pnpm（dsh 的插件管理依赖 pnpm）。请先执行: npm install -g pnpm')
+}
+
+async function dshEnv(profileDir: string): Promise<NodeJS.ProcessEnv> {
+  // With npm_config_prefix installs the shims sit directly in each root (pnpm.cmd)
+  // and node_modules/.bin may not exist at all — put the roots on PATH too.
+  const nodeExe = resolveDshNodeExePath()
+  const dirs = [
+    dirname(nodeExe),
+    ...(await pnpmBinDirs()),
+    ...dshRoots().flatMap((r) => [r, join(r, 'node_modules', '.bin')])
+  ]
+  // The child (and every shell it spawns) must see the same plain-Node runtime
+  // that hosts dsh's node-pty; never let bundled/Electron node leak into it.
+  return envWithPATH(dirs, {
+    DSH_HOME: join(profileDir, '..', '..'),
+    DSH_NODE_PATH: nodeExe
+  })
+}
+
+/** dsh rejects these outright; "desktop" belongs to the Electron app */
+function validateProfileName(profile: string): string {
+  const p = profile.trim() || DEFAULT_PROFILE
+  if (!/^[\w.-]+$/.test(p) || p === '.' || p === '..' || p === 'node_modules') {
+    throw new Error(`非法 profile 名: ${profile}`)
+  }
+  if (p.toLowerCase() === 'desktop')
+    throw new Error('profile 名 "desktop" 由 dsh 的 Electron 应用保留')
+  return p
+}
+
+export async function getDshStatus(profile = DEFAULT_PROFILE): Promise<DshStatus> {
+  const safe = validateProfileName(profile)
+  const profileDir = resolveDshProfileDir(safe)
+  const base: DshStatus = {
+    installed: false,
+    profile: safe,
+    profileDir,
+    pnpmFound: (await pnpmBinDirs()).length > 0
+  }
+  const bin = dshBinCandidates().find((p) => existsSync(p))
+  if (!bin)
+    return {
+      ...base,
+      error: '未安装 @deepseek-ai/dsh（npm run setup:dsh 或 npm install @deepseek-ai/dsh）'
+    }
+  const pkgDir = dshPackageDir()
+  if (!pkgDir) return { ...base, binPath: bin, error: 'dsh 包缺少 package.json' }
+  try {
+    const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf-8'))
+    return { ...base, installed: true, version: pkg.version, binPath: bin }
+  } catch (err) {
+    return { ...base, binPath: bin, error: `dsh 包损坏：${(err as Error).message}` }
+  }
+}
+
+/** run the dsh launcher with args; returns stdout or throws with stderr */
+async function runDsh(
+  args: string[],
+  opts: { timeoutMs?: number; profile?: string } = {}
+): Promise<string> {
+  const status = await getDshStatus(opts.profile)
+  if (!status.binPath) throw new Error(status.error || 'dsh 不可用')
+  // bin.js carries a `#!/usr/bin/env node` shebang cmd.exe can't execute (silent exit 0),
+  // so anything that isn't a .cmd/.bat shim runs as `node <bin.js> …` via plain Node
+  // (resolveDshNodeExePath — dsh's node-pty terminals cannot load under Electron's ABI).
+  const viaNode = !/\.(cmd|bat)$/i.test(status.binPath)
+  const res = await runCli(
+    viaNode ? resolveDshNodeExePath() : status.binPath,
+    viaNode ? [status.binPath, ...args] : args,
+    {
+      env: await dshEnv(status.profileDir),
+      shell: process.platform === 'win32' && !viaNode,
+      timeoutMs: opts.timeoutMs ?? 10 * 60_000
+    }
+  )
+  // First boot of a profile prints an informational "initialized profile …" notice
+  // on stderr while exiting 0 — success, not an error (code is what counts).
+  if (res.code !== 0)
+    throw new Error(res.stderr.slice(-2000) || res.stdout.slice(-2000) || `dsh 退出码 ${res.code}`)
+  return res.stdout
+}
+
+/** forward to pnpm inside the profile dir via `dsh plugin --profile <name> ...` */
+export async function dshPluginForward(
+  pnpmArgs: string[],
+  profile = DEFAULT_PROFILE
+): Promise<string> {
+  if (!(await pnpmBinDirs()).length) throw pnpmMissingError()
+  return runDsh(['plugin', '--profile', profile, ...pnpmArgs], {
+    timeoutMs: 15 * 60_000,
+    profile
+  })
+}
+
+interface ProfileManifest {
+  bundles: string[]
+  dependencies: Record<string, string>
+}
+
+/**
+ * Read a profile's layer list + dependency map. dsh writes the bundle stack to
+ * `package.json` under `dsh.profile.bundles` after each reconcile, so that is the
+ * authoritative source once the profile exists; `dsh.profile` (top level) is only
+ * present in scaffolds we wrote ourselves.
+ */
+function readProfileManifest(profileDir: string): ProfileManifest {
+  let pkg: Record<string, unknown> = {}
+  try {
+    pkg = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf-8'))
+  } catch {
+    return { bundles: [], dependencies: {} }
+  }
+  const dependencies = Object.assign({}, (pkg.dependencies as Record<string, string>) || {})
+  const dshSection = (pkg.dsh || {}) as Record<string, unknown>
+  const profileSection = (dshSection.profile || {}) as Record<string, unknown>
+  let bundles: string[] = []
+  if (Array.isArray(profileSection.bundles)) bundles = profileSection.bundles.map(String)
+  else if (Array.isArray(dshSection.bundles))
+    bundles = (dshSection.bundles as unknown[]).map(String)
+  else {
+    try {
+      const raw = JSON.parse(readFileSync(join(profileDir, 'dsh.profile'), 'utf-8'))
+      if (Array.isArray(raw.bundles)) bundles = raw.bundles.map(String)
+    } catch {
+      /* no manifest yet */
+    }
+  }
+  return { bundles, dependencies }
+}
+
+export function listDshPlugins(profile = DEFAULT_PROFILE): DshPluginInfo[] {
+  const profileDir = resolveDshProfileDir(profile)
+  const { bundles, dependencies } = readProfileManifest(profileDir)
+  const out: DshPluginInfo[] = []
+  const seen = new Set<string>()
+  for (const [name, range] of Object.entries(dependencies)) {
+    if (name.startsWith('@deepseek-ai/dsh-base')) continue
+    out.push({ name, version: String(range), source: 'profile' })
+    seen.add(name)
+  }
+  for (const b of bundles) {
+    if (seen.has(b)) continue
+    out.push({ name: b, version: installedBundleVersion(b) || '(bundled)', source: 'bundle' })
+  }
+  return out
+}
+
+/** version of a bundle resolved from the dsh installation, when it is present there */
+function installedBundleVersion(name: string): string | null {
+  for (const root of dshRoots()) {
+    try {
+      return JSON.parse(
+        readFileSync(join(root, 'node_modules', ...name.split('/'), 'package.json'), 'utf-8')
+      ).version
+    } catch {
+      /* try the next root */
+    }
+  }
+  return null
+}
+
+/** register the launcher profile as a pages/<id> entry by writing container.json (no file copying) */
+export function createDshPage(profile: string, port: number): string {
+  const safe = validateProfileName(profile)
+  const id = `dsh-${safe}`
+  const dir = join(resolvePagesDir(), id)
+  if (existsSync(join(dir, 'container.json'))) throw new Error(`pages/${id} 已存在`)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    join(dir, 'container.json'),
+    JSON.stringify(
+      {
+        name: `DSH (${safe})`,
+        description: `由容器管理的 @deepseek-ai/dsh profile「${safe}」，插件在本机 userData 的 profile 目录内管理`,
+        kind: 'dsh',
+        dsh: { profile: safe, port }
+      },
+      null,
+      2
+    )
+  )
+  return id
+}
+
+function validateNpmSpec(spec: string): string {
+  const s = spec.trim()
+  if (
+    !/^(@[\w.-]+\/)?[\w.-]+(@([\d.x^~*|-]+|tag|alpha|beta|next|\*))?$/i.test(s) &&
+    !/^https?:\/\//i.test(s) &&
+    !/^git[@+]/i.test(s) &&
+    !/\.git(#.+)?$/.test(s)
+  ) {
+    throw new Error(`非法包名/地址: ${s}`)
+  }
+  return s
+}
+
+export async function installDshPlugin(spec: string, profile = DEFAULT_PROFILE): Promise<void> {
+  const s = validateNpmSpec(spec)
+  await dshPluginForward(['add', s], profile)
+}
+
+export async function uninstallDshPlugin(name: string, profile = DEFAULT_PROFILE): Promise<void> {
+  const s = validateNpmSpec(name)
+  await dshPluginForward(['remove', s], profile)
+}
+
+/** update one plugin: npm → pnpm update <name>; git → resolve remote HEAD and re-add <url>#<sha> */
+export async function updateDshPlugin(
+  name: string,
+  channel: DshUpdateChannel,
+  gitUrl?: string,
+  profile = DEFAULT_PROFILE
+): Promise<string> {
+  if (channel === 'git') {
+    if (!gitUrl) throw new Error('git 更新需要提供仓库地址')
+    const sha = await remoteHeadSha(gitUrl)
+    await dshPluginForward(['add', `${gitUrl}#${sha}`], profile)
+    return `已更新至 ${gitUrl}#${sha.slice(0, 8)}`
+  }
+  const s = validateNpmSpec(name)
+  await dshPluginForward(['update', s], profile)
+  return `已通过 npm 更新 ${s}`
+}
+
+export async function updateAllDshPlugins(profile = DEFAULT_PROFILE): Promise<string> {
+  return (await dshPluginForward(['update', '--latest'], profile)).slice(-2000)
+}
+
+const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
+
+/**
+ * git dependency specs, e.g. github:user/repo#<sha> / github:user/repo#v1.2.3 /
+ * git+https://…​.git#<sha>. Captures the raw ref after `#` and whether it is a commit sha,
+ * so callers can compare a pinned tag against the remote's latest tag (not just HEAD shas).
+ */
+function parseGitSpec(version: string): { repo: string; ref?: string; isSha: boolean } | null {
+  const from = (repo: string, ref?: string): { repo: string; ref?: string; isSha: boolean } => ({
+    repo,
+    ref,
+    isSha: !!ref && /^[0-9a-f]{7,40}$/i.test(ref)
+  })
+  const m = /^github:([\w.-]+\/[\w.-]+?)(?:\.git)?(?:#(.+))?$/i.exec(version)
+  if (m) return from(`https://github.com/${m[1]}.git`, m[2])
+  const n = /^(?:git\+)?(https?:\/\/[^\s#]+\.git)(?:#(.+))?$/i.exec(version)
+  if (n) return from(n[1], n[2])
+  return null
+}
+
+/**
+ * Highest semver tag of a remote git repo, with its commit sha (resolved from the
+ * annotated-tag deref line). Lets git-pinned dsh plugins surface a real version number
+ * instead of a bare short sha. Returns null when the repo publishes no semver tags.
+ */
+async function latestGitTag(repo: string): Promise<{ version: string; sha: string } | null> {
+  if (/[\s;`$&|]/.test(repo)) return null
+  const res = await runCli('git', ['ls-remote', '--tags', repo], { timeoutMs: 60_000 })
+  if (res.code !== 0) return null
+  const tagSha = new Map<string, string>()
+  const commitSha = new Map<string, string>()
+  for (const line of res.stdout.split(/\r?\n/)) {
+    const parts = line.trim().split(/\s+/)
+    if (parts.length < 2) continue
+    const [sha, ref] = parts
+    const deref = /^refs\/tags\/(.+)\^\{\}$/.exec(ref)
+    if (deref) {
+      commitSha.set(deref[1], sha)
+      continue
+    }
+    const m = /^refs\/tags\/(.+)$/.exec(ref)
+    if (m) tagSha.set(m[1], sha)
+  }
+  let bestName: string | null = null
+  let bestVer: string | null = null
+  for (const name of tagSha.keys()) {
+    const ver = name.replace(/^v/i, '')
+    if (!/^\d+\.\d+\.\d+/.test(ver)) continue
+    if (!bestVer || isNewerVersion(bestVer, ver)) {
+      bestVer = ver
+      bestName = name
+    }
+  }
+  if (!bestName) return null
+  const sha = commitSha.get(bestName) || tagSha.get(bestName) || ''
+  return { version: bestVer as string, sha }
+}
+
+function isNewerVersion(installed: string, latest: string): boolean {
+  // strip leading range operators (^ ~ >= < = * v) so a caret range like "^1.2.3"
+  // isn't misread as major version 0 (which would flag every ranged plugin as outdated)
+  const clean = (s: string): string => s.replace(/^[\^~>=<*v]+/i, '').trim()
+  if (!/^\d/.test(clean(installed)) || !/^\d/.test(clean(latest))) return false
+  const seg = (s: string): number[] => clean(s).split(/[.+-]/).map((x) => parseInt(x, 10) || 0)
+  const a = seg(installed)
+  const b = seg(latest)
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (b[i] || 0) > (a[i] || 0)
+  }
+  return false
+}
+
+async function npmLatestVersion(name: string): Promise<string> {
+  const res = await runCli(
+    'npm',
+    ['view', name, 'version', '--registry', NPM_REGISTRY_MIRROR],
+    { timeoutMs: 30_000, shell: process.platform === 'win32' }
+  )
+  return res.code === 0 ? res.stdout.trim().replace(/^v/, '') : ''
+}
+
+/**
+ * New-version hints for every profile plugin: npm deps are compared against the
+ * mirror registry's latest (semver); git deps surface the remote's latest semver tag as the
+ * version number and compare it against the pinned ref (tag semver, or commit sha for sha-pinned
+ * deps). Repos with no semver tags fall back to a HEAD-sha comparison. Failed lookups yield no
+ * hint instead of an error.
+ */
+export async function checkDshPluginUpdates(profile = DEFAULT_PROFILE): Promise<DshPluginUpdate[]> {
+  const plugins = listDshPlugins(profile).filter((p) => p.source === 'profile')
+  return Promise.all(
+    plugins.map(async (p): Promise<DshPluginUpdate> => {
+      const git = parseGitSpec(p.version)
+      try {
+        if (git) {
+          const tag = await latestGitTag(git.repo)
+          if (tag) {
+            // repo publishes semver tags → show the version number, compare against the pinned ref
+            let updateAvailable: boolean
+            if (git.isSha) updateAvailable = (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
+            else if (git.ref) {
+              const instVer = git.ref.replace(/^v/i, '')
+              updateAvailable = /^\d/.test(instVer)
+                ? isNewerVersion(instVer, tag.version)
+                : (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
+            } else updateAvailable = false
+            return { name: p.name, updateAvailable, latest: tag.version }
+          }
+          // no tags: fall back to a HEAD-sha comparison (only meaningful for sha-pinned deps)
+          if (!git.isSha) return { name: p.name, updateAvailable: false }
+          const head = await remoteHeadSha(git.repo)
+          return { name: p.name, updateAvailable: head !== git.ref, latest: head.slice(0, 8) }
+        }
+        const latest = await npmLatestVersion(p.name)
+        if (latest && isNewerVersion(p.version, latest))
+          return { name: p.name, updateAvailable: true, latest }
+        return { name: p.name, updateAvailable: false }
+      } catch {
+        return { name: p.name, updateAvailable: false }
+      }
+    })
+  )
+}
+
+async function remoteHeadSha(repoUrl: string): Promise<string> {
+  if (/[\s;`$&|]/.test(repoUrl)) throw new Error('仓库地址包含非法字符')
+  const res = await runCli('git', ['ls-remote', repoUrl, 'HEAD'], { timeoutMs: 60_000 })
+  if (res.code !== 0) throw new Error(res.stderr.slice(-500) || 'git ls-remote 失败')
+  const sha = res.stdout.split(/\s+/)[0]
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('无法解析远端 HEAD')
+  return sha
+}
+
+/**
+ * Spawn spec for pages.ts when kind=dsh: `node <dsh lib/bin.js> --profile <name> --host … --port …`.
+ * The trailing flags belong to the profile's app (parsed by @deepseek-ai/dsh-web-app),
+ * and `--no-open` keeps the container's webview as the only surface.
+ */
+export async function dshSpawnCommand(
+  profile: string,
+  port: number
+): Promise<{ cmd: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> {
+  const status = await getDshStatus(profile)
+  if (!status.installed) throw new Error(status.error || 'dsh 不可用')
+  const binJs = dshBinJs()
+  if (!binJs) throw new Error('未找到 @deepseek-ai/dsh/lib/bin.js（先运行 npm run setup:dsh）')
+  mkdirSync(status.profileDir, { recursive: true })
+  return {
+    cmd: resolveDshNodeExePath(),
+    args: [binJs, '--profile', profile, '--host', '127.0.0.1', '--port', String(port), '--no-open'],
+    cwd: status.profileDir,
+    env: await dshEnv(status.profileDir)
+  }
+}
