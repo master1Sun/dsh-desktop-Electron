@@ -1,0 +1,16 @@
+{
+  "name": "OpenClaw Gateway",
+  "description": "由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置在 ~/.openclaw",
+  "kind": "openclaw",
+  "openclaw": {
+    "port": 18789
+  },
+  "envVars": [
+    {
+      "key": "OPENCLAW_HOME",
+      "label": "OPENCLAW 配置目录",
+      "defaultPath": "~/.openclaw",
+      "description": "留空即用 ~/.openclaw"
+    }
+  ]
+}

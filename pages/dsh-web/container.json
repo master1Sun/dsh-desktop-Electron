@@ -1,0 +1,17 @@
+{
+  "name": "DSH (web)",
+  "description": "由容器管理的 @deepseek-ai/dsh profile「web」，插件在本机 userData 的 profile 目录内管理",
+  "kind": "dsh",
+  "dsh": {
+    "profile": "web",
+    "port": 8899
+  },
+  "envVars": [
+    {
+      "key": "DSH_HOME",
+      "label": "DSH 配置目录",
+      "defaultPath": "~/.dsh",
+      "description": "留空即用 ~/.dsh"
+    }
+  ]
+}
