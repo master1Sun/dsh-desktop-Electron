@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { simpleGit, type SimpleGitOptions } from 'simple-git'
-import type { UpdateCheckResult, UpdateOutcome } from '../shared/types'
+import { CONTAINER_REPO_URL, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
 import { m } from './i18n'
 
 const CACHE_TTL_MS = 5 * 60_1000
@@ -16,6 +16,39 @@ let cache: CacheEntry | null = null
 function makeGit(dir: string): ReturnType<typeof simpleGit> {
   const options: Partial<SimpleGitOptions> = { baseDir: dir, maxConcurrentProcesses: 4 }
   return simpleGit(options)
+}
+
+/** Strip credentials (https://user:token@…) and a trailing slash so two URLs point at one repo. */
+export function normalizeRepoUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '').replace(/^(https?:\/\/)[^@/\s]+@/i, '$1')
+}
+
+/** True when the remote URL is an SSH (`git@host:path`) or `ssh://` form. */
+export function isSshRemote(url: string): boolean {
+  return /^ssh:\/\//i.test(url) || /^[^@\s/]+@[^:\s]+:/.test(url.trim())
+}
+
+/**
+ * A credential-embedded https URL fails auth against GitHub ("support for password
+ * authentication was removed" — the username hints at it). Re-clone without the
+ * credentials: public repos fetch anonymously, private ones need a working helper.
+ */
+export function recloneUrl(url: string): string {
+  return isSshRemote(url) ? url : normalizeRepoUrl(url).replace(/^(https?:\/\/)[^@/\s]+@/i, '$1')
+}
+
+/**
+ * Clone `url` into `dir`, retrying once with the credential-stripped URL.
+ * The caller's own git config (e.g. an insteadOf rewrite to SSH) still applies.
+ */
+export async function cloneWithAuthFallback(dir: string, url: string): Promise<void> {
+  try {
+    await simpleGit({ baseDir: process.cwd() }).clone(url, dir)
+  } catch (err) {
+    const fallback = recloneUrl(url)
+    if (fallback === normalizeRepoUrl(url)) throw err
+    await simpleGit({ baseDir: process.cwd() }).clone(fallback, dir)
+  }
 }
 
 export async function checkUpdates(
@@ -39,7 +72,8 @@ export async function checkOne(
   const base: UpdateCheckResult = { name, dir, isContainer, ok: false }
   try {
     if (!existsSync(join(dir, '.git'))) {
-      return { ...base, error: m('git.notRepo') }
+      // An empty directory staged for the container clone still reads as "not initialized".
+      return { ...base, error: m(isContainer ? 'git.notRepoContainer' : 'git.notRepo') }
     }
     const git = makeGit(dir)
     const branch = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim()
@@ -69,6 +103,11 @@ export async function checkOne(
 export async function performUpdate(target: { name: string; dir: string }): Promise<UpdateOutcome> {
   try {
     const git = makeGit(target.dir)
+    if (!existsSync(join(target.dir, '.git'))) {
+      // Container was updated from a packaged (asar) install: materialize the repo once,
+      // then fall through to the normal pull flow.
+      await cloneWithAuthFallback(target.dir, CONTAINER_REPO_URL)
+    }
     const status = await git.status()
     if (!status.isClean()) {
       return {
@@ -81,7 +120,10 @@ export async function performUpdate(target: { name: string; dir: string }): Prom
     const before = (await git.revparse(['HEAD'])).trim()
     await git.pull(['--ff-only'])
     const after = (await git.revparse(['HEAD'])).trim()
-    return { name: target.name, ok: true, updated: before !== after }
+    if (before === after) return { name: target.name, ok: true, updated: false }
+    // The container's own source was just cloned/updated — running it needs an app relaunch.
+    const msg = existsSync(join(target.dir, 'package.json')) ? m('git.initialized') : undefined
+    return { name: target.name, ok: true, updated: true, message: msg }
   } catch (err) {
     return { name: target.name, ok: false, updated: false, error: (err as Error).message }
   }

@@ -1,5 +1,8 @@
 export const NODE_VERSION_REQUIRED = 'v24.21.0'
 
+/** Upstream git repo the desktop container itself updates from (self-update via git pull). */
+export const CONTAINER_REPO_URL = 'https://github.com/master1Sun/dsh-desktop-Electron.git'
+
 export type PageStatus = 'stopped' | 'starting' | 'running' | 'error'
 
 /** 'terminal' = a CLI-only project: no HTTP port, runs inside the embedded terminal */
@@ -222,6 +225,8 @@ export const IPC = {
   EnvRoot: 'container:env-root',
   CheckUpdates: 'container:check-updates',
   PerformUpdate: 'container:perform-update',
+  /** relaunch the app after the container updated its own source from git */
+  RelaunchApp: 'container:relaunch-app',
   ShowWindow: 'container:show-window',
   QuitApp: 'container:quit-app',
   OnStateChanged: 'container:state-changed',

@@ -40,13 +40,13 @@ vi.mock('electron-store', () => {
 import { installFromLocalDir, removePage } from '../src/main/installer'
 
 describe('installFromLocalDir container.json seeding', () => {
-  it('writes a generated manifest with the form port when the project ships none', () => {
+  it('writes a generated manifest with the form port when the project ships none', async () => {
     const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
     const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
     try {
       mkdirSync(join(srcBase, 'app-a'))
       writeFileSync(join(srcBase, 'app-a', 'server.js'), '// stub\n')
-      const id = installFromLocalDir(pagesDir, join(srcBase, 'app-a'), 'app-a', 17699)
+      const id = await installFromLocalDir(pagesDir, join(srcBase, 'app-a'), 'app-a', 17699)
       const metaFile = join(pagesDir, id, 'container.json')
       expect(existsSync(metaFile)).toBe(true)
       const raw = JSON.parse(readFileSync(metaFile, 'utf-8'))
@@ -58,7 +58,7 @@ describe('installFromLocalDir container.json seeding', () => {
     }
   })
 
-  it('never rewrites an existing container.json', () => {
+  it('never rewrites an existing container.json', async () => {
     const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
     const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
     try {
@@ -68,7 +68,7 @@ describe('installFromLocalDir container.json seeding', () => {
         join(srcBase, 'app-b', 'container.json'),
         JSON.stringify({ name: 'keep-me', port: 3000 })
       )
-      const id = installFromLocalDir(pagesDir, join(srcBase, 'app-b'), 'app-b', 17699)
+      const id = await installFromLocalDir(pagesDir, join(srcBase, 'app-b'), 'app-b', 17699)
       const raw = JSON.parse(readFileSync(join(pagesDir, id, 'container.json'), 'utf-8'))
       expect(raw.name).toBe('keep-me')
       expect(raw.port).toBe(3000) // override lives in pagePorts, not the manifest
@@ -78,14 +78,41 @@ describe('installFromLocalDir container.json seeding', () => {
     }
   })
 
-  it('generates nothing when the form port is left empty', () => {
+  it('generates nothing when the form port is left empty', async () => {
     const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
     const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
     try {
       mkdirSync(join(srcBase, 'app-c'))
       writeFileSync(join(srcBase, 'app-c', 'server.js'), '// stub\n')
-      const id = installFromLocalDir(pagesDir, join(srcBase, 'app-c'), 'app-c')
+      const id = await installFromLocalDir(pagesDir, join(srcBase, 'app-c'), 'app-c')
       expect(existsSync(join(pagesDir, id, 'container.json'))).toBe(false)
+    } finally {
+      rmSync(srcBase, { recursive: true, force: true })
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+
+  it('adopts a git origin so a local copy keeps receiving updates', async () => {
+    const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
+    try {
+      mkdirSync(join(srcBase, 'app-d'))
+      writeFileSync(join(srcBase, 'app-d', 'server.js'), '// stub\n')
+      const id = await installFromLocalDir(
+        pagesDir,
+        join(srcBase, 'app-d'),
+        'app-d',
+        undefined,
+        'https://github.com/master1Sun/dsh-desktop-Electron.git'
+      )
+      const { simpleGit } = await import('simple-git')
+      const git = simpleGit({ baseDir: join(pagesDir, id) })
+      expect(await git.checkIsRepo()).toBe(true)
+      const remotes = await git.getRemotes(true)
+      expect(remotes.find((r) => r.name === 'origin')?.refs.fetch).toBe(
+        'https://github.com/master1Sun/dsh-desktop-Electron.git'
+      )
+      expect((await git.revparse(['HEAD'])).trim()).toMatch(/^[0-9a-f]{40}$/)
     } finally {
       rmSync(srcBase, { recursive: true, force: true })
       rmSync(pagesDir, { recursive: true, force: true })

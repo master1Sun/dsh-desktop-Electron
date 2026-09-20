@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { checkUpdates, performUpdate, clearUpdateCache } from '../src/main/git-updates'
+import { checkUpdates, performUpdate, clearUpdateCache, normalizeRepoUrl, recloneUrl } from '../src/main/git-updates'
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -67,4 +67,19 @@ describe('git update detection', () => {
     expect(out.error).toContain('未提交改动')
     rmSync(join(repo, 'dirty.txt'), { force: true })
   }, 30_000)
+})
+
+describe('repo URL helpers', () => {
+  it('normalizes credentials and trailing slashes', () => {
+    expect(normalizeRepoUrl('https://user:tok@github.com/a/b.git/')).toBe(
+      'https://github.com/a/b.git'
+    )
+  })
+
+  it('strips credentials from https clone URLs but keeps ssh forms', () => {
+    expect(recloneUrl('https://user:x-oauth-basic@github.com/a/b.git')).toBe(
+      'https://github.com/a/b.git'
+    )
+    expect(recloneUrl('git@github.com:a/b.git')).toBe('git@github.com:a/b.git')
+  })
 })

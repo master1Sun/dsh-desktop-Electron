@@ -1,6 +1,6 @@
 import { reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UpdateCheckResult, UpdateOutcome } from '@shared/types'
 import { t } from '../i18n'
 
@@ -38,6 +38,23 @@ export const useUpdatesStore = defineStore('updates', () => {
       else if (!res.ok)
         ElMessage.warning(res.error || t('updates.incomplete', { name: target.name }))
       else if (res.updated) ElMessage.success(t('updates.updated', { name: target.name }))
+      if (res.ok && res.updated && target.isContainer) {
+        try {
+          await ElMessageBox.confirm(
+            t('updates.relaunchConfirm'),
+            t('updates.relaunchTitle'),
+            {
+              type: 'warning',
+              confirmButtonText: t('updates.relaunchNow'),
+              cancelButtonText: t('common.cancel')
+            }
+          )
+          await window.container.relaunchApp()
+        } catch {
+          /* user deferred the restart */
+        }
+        return
+      }
       await check(true)
     } catch (err) {
       ElMessage.error((err as Error).message)

@@ -1,11 +1,43 @@
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join, sep } from 'node:path'
-import { simpleGit, type SimpleGit } from 'simple-git'
+import { simpleGit } from 'simple-git'
 import { readPageMeta, BUILTIN_PAGE_IDS, type ContainerManifest } from './pages'
 import { getSettings, isValidPort, updateSettings } from './store'
+import { normalizeRepoUrl, cloneWithAuthFallback } from './git-updates'
 import { m, msgIn } from './i18n'
 
-const git: SimpleGit = simpleGit()
+/** A local folder path the user meant instead of a URL (e.g. D:\GitProject\dsh-desktop-Electron). */
+export function looksLikeLocalPath(s: string): boolean {
+  return (
+    /^[a-z]:[\\/]/i.test(s) ||
+    s.startsWith('\\\\') ||
+    s.startsWith('./') ||
+    s.startsWith('../') ||
+    s.startsWith('.\\') ||
+    s.startsWith('..\\') ||
+    s.startsWith('/')
+  )
+}
+
+/**
+ * Re-point a freshly cloned page at its source repo when it was copied without `.git`
+ * (local-folder import of a git working tree): set origin to the canonical URL and
+ * make a first commit so `git pull --ff-only` has a base to fast-forward onto.
+ */
+async function adoptOrigin(dir: string, originUrl: string): Promise<void> {
+  const pageGit = simpleGit({ baseDir: dir })
+  await pageGit.init(['-b', 'main'])
+  await pageGit.add('.')
+  // The user's global identity may be absent; pin it for this one commit instead of failing.
+  await pageGit.commit('Imported into DSH container (origin tracked for updates)', [
+    '--allow-empty',
+    '--author',
+    'DSH Container <container@local>',
+    '--date',
+    'now'
+  ])
+  await pageGit.remote(['add', 'origin', originUrl])
+}
 
 /** Record the chosen port as a per-page override instead of editing the project's container.json. */
 function applyPortOverride(dirName: string, port?: number): void {
@@ -47,7 +79,8 @@ export async function installFromGit(
   pagesDir: string,
   repoUrl: string,
   name?: string,
-  port?: number
+  port?: number,
+  originUrl?: string
 ): Promise<string> {
   const url = validateRepoUrl(repoUrl)
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
@@ -59,7 +92,15 @@ export async function installFromGit(
   const target = join(pagesDir, dirName)
   if (existsSync(target)) throw new Error(m('dsh.pageExists', { id: dirName }))
   mkdirSync(pagesDir, { recursive: true })
-  await git.clone(url, target, ['--depth', '1'])
+  // Deep clone (not --depth 1): a later divergent history needs real merge bases to update.
+  await cloneWithAuthFallback(target, url)
+  if (originUrl && normalizeRepoUrl(originUrl) !== normalizeRepoUrl(url)) {
+    try {
+      await simpleGit({ baseDir: target }).remote(['set-url', 'origin', originUrl.trim()])
+    } catch {
+      /* keep the cloned URL as origin */
+    }
+  }
   applyPortOverride(dirName, port) // before validation: an entered port stands in for a missing declared one
   try {
     readPageMeta(pagesDir, dirName)
@@ -73,12 +114,13 @@ export async function installFromGit(
   return dirName
 }
 
-export function installFromLocalDir(
+export async function installFromLocalDir(
   pagesDir: string,
   srcDir: string,
   name?: string,
-  port?: number
-): string {
+  port?: number,
+  originUrl?: string
+): Promise<string> {
   if (!existsSync(srcDir) || !existsSync(join(srcDir, '.')))
     throw new Error(m('install.srcMissing', { dir: srcDir }))
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
@@ -101,6 +143,15 @@ export function installFromLocalDir(
     throw err
   }
   seedContainerManifest(pagesDir, dirName, port)
+  const origin = (originUrl || '').trim()
+  if (origin) {
+    try {
+      await adoptOrigin(target, origin)
+    } catch (err) {
+      // Import already succeeded — an origin that failed to attach only costs auto-updates.
+      console.warn('[installer] adoptOrigin failed (ignored):', (err as Error).message)
+    }
+  }
   return dirName
 }
 

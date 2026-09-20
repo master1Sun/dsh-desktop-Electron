@@ -96,8 +96,15 @@ export const usePagesStore = defineStore('pages', () => {
     return dirName
   }
 
-  async function installDir(dir: string, name?: string, port?: number): Promise<string> {
-    const dirName = await unwrap<string>(window.container.installPageFromDir(dir, name, port))
+  async function installDir(
+    dir: string,
+    name?: string,
+    port?: number,
+    originUrl?: string
+  ): Promise<string> {
+    const dirName = await unwrap<string>(
+      window.container.installPageFromDir(dir, name, port, originUrl)
+    )
     await refresh()
     return dirName
   }

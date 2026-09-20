@@ -1,4 +1,4 @@
-import { ipcMain, shell, BrowserWindow, webContents, nativeTheme, dialog } from 'electron'
+import { ipcMain, shell, BrowserWindow, webContents, nativeTheme, dialog, app } from 'electron'
 import {
   IPC,
   type IpcResult,
@@ -164,10 +164,17 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(
     IPC.InstallPageFromDir,
-    async (_e, srcDir: string, name?: string, port?: number): Promise<IpcResult> => {
+    async (
+      _e,
+      srcDir: string,
+      name?: string,
+      port?: number,
+      originUrl?: string
+    ): Promise<IpcResult> => {
       try {
-        const dirName = installFromLocalDir(resolvePagesDir(), srcDir, name, port)
+        const dirName = await installFromLocalDir(resolvePagesDir(), srcDir, name, port, originUrl)
         registry.reconcile()
+        clearUpdateCache()
         return ok(dirName)
       } catch (err) {
         return fail(err)
@@ -295,6 +302,14 @@ export function registerIpc(registry: PageRegistry): void {
     } catch (err) {
       return fail(err)
     }
+  })
+
+  // The container updated its own source: relaunch so the new code runs. before-quit
+  // still gets to shut the pages down; --dsh-relaunched bypasses the single-instance lock.
+  ipcMain.handle(IPC.RelaunchApp, (): IpcResult => {
+    app.relaunch({ args: [...process.argv.slice(1), '--dsh-relaunched'] })
+    app.exit(0)
+    return ok(true)
   })
 
   // ---- built-in terminal (embedded PTY) ----

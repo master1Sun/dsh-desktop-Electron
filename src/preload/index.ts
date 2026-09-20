@@ -11,8 +11,8 @@ const api = {
   getPageLogs: (id: string) => ipcRenderer.invoke(IPC.GetPageLogs, id),
   installPageFromGit: (repoUrl: string, name?: string, port?: number) =>
     ipcRenderer.invoke(IPC.InstallPageFromGit, repoUrl, name, port),
-  installPageFromDir: (srcDir: string, name?: string, port?: number) =>
-    ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port),
+  installPageFromDir: (srcDir: string, name?: string, port?: number, originUrl?: string) =>
+    ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port, originUrl),
   chooseDirectory: (title?: string) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id: string) => ipcRenderer.invoke(IPC.RemovePage, id),
   setPagePort: (id: string, port?: number) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
@@ -23,6 +23,7 @@ const api = {
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
   checkUpdates: (force?: boolean) => ipcRenderer.invoke(IPC.CheckUpdates, force),
   performUpdate: (target: UpdateCheckResult) => ipcRenderer.invoke(IPC.PerformUpdate, target),
+  relaunchApp: () => ipcRenderer.invoke(IPC.RelaunchApp),
   dshStatus: (profile?: string) => ipcRenderer.invoke(IPC.DshStatus, profile),
   dshListPlugins: (profile?: string) => ipcRenderer.invoke(IPC.DshListPlugins, profile),
   dshCheckUpdates: (profile?: string) => ipcRenderer.invoke(IPC.DshPluginUpdates, profile),

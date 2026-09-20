@@ -173,10 +173,17 @@ function dialogWarn(msg: string): void {
   dialog.showMessageBox({ type: 'warning', title: m('dialog.title'), message: msg }).catch(() => undefined)
 }
 
-const gotLock = app.requestSingleInstanceLock()
+// A relaunch right after a container self-update must not be treated as a second instance:
+// the old process is mid-exit (app.exit) and may still hold the lock for a moment.
+const relaunched = process.argv.includes('--dsh-relaunched')
+const gotLock = relaunched || app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
 } else {
+  if (relaunched) {
+    // Take over the lock so the next launch (even without the flag) dedupes normally.
+    setTimeout(() => app.requestSingleInstanceLock(), 1000)
+  }
   app.on('second-instance', showWindow)
 
   app.whenReady().then(async () => {

@@ -4,7 +4,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, FolderOpened } from '@element-plus/icons-vue'
 import { usePagesStore, type PageState } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
+import { CONTAINER_REPO_URL } from '@shared/types'
 import { t } from '../i18n'
+
+/** Mirror of the main-process check: a filesystem path typed where a URL was expected. */
+function looksLikeLocalPath(s: string): boolean {
+  return (
+    /^[a-z]:[\\/]/i.test(s) || s.startsWith('\\\\') || /^\.\.?[/\\]/.test(s) || s.startsWith('/')
+  )
+}
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
@@ -37,17 +45,37 @@ function parsePort(raw: string): number | undefined {
 }
 
 async function installGit(): Promise<void> {
-  if (!gitForm.url.trim()) {
+  const url = gitForm.url.trim()
+  if (!url) {
     ElMessage.warning(t('pageMgr.msgEnterRepo'))
+    return
+  }
+  // A local folder pasted into the URL field: import it as a copy. Only the container
+  // repo itself gets adopted for git updates — a blind origin would mislead the pull.
+  if (looksLikeLocalPath(url)) {
+    installing.value = 'dir'
+    try {
+      const isContainerRepo = /[/\\]dsh-desktop-Electron(\/|$)/i.test(url)
+      const id = await pagesStore.installDir(
+        url,
+        gitForm.name.trim() || undefined,
+        parsePort(gitForm.port),
+        isContainerRepo ? CONTAINER_REPO_URL : undefined
+      )
+      ElMessage.success(t('pageMgr.msgCopiedDir', { id }))
+      gitForm.url = ''
+      gitForm.name = ''
+      gitForm.port = ''
+    } catch (err) {
+      ElMessage.error((err as Error).message)
+    } finally {
+      installing.value = null
+    }
     return
   }
   installing.value = 'git'
   try {
-    const id = await pagesStore.installGit(
-      gitForm.url.trim(),
-      gitForm.name.trim() || undefined,
-      parsePort(gitForm.port)
-    )
+    const id = await pagesStore.installGit(url, gitForm.name.trim() || undefined, parsePort(gitForm.port))
     ElMessage.success(t('pageMgr.msgInstalledGit', { id }))
     gitForm.url = ''
     gitForm.name = ''

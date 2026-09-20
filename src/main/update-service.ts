@@ -2,13 +2,14 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
-import { checkOne, performUpdate as gitPull } from './git-updates'
+import { simpleGit } from 'simple-git'
+import { checkOne, performUpdate as gitPull, normalizeRepoUrl } from './git-updates'
 import { getNodeExePath } from './node-runtime'
 import { getDshStatus, repairPnpmCmd } from './dsh'
 import { openclawVersion } from './openclaw'
-import { resolveProjectDir } from './store'
+import { resolveInstallDir, resolveProjectDir } from './store'
 import { m } from './i18n'
-import type { PageMeta, UpdateCheckResult, UpdateOutcome } from '../shared/types'
+import { CONTAINER_REPO_URL, type PageMeta, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
 
 const REGISTRY = process.env.npm_config_registry || 'https://registry.npmmirror.com/'
 const DSH_PKG = '@deepseek-ai/dsh'
@@ -128,15 +129,52 @@ async function checkBuiltin(
   }
 }
 
+/** Where the container's own git checkout lives / should be created. */
+function containerGitDir(): string {
+  if (!app.isPackaged) return resolveProjectDir()
+  const candidate = join(resolveInstallDir(), 'dsh-desktop-Electron')
+  try {
+    mkdirSync(candidate, { recursive: true })
+    return candidate
+  } catch {
+    // Install dir not writable (Program Files): keep the update in userData.
+    return join(app.getPath('userData'), 'container-src')
+  }
+}
+
+/** Canonical remote URL of a checkout ('' when there is none). */
+async function originOf(dir: string): Promise<string> {
+  try {
+    const remotes = await simpleGit({ baseDir: dir }).getRemotes(true)
+    return remotes.find((r) => r.name === 'origin')?.refs.fetch || ''
+  } catch {
+    return ''
+  }
+}
+
 async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
-  const container = { name: containerName(), dir: resolveProjectDir() }
+  const dev = !app.isPackaged
+  const projectDir = resolveProjectDir()
+  // In dev the container row is the repo checkout itself; packaged installs point at a
+  // git clone materialized next to the exe (or userData when that isn't writable).
+  const dir = dev ? projectDir : containerGitDir()
+  const container = { name: containerName(), dir }
   return Promise.all([
-    checkOne(container.name, container.dir, true).then((r) => ({
-      ...r,
-      source: 'git' as const,
-      action: 'pull' as const,
-      canAutoUpdate: true
-    })),
+    (async (): Promise<UpdateCheckResult> => {
+      const r = await checkOne(container.name, dir, true)
+      if (r.ok) {
+        // Only offer pull when the checkout actually tracks the upstream repo.
+        const origin = await originOf(dir)
+        const sameRepo =
+          normalizeRepoUrl(origin).toLowerCase() ===
+          normalizeRepoUrl(CONTAINER_REPO_URL).toLowerCase()
+        return { ...r, source: 'git' as const, action: 'pull' as const, canAutoUpdate: sameRepo }
+      }
+      if (dev) return { ...r, source: 'git' as const, canAutoUpdate: false }
+      // Packaged: "not a git repo" means the clone never happened — the update button
+      // initializes it from the canonical URL instead.
+      return { ...r, source: 'git' as const, action: 'pull' as const, canAutoUpdate: true }
+    })(),
     ...pages.filter((p) => !p.id.startsWith('__')).map(checkPage),
     checkBuiltin(
       m('upd.dshName'),

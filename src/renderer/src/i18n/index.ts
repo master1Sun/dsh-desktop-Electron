@@ -340,7 +340,10 @@ const zh: Dict = {
   },
   updates: {
     incomplete: '{name} 更新未完成',
-    updated: '{name} 已更新'
+    updated: '{name} 已更新',
+    relaunchTitle: '重启应用',
+    relaunchConfirm: '桌面控制台源码已更新，需要重启应用才能运行新版本。是否立即重启？',
+    relaunchNow: '立即重启'
   },
   terminal: {
     newTab: '新建终端',
@@ -724,7 +727,11 @@ const en: Dict = {
   },
   updates: {
     incomplete: 'Update of {name} did not complete',
-    updated: '{name} updated'
+    updated: '{name} updated',
+    relaunchTitle: 'Restart required',
+    relaunchConfirm:
+      'The desktop container source was updated. Restart the app to run the new version. Restart now?',
+    relaunchNow: 'Restart now'
   },
   terminal: {
     newTab: 'New terminal',
