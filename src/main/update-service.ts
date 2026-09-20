@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { app } from 'electron'
 import { simpleGit } from 'simple-git'
 import { checkOne, performUpdate as gitPull, normalizeRepoUrl } from './git-updates'
+import { applyAsarUpdate, checkAsarUpdate } from './asar-updates'
 import { getNodeExePath } from './node-runtime'
 import { getDshStatus, repairPnpmCmd } from './dsh'
 import { openclawVersion } from './openclaw'
@@ -143,19 +144,6 @@ async function checkBuiltin(
   }
 }
 
-/** Where the container's own git checkout lives / should be created. */
-function containerGitDir(): string {
-  if (!app.isPackaged) return resolveProjectDir()
-  const candidate = join(resolveInstallDir(), 'dsh-desktop-Electron')
-  try {
-    mkdirSync(candidate, { recursive: true })
-    return candidate
-  } catch {
-    // Install dir not writable (Program Files): keep the update in userData.
-    return join(app.getPath('userData'), 'container-src')
-  }
-}
-
 /** Canonical remote URL of a checkout ('' when there is none). */
 async function originOf(dir: string): Promise<string> {
   try {
@@ -167,28 +155,28 @@ async function originOf(dir: string): Promise<string> {
 }
 
 async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
-  const dev = !app.isPackaged
-  const projectDir = resolveProjectDir()
-  // In dev the container row is the repo checkout itself; packaged installs point at a
-  // git clone materialized next to the exe (or userData when that isn't writable).
-  const dir = dev ? projectDir : containerGitDir()
-  const container = { name: containerName(), dir }
+  const name = containerName()
   return Promise.all([
-    (async (): Promise<UpdateCheckResult> => {
-      const r = await checkOne(container.name, dir, true)
-      if (r.ok) {
-        // Only offer pull when the checkout actually tracks the upstream repo.
-        const origin = await originOf(dir)
-        const sameRepo =
-          normalizeRepoUrl(origin).toLowerCase() ===
-          normalizeRepoUrl(CONTAINER_REPO_URL).toLowerCase()
-        return { ...r, source: 'git' as const, action: 'pull' as const, canAutoUpdate: sameRepo }
-      }
-      if (dev) return { ...r, source: 'git' as const, canAutoUpdate: false }
-      // Packaged: "not a git repo" means the clone never happened — the update button
-      // initializes it from the canonical URL instead.
-      return { ...r, source: 'git' as const, action: 'pull' as const, canAutoUpdate: true }
-    })(),
+    // Packaged installs update over-the-air (release branch → app.asar swap at boot).
+    // A dev checkout is the user's own working tree — leave it to their editor/CLI.
+    app.isPackaged
+      ? checkAsarUpdate(name, resolveInstallDir())
+      : (async (): Promise<UpdateCheckResult> => {
+          const r = await checkOne(name, resolveProjectDir(), true)
+          if (r.ok) {
+            const origin = await originOf(resolveProjectDir())
+            const sameRepo =
+              normalizeRepoUrl(origin).toLowerCase() ===
+              normalizeRepoUrl(CONTAINER_REPO_URL).toLowerCase()
+            return {
+              ...r,
+              source: 'git' as const,
+              action: 'pull' as const,
+              canAutoUpdate: sameRepo
+            }
+          }
+          return { ...r, source: 'git' as const, canAutoUpdate: false }
+        })(),
     ...pages.filter((p) => !p.id.startsWith('__')).map(checkPage),
     checkBuiltin(
       m('upd.dshName'),
@@ -374,6 +362,8 @@ export async function performUpdate(target: UpdateCheckResult): Promise<UpdateOu
   switch (target.action) {
     case 'pull':
       return gitPull({ name: target.name, dir: target.dir })
+    case 'apply-asar':
+      return applyAsarUpdate(target.name)
     case 'reprovision':
       return target.packageName === DSH_PKG ? updateDshSelf() : reprovisionOpenclaw()
     case 'manual':

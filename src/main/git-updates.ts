@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { simpleGit, type SimpleGitOptions } from 'simple-git'
-import { CONTAINER_REPO_URL, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
+import type { UpdateCheckResult, UpdateOutcome } from '../shared/types'
 import { m } from './i18n'
 
 const CACHE_TTL_MS = 5 * 60_1000
@@ -72,8 +72,7 @@ export async function checkOne(
   const base: UpdateCheckResult = { name, dir, isContainer, ok: false }
   try {
     if (!existsSync(join(dir, '.git'))) {
-      // An empty directory staged for the container clone still reads as "not initialized".
-      return { ...base, error: m(isContainer ? 'git.notRepoContainer' : 'git.notRepo') }
+      return { ...base, error: m('git.notRepo') }
     }
     const git = makeGit(dir)
     const branch = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim()
@@ -103,11 +102,6 @@ export async function checkOne(
 export async function performUpdate(target: { name: string; dir: string }): Promise<UpdateOutcome> {
   try {
     const git = makeGit(target.dir)
-    if (!existsSync(join(target.dir, '.git'))) {
-      // Container was updated from a packaged (asar) install: materialize the repo once,
-      // then fall through to the normal pull flow.
-      await cloneWithAuthFallback(target.dir, CONTAINER_REPO_URL)
-    }
     const status = await git.status()
     if (!status.isClean()) {
       return {
@@ -120,10 +114,7 @@ export async function performUpdate(target: { name: string; dir: string }): Prom
     const before = (await git.revparse(['HEAD'])).trim()
     await git.pull(['--ff-only'])
     const after = (await git.revparse(['HEAD'])).trim()
-    if (before === after) return { name: target.name, ok: true, updated: false }
-    // The container's own source was just cloned/updated — running it needs an app relaunch.
-    const msg = existsSync(join(target.dir, 'package.json')) ? m('git.initialized') : undefined
-    return { name: target.name, ok: true, updated: true, message: msg }
+    return { name: target.name, ok: true, updated: before !== after }
   } catch (err) {
     return { name: target.name, ok: false, updated: false, error: (err as Error).message }
   }

@@ -112,8 +112,7 @@ const zh: Dict = {
   'install.illegalPageId': '非法 page id',
 
   'git.notRepo': '不是 git 仓库（本地目录安装或已移除）',
-  'git.notRepoContainer': '尚未初始化，点击“更新”将从官方仓库获取源码',
-  'git.initialized': '桌面控制台源码已就绪，重启应用后生效',
+  'git.asarDownloaded': '已下载 v{version}，重启应用后生效（启动异常会自动回滚）',
   'git.noOrigin': '无 origin 远端',
   'git.branchMissing': '远端没有分支 {branch}',
   'git.dirtySkipped': '工作区有未提交改动，已跳过（请手动处理）',
@@ -228,8 +227,7 @@ const en: Dict = {
   'install.illegalPageId': 'Illegal page id',
 
   'git.notRepo': 'Not a git repository (installed from a local folder, or removed)',
-  'git.notRepoContainer': 'Not initialized yet — click Update to fetch the source from the official repo',
-  'git.initialized': 'Desktop container source is ready; restart the app to apply',
+  'git.asarDownloaded': 'v{version} downloaded; restart the app to apply (auto-rolls back if it fails to boot)',
   'git.noOrigin': 'No origin remote',
   'git.branchMissing': 'The remote has no branch {branch}',
   'git.dirtySkipped': 'The working tree has uncommitted changes; skipped (handle manually)',

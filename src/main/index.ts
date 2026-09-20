@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, Menu, nativeImage, Tray, shell } from 'electron'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
 import { PageRegistry } from './pages'
@@ -50,6 +50,41 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[container] unhandled rejection:', reason)
 })
+
+/**
+ * Tell the bootstrapper (boot.cjs) this app path boots healthy, so its crash-guard
+ * stops rolling back. The marker content is the full app path currently running — a
+ * stale marker from an older update never matches and triggers another rollback.
+ */
+function markBootOk(): void {
+  if (!app.isPackaged) return
+  try {
+    mkdirSync(app.getPath('userData'), { recursive: true })
+    writeFileSync(join(app.getPath('userData'), 'dsh-boot-ok-marker'), app.getAppPath())
+  } catch (err) {
+    console.warn('[container] cannot write boot-ok marker:', (err as Error).message)
+  }
+}
+
+/**
+ * A failed OTA switch can leave the new asar unpacked-less (Electron only unpacks
+ * native modules from the *bundled* asar at install time). node-pty then fails to
+ * load; copying the bundled app.asar.unpacked next to the update fixes it. One-time,
+ * best-effort: an existing destination is never touched.
+ */
+function ensureUnpackedForUpdate(): void {
+  if (!app.isPackaged) return
+  try {
+    const resources = dirname(app.getPath('exe')) // <installDir>/resources
+    const appPath = app.getAppPath()
+    if (!appPath.startsWith(join(resources, 'updates'))) return
+    const src = join(resources, 'app.asar.unpacked')
+    const dst = join(dirname(appPath), 'app.asar.unpacked')
+    if (existsSync(src) && !existsSync(dst)) cpSync(src, dst, { recursive: true })
+  } catch (err) {
+    console.warn('[container] unpacked-copy for update failed (ignored):', (err as Error).message)
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -188,6 +223,8 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     electronApp.setAppUserModelId('com.dsh.desktop-container')
+    ensureUnpackedForUpdate()
+    markBootOk()
     app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
     await verifyNodeRuntime()

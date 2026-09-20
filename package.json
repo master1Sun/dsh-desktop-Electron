@@ -3,7 +3,7 @@
   "productName": "Desktop Container",
   "version": "0.1.0",
   "description": "桌面端 Node 容器：内置 Node v24.21.0，pages 插件项目托管与页面视图、配置持久化、git 更新检测",
-  "main": "./out/main/index.js",
+  "main": "./src/boot.cjs",
   "author": "sunjuntao",
   "type": "module",
   "scripts": {
@@ -19,6 +19,7 @@
     "setup:node": "node scripts/setup-node.mjs",
     "setup:openclaw": "node scripts/setup-openclaw.mjs",
     "setup:dsh": "node scripts/setup-dsh.mjs",
+    "publish:update": "node scripts/publish-update.mjs",
     "prebuild": "npm run ensure:pages && npm run setup:openclaw && npm run setup:dsh",
     "ensure:pages": "node scripts/ensure-pages.mjs",
     "test": "vitest run && vitest run --config vitest.ui.config.ts",
@@ -43,6 +44,7 @@
   "devDependencies": {
     "@deepseek-ai/dsh": "^0.1.6-alpha.2",
     "@electron-toolkit/eslint-config-prettier": "3.0.0",
+    "@electron/asar": "^4.3.0",
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
     "@types/node": "^22.19.1",
