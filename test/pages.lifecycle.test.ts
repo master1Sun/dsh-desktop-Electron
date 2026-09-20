@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { createConnection } from 'node:net'
 
 // pages.ts -> node-runtime.ts imports electron (app), so stub it for vitest.
 // getPath('userData') is needed because spawning a plain page now reads persisted
@@ -62,132 +61,54 @@ function setPagePort(id: string, port?: number): void {
   updateSettings({ pagePorts })
 }
 
-async function waitForPortClosed(port: number, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (!(await tcpOpen(port))) return
-    await new Promise((r) => setTimeout(r, 150))
-  }
-}
-
-function tcpOpen(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const s = createConnection({ host: '127.0.0.1', port }, () => {
-      s.destroy()
-      resolve(true)
-    })
-    s.on('error', () => resolve(false))
-    setTimeout(() => {
-      s.destroy()
-      resolve(false)
-    }, 800)
-  })
-}
-
 describe('page meta parsing', () => {
-  it('reads dsh-plugin-market container.json', () => {
-    const meta = readPageMeta(pagesDir, 'dsh-plugin-market')
-    expect(meta.port).toBe(8889)
-    expect(meta.startCommand).toBe('node server.js')
+  it('reads the dsh-web page as dsh kind', () => {
+    const meta = readPageMeta(pagesDir, 'dsh-web')
+    expect(meta.kind).toBe('dsh')
+    expect(meta.port).toBe(8899)
+    expect(meta.startCommand).toBe('dsh --profile web')
+    expect(meta.dshProfile).toBe('web')
+    expect(meta.builtin).toBe(true)
   })
 
-  it('scanInstalledPages includes dsh-plugin-market', () => {
+  it('reads the openclaw page as openclaw kind', () => {
+    const meta = readPageMeta(pagesDir, 'openclaw')
+    expect(meta.kind).toBe('openclaw')
+    expect(meta.port).toBe(18789)
+    expect(meta.builtin).toBe(true)
+  })
+
+  it('scanInstalledPages lists the two builtin pages and no retired ones', () => {
     const list = scanInstalledPages(pagesDir)
-    expect(list.some((p) => p.id === 'dsh-plugin-market')).toBe(true)
-  })
-
-  it('reads the built-in codex page as terminal kind', () => {
-    const meta = readPageMeta(pagesDir, 'codex')
-    expect(meta.kind).toBe('terminal')
-    expect(meta.startCommand).toBe('codex')
-    expect(meta.envVars?.some((v) => v.key === 'CODEX_HOME')).toBe(true)
+    expect(list.some((p) => p.id === 'dsh-web')).toBe(true)
+    expect(list.some((p) => p.id === 'openclaw')).toBe(true)
+    // codex / dsh-plugin-market were retired: codex removed, market moved into the renderer.
+    expect(list.some((p) => p.id === 'codex')).toBe(false)
+    expect(list.some((p) => p.id === 'dsh-plugin-market')).toBe(false)
   })
 
   it('user port override wins over container.json without rewriting it', () => {
-    setPagePort('dsh-plugin-market', 8890)
+    setPagePort('openclaw', 18800)
     try {
-      const meta = readPageMeta(pagesDir, 'dsh-plugin-market')
-      expect(meta.port).toBe(8889)
-      expect(meta.containerPort).toBe(8890)
+      const meta = readPageMeta(pagesDir, 'openclaw')
+      expect(meta.port).toBe(18789)
+      expect(meta.containerPort).toBe(18800)
     } finally {
-      setPagePort('dsh-plugin-market', undefined)
+      setPagePort('openclaw', undefined)
     }
-    expect(readPageMeta(pagesDir, 'dsh-plugin-market').containerPort).toBe(8889)
+    expect(readPageMeta(pagesDir, 'openclaw').containerPort).toBe(18789)
   })
 })
 
-describe('page lifecycle with bundled node', () => {
-  let registry: PageRegistry
-
-  beforeAll(() => {
-    registry = new PageRegistry({ pagesDir, projectDir })
-  })
-
-  afterAll(async () => {
-    registry.shutdownAll()
-    await new Promise((r) => setTimeout(r, 500))
-  })
-
-  it('starts dsh-plugin-market and reaches running state', async () => {
-    const state = await registry.start('dsh-plugin-market')
-    expect(state.status).toBe('running')
-    expect(state.pid).toBeTypeOf('number')
-    expect(await tcpOpen(8889)).toBe(true)
-  }, 40_000)
-
-  it('collects logs while running', async () => {
-    // stdout arrives asynchronously after readiness — poll before asserting
-    let logs: string[] = []
-    for (let i = 0; i < 25; i++) {
-      logs = registry.logs('dsh-plugin-market')
-      if (logs.join('\n').includes('dsh-plugin-market listening on 8889')) break
-      await new Promise((r) => setTimeout(r, 200))
-    }
-    expect(logs.join('\n')).toContain('dsh-plugin-market listening on 8889')
-  }, 10_000)
-
-  it('serves the plugin market page with recommended repos', async () => {
-    const res = await fetch('http://127.0.0.1:8889/')
-    expect(res.status).toBe(200)
-    const html = await res.text()
-    expect(html).toContain('DSH 插件市场')
-    expect(html).toContain('master1Sun/dsh-prompt-library')
-    expect(html).toContain('master1Sun/dsh-file-workbench-lib')
-    expect(html).toContain('master1Sun/dsh-QQbot')
-  })
-
-  it('stop kills the process and frees the port', async () => {
-    registry.stop('dsh-plugin-market')
-    await waitForPortClosed(8889)
-    expect(registry.get('dsh-plugin-market')?.status).toBe('stopped')
-    expect(await tcpOpen(8889)).toBe(false)
-  }, 15_000)
-
-  it('honors a custom port when spawning', async () => {
-    setPagePort('dsh-plugin-market', 8891)
-    try {
-      registry.reconcile() // refresh cached metas so the override takes effect
-      const state = await registry.start('dsh-plugin-market')
-      expect(state.status).toBe('running')
-      expect(state.url).toContain(':8891')
-      expect(await tcpOpen(8891)).toBe(true)
-      expect(await tcpOpen(8889)).toBe(false)
-      registry.stop('dsh-plugin-market')
-      await waitForPortClosed(8891)
-    } finally {
-      setPagePort('dsh-plugin-market', undefined)
-    }
-  }, 40_000)
-
+describe('page start errors', () => {
   it('start failure surfaces error status', async () => {
-    // non-listening command: node -e that exits immediately
-    const badId = '__bad__'
-    // inject a fake entry via reconcile is not possible; test waitPortReady timeout instead
+    // non-listening port: waitPortReady must time out with the ready error
     await expect(waitPortReady(59_432, 1500)).rejects.toThrow(/未就绪/)
-    void badId
   }, 10_000)
+})
 
-  it('terminal-kind page: start() refuses and points at the embedded terminal', async () => {
+describe('terminal-kind pages', () => {
+  it('start() refuses and points at the embedded terminal', async () => {
     // A temp pages root keeps the fixture isolated from the real pages/ dir.
     const tmpRoot = mkdtempSync(join(tmpdir(), 'dsh-cli-page-'))
     const id = 'cli-terminal-fixture'

@@ -2,10 +2,11 @@ import { reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ElMessage } from 'element-plus'
 import type { UpdateCheckResult, UpdateOutcome } from '@shared/types'
+import { t } from '../i18n'
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
   const res = await p
-  if (!res.ok) throw new Error(res.error || '未知错误')
+  if (!res.ok) throw new Error(res.error || t('common.unknownError'))
   return res.data as T
 }
 
@@ -34,8 +35,9 @@ export const useUpdatesStore = defineStore('updates', () => {
     try {
       const res = await unwrap<UpdateOutcome>(window.container.performUpdate(target))
       if (res.message) ElMessage.success(res.message)
-      else if (!res.ok) ElMessage.warning(res.error || `${target.name} 更新未完成`)
-      else if (res.updated) ElMessage.success(`${target.name} 已更新`)
+      else if (!res.ok)
+        ElMessage.warning(res.error || t('updates.incomplete', { name: target.name }))
+      else if (res.updated) ElMessage.success(t('updates.updated', { name: target.name }))
       await check(true)
     } catch (err) {
       ElMessage.error((err as Error).message)

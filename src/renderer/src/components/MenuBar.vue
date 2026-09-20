@@ -4,6 +4,7 @@ import { Moon, Refresh, Sunny } from '@element-plus/icons-vue'
 import whaleIcon from '../assets/whale.png'
 import type { PageState } from '../stores/pages'
 import type { ExternalSite } from '../../../shared/types'
+import { t } from '../i18n'
 
 export type PanelKind =
   'view' | 'pages' | 'external' | 'dsh' | 'openclaw' | 'updates' | 'about' | 'apps'
@@ -17,6 +18,8 @@ const props = defineProps<{
   themeMode: 'auto' | 'light' | 'dark'
   pages: PageState[]
   activePageId: string | null
+  /** pageId -> a start/stop call is in flight (drives the switcher's spinner) */
+  busyPages?: Record<string, boolean>
   switcherTitle: string
   isMaximized: boolean
   canOperate: boolean
@@ -29,6 +32,7 @@ const emit = defineEmits<{
   'open-panel': [panel: PanelKind]
   'toggle-theme': []
   'select-page': [id: string]
+  'start-page': [id: string]
   'open-terminal': [id: string]
   'preview-site': [id: string]
   manage: []
@@ -39,7 +43,12 @@ const emit = defineEmits<{
 }>()
 
 const themeLabel = computed(
-  () => ({ auto: '跟随系统', light: '浅色', dark: '深色' })[props.themeMode]
+  () =>
+    ({
+      auto: t('settings.themeAuto'),
+      light: t('settings.themeLight'),
+      dark: t('settings.themeDark')
+    })[props.themeMode]
 )
 
 /** A group entry either previews/starts something (acts immediately) or opens its panel. */
@@ -66,9 +75,14 @@ interface MenuGroup {
   sepBefore?: 'runtime'
 }
 
-/** Traffic-light / status labels in Chinese for tooltips. */
+/** Traffic-light / status labels for tooltips, in the active language. */
 const statusText = (s: string): string =>
-  ({ running: '运行中', starting: '启动中', error: '启动失败', stopped: '已停止' })[s] || s
+  ({
+    running: t('menu.running'),
+    starting: t('menu.starting'),
+    error: t('menu.failed'),
+    stopped: t('menu.stopped')
+  })[s] || s
 
 /** Terminal-kind pages start their own CLI in the full-surface terminal, not the webview. */
 const pickPage =
@@ -76,24 +90,38 @@ const pickPage =
   () =>
     p.kind === 'terminal' ? emit('open-terminal', p.id) : emit('select-page', p.id)
 
+/**
+ * A page is only switchable once it actually runs — web/server pages must be started
+ * first (the row then offers a ▶ button). Terminal pages have no port to wait for and
+ * external pages open in the OS browser, so neither needs a start step.
+ */
+function needsStart(p: PageState): boolean {
+  return !p.external && p.kind !== 'terminal' && p.status !== 'running'
+}
+
+function onStartPage(p: PageState): void {
+  if (props.busyPages?.[p.id]) return
+  emit('start-page', p.id)
+}
+
 const groups = computed<MenuGroup[]>(() => {
   const running = props.pages.filter((p) => p.status === 'running' && !p.external)
   return [
     // ── 视图/页面内容 ──
     {
       kind: 'view',
-      label: '视图',
+      label: t('menu.view'),
       items: [],
       actions: [
         {
           id: 'reload',
-          title: '刷新当前页',
+          title: t('menu.reloadCurrent'),
           disabled: !props.canOperate,
           run: () => emit('reload')
         },
         {
           id: 'inspect',
-          title: '调试当前页 (DevTools)',
+          title: t('menu.debugDevtools'),
           disabled: !props.canOperate,
           run: () => emit('inspect')
         }
@@ -101,7 +129,7 @@ const groups = computed<MenuGroup[]>(() => {
     },
     {
       kind: 'pages',
-      label: '页面',
+      label: t('menu.pages'),
       items: running.map((p) => ({
         id: p.id,
         title: p.name,
@@ -112,27 +140,27 @@ const groups = computed<MenuGroup[]>(() => {
     },
     {
       kind: 'apps',
-      label: '应用',
+      label: t('menu.apps'),
       items: [
         ...props.externalSites.map((s) => ({
           id: s.id,
           title: s.name,
           run: () => emit('preview-site', s.id)
         })),
-        { id: 'external', title: '外部地址…', panel: 'external' as const },
+        { id: 'external', title: t('menu.externalAddress'), panel: 'external' as const },
         { id: 'dsh', title: 'DSH', panel: 'dsh' as const },
         { id: 'openclaw', title: 'OpenClaw', panel: 'openclaw' as const }
       ]
     },
     // ── 应用 ──
+    { kind: 'about', label: t('menu.about'), items: [] },
     {
       kind: 'updates',
-      label: '更新',
+      label: t('menu.updates'),
       badge: props.outdatedCount ? String(props.outdatedCount) : '',
       items: [],
-      sepBefore: 'runtime'
-    },
-    { kind: 'about', label: '关于', items: [] }
+      // sepBefore: 'runtime'
+    }
   ]
 })
 
@@ -144,12 +172,17 @@ const childKinds: Partial<Record<PanelKind, PanelKind[]>> = {
 }
 
 function isActive(g: MenuGroup): boolean {
+  // Mutually exclusive: an open dropdown list owns the highlight and hides the
+  // panel surface (`props.current && !listGroup` in the template), so while
+  // `listGroup` is set no other group may light up. Otherwise the open panel —
+  // or the group owning it via `childKinds` — is the single active trigger.
+  if (listGroup.value) return listGroup.value === g.kind
   const cur = props.current
   return cur !== null && (cur === g.kind || (childKinds[g.kind]?.includes(cur) ?? false))
 }
 
 const openDropdown = ref<'switcher' | 'menu' | null>(null)
-/** Which group's item list is currently shown (independent of the open panel). */
+/** Which group's list is currently shown (independent of the open panel). */
 const listGroup = ref<PanelKind | null>(null)
 const anchorEl = ref<HTMLElement | null>(null)
 
@@ -164,33 +197,32 @@ function toggleSwitcher(ev: MouseEvent): void {
 function toggleMenu(group: MenuGroup, ev: MouseEvent): void {
   const el = ev.currentTarget as HTMLElement
   if (group.items.length || group.actions?.length) {
-    // Panel and drop list are mutually exclusive: clicking a trigger whose panel is
-    // up swaps to its quick-action list; otherwise the click shows the list ('apps',
-    // which has no panel of its own) or opens the panel.
-    const showsList =
-      (props.current === group.kind && !listGroup.value) ||
-      (group.kind === 'apps' && !listGroup.value)
-    if (showsList) {
-      openDropdown.value = 'menu'
-      listGroup.value = group.kind
-      anchorEl.value = el
-      return
-    }
+    // Plain toggle semantics: a trigger opens its surface on first click and a
+    // re-click closes everything — no swapping between panel and drop list.
     if (listGroup.value === group.kind) {
-      // Re-click while the list shows: peel it (panel, if any, surfaces again).
+      // The list is showing: peel it (a panel underneath resurfaces).
       closeDropdowns()
       return
     }
+    if (props.current === group.kind) {
+      // Its panel is up: re-click closes the panel entirely.
+      closeDropdowns()
+      emit('open', null)
+      return
+    }
     closeDropdowns()
-    if (props.current === group.kind) emit('open', null)
-    else if (group.kind !== 'apps') emit('open', group.kind) // 'apps' has no panel — click just shows the list
+    if (group.kind !== 'apps') emit('open', group.kind)
+    else {
+      // 'apps' has no panel of its own — the click toggles its quick list.
+      openDropdown.value = 'menu'
+      listGroup.value = group.kind
+      anchorEl.value = el
+    }
     return
   }
   if (props.current === group.kind) emit('open', null)
   else {
-    openDropdown.value = null
-    listGroup.value = null
-    anchorEl.value = null
+    closeDropdowns()
     emit('open', group.kind)
   }
 }
@@ -243,8 +275,11 @@ async function close(): Promise<void> {
   <header class="menubar">
     <div class="brand">
       <img class="logo" :src="whaleIcon" alt="" draggable="false" />
-      <span class="title">Desktop Container</span>
-      <span class="running-badge" :title="`${props.runningCount} / ${props.totalCount} 运行中`">
+      <span class="title">{{ t('app.title') }}</span>
+      <span
+        class="running-badge"
+        :title="t('menu.runningBadge', { running: props.runningCount, total: props.totalCount })"
+      >
         {{ props.runningCount }}/{{ props.totalCount }}
       </span>
     </div>
@@ -259,23 +294,42 @@ async function close(): Promise<void> {
         <span class="caret">▾</span>
       </button>
       <div v-if="openDropdown === 'switcher'" class="dropdown switcher-menu">
-        <button
+        <div
           v-for="p in props.pages"
           :key="p.id"
-          class="drop-item"
+          class="drop-item switcher-item"
           :class="{ active: p.id === props.activePageId }"
-          @click="
-            () => {
-              closeDropdowns()
-              pickPage(p)()
-            }
-          "
         >
-          <span>{{ p.name }}</span>
+          <button
+            class="row-name"
+            :disabled="needsStart(p)"
+            :title="needsStart(p) ? t('menu.notRunningHint') : statusText(p.status)"
+            @click="
+              () => {
+                closeDropdowns()
+                pickPage(p)()
+              }
+            "
+          >
+            {{ p.name }}
+          </button>
+          <button
+            v-if="needsStart(p)"
+            class="row-start"
+            :title="
+              props.busyPages?.[p.id] ? t('menu.startingTip') : `${t('menu.start')} ${p.name}`
+            "
+            @click="onStartPage(p)"
+          >
+            <span v-if="props.busyPages?.[p.id]" class="mini-spinner" />
+            <svg v-else width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
+              <path d="M1.6 0.7 L8 4.5 L1.6 8.3 Z" fill="currentColor" />
+            </svg>
+          </button>
           <!-- Traffic light: running=green, error=red, starting=amber, stopped=grey. -->
           <i class="status-dot" :class="`dot-${p.status}`" :title="statusText(p.status)" />
-        </button>
-        <div v-if="!props.pages.length" class="drop-empty">暂无页面，打开「页面」面板安装</div>
+        </div>
+        <div v-if="!props.pages.length" class="drop-empty">{{ t('menu.switcherEmpty') }}</div>
       </div>
     </div>
 
@@ -321,18 +375,23 @@ async function close(): Promise<void> {
     <div class="spacer" />
 
     <div v-if="props.terminalMode" class="webview-actions">
-      <button class="act-btn" title="重启终端会话" @click="emit('restart-terminal')">
+      <button class="act-btn" :title="t('menu.restartTerminal')" @click="emit('restart-terminal')">
         <el-icon><Refresh /></el-icon>
       </button>
     </div>
 
     <div class="window-controls">
-      <button v-if="props.canOperate" class="win-btn" title="刷新当前页" @click="emit('reload')">
+      <button
+        v-if="props.canOperate"
+        class="win-btn"
+        :title="t('menu.reloadCurrent')"
+        @click="emit('reload')"
+      >
         <el-icon><Refresh /></el-icon>
       </button>
       <button
         class="win-btn theme-toggle"
-        :title="`主题：${themeLabel}（点击切换 白天/黑夜）`"
+        :title="t('menu.themeToggle', { mode: themeLabel })"
         @click="emit('toggle-theme')"
       >
         <el-icon><Sunny v-if="props.isDark" /><Moon v-else /></el-icon>
@@ -340,7 +399,7 @@ async function close(): Promise<void> {
       <button
         v-if="props.canOperate"
         class="win-btn"
-        title="部分功能（弹窗、剪贴板、原生对话框等）在内嵌视图里受限，用系统浏览器打开当前页面"
+        :title="t('menu.detach')"
         @click="emit('detach')"
       >
         <svg width="11" height="11" viewBox="0 0 11 11">
@@ -358,12 +417,16 @@ async function close(): Promise<void> {
           />
         </svg>
       </button>
-      <button class="win-btn" title="最小化" @click="minimize">
+      <button class="win-btn" :title="t('menu.minimize')" @click="minimize">
         <svg width="10" height="10" viewBox="0 0 10 10">
           <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.2" />
         </svg>
       </button>
-      <button class="win-btn" :title="props.isMaximized ? '还原' : '最大化'" @click="maximize">
+      <button
+        class="win-btn"
+        :title="props.isMaximized ? t('menu.restore') : t('menu.maximize')"
+        @click="maximize"
+      >
         <svg v-if="!props.isMaximized" width="10" height="10" viewBox="0 0 10 10">
           <rect
             x="1.5"
@@ -388,19 +451,21 @@ async function close(): Promise<void> {
           <path d="M3 3 V1 H9 V7 H7" fill="none" stroke="currentColor" stroke-width="1.2" />
         </svg>
       </button>
-      <button class="win-btn close" title="关闭（隐藏到托盘）" @click="close">
+      <button class="win-btn close" :title="t('menu.close')" @click="close">
         <svg width="10" height="10" viewBox="0 0 10 10">
           <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" stroke-width="1.2" />
         </svg>
       </button>
     </div>
 
-    <!-- Floating panels anchored under their trigger; they close via ✕ / Esc / re-click, never click-away. -->
+    <!-- Centered floating panels; they close via ✕ / Esc / re-click, never click-away. -->
     <div v-if="props.current && !listGroup" class="panel-anchor">
       <div class="panel-card">
         <div class="panel-head">
           <span class="panel-title">{{ groups.find((g) => g.kind === props.current)?.label }}</span>
-          <button class="panel-close" title="关闭 (Esc)" @click="emit('open', null)">✕</button>
+          <button class="panel-close" :title="t('menu.closeEsc')" @click="emit('open', null)">
+            ✕
+          </button>
         </div>
         <div class="panel-body">
           <slot v-if="props.current === 'view'" name="view" />
@@ -534,6 +599,12 @@ async function close(): Promise<void> {
   background: var(--surface-2);
 }
 
+.group-trigger.active {
+  background: var(--surface-2);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .badge {
   margin-left: 4px;
   font-size: 10.5px;
@@ -541,7 +612,7 @@ async function close(): Promise<void> {
   color: #1b1400;
   border-radius: 999px;
   padding: 0 5px;
-  line-height: 15px;
+  line-height: 12px;
 }
 
 .spacer {
@@ -649,6 +720,64 @@ async function close(): Promise<void> {
 
 .drop-item.active {
   color: var(--accent);
+}
+
+/* Switcher rows: name (switch) + ▶ (start) + traffic light. */
+.switcher-item {
+  gap: 8px;
+}
+
+.row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+
+.row-name:disabled {
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+
+.row-start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.row-start:hover {
+  border-color: var(--accent);
+}
+
+.mini-spinner {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--accent);
+  animation: mini-spin 0.7s linear infinite;
+}
+
+@keyframes mini-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .drop-item small {

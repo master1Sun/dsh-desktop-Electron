@@ -2,6 +2,7 @@ import { reactive, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { useTerminalStore } from './terminal'
 import type { EnvVarSpec } from '../../../shared/types'
+import { t } from '../i18n'
 
 export interface PageState {
   id: string
@@ -28,7 +29,7 @@ export interface PageState {
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
   const res = await p
-  if (!res.ok) throw new Error(res.error || '未知错误')
+  if (!res.ok) throw new Error(res.error || t('common.unknownError'))
   return res.data as T
 }
 

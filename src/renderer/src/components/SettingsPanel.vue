@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { usePagesStore } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import type { DefaultView } from '../stores/settings'
+import type { EnvRootInfo } from '../../../shared/types'
 import ExternalSitesManager from './ExternalSitesManager.vue'
+import { t } from '../i18n'
 
 const emit = defineEmits<{
   'apply-theme': [mode: 'auto' | 'light' | 'dark']
@@ -64,12 +66,48 @@ watch(
   { immediate: true }
 )
 
+/* ---- 环境目录 root ----
+   Every runtime's home dir defaults into <envRoot>/<runtime>; the root itself follows
+   the install dir unless the user pins one here. */
+const envRootInfo = ref<EnvRootInfo | null>(null)
+const envRootDraft = ref('')
+
+async function loadEnvRoot(): Promise<void> {
+  const res = await window.container.getEnvRoot().catch(() => null)
+  if (!res?.ok) return
+  envRootInfo.value = res.data as EnvRootInfo
+  envRootDraft.value = (envRootInfo.value?.custom ? envRootInfo.value.envRoot : '') || ''
+}
+
+/** Show `{envRoot}` placeholders resolved so the user sees where data actually lands. */
+function displayPath(p: string): string {
+  if (!p) return ''
+  return p.replace(
+    /\{envRoot\}/g,
+    envRootInfo.value?.envRoot || envRootInfo.value?.installDir || t('settings.envDir')
+  )
+}
+
+async function saveEnvRoot(value: string): Promise<void> {
+  await patch({ envRoot: value.trim() }, t('settings.envSavedRestart'))
+  await loadEnvRoot()
+}
+
+async function browseEnvRoot(): Promise<void> {
+  const res = await window.container.chooseDirectory(t('settings.chooseEnvDir')).catch(() => null)
+  if (!res?.ok || !res.data) return
+  envRootDraft.value = String(res.data)
+  await saveEnvRoot(envRootDraft.value)
+}
+
+onMounted(loadEnvRoot)
+
 async function savePageEnv(pageId: string, key: string, value: string): Promise<void> {
   const next: Record<string, Record<string, string>> = JSON.parse(
     JSON.stringify(settingsStore.settings.pageEnvs || {})
   )
   next[pageId] = { ...(next[pageId] || {}), [key]: value.trim() }
-  await patch({ pageEnvs: next }, '环境目录已保存，重启该页面生效')
+  await patch({ pageEnvs: next }, t('settings.pageEnvSaved'))
 }
 
 function decodeView(v: string): DefaultView {
@@ -86,24 +124,25 @@ const viewValue = computed({
     if (dv.kind === 'external') return `ext:${dv.url}`
     return 'none'
   },
-  set: (v: string) => void patch({ defaultView: decodeView(v) }, '默认视图已保存')
+  set: (v: string) => void patch({ defaultView: decodeView(v) }, t('settings.defaultViewSaved'))
 })
 
 const viewOptions = computed(() => {
   type Option = { value: string; label: string; disabled?: boolean }
   const plain: Option[] = [
-    { value: 'none', label: '不打开任何页面（显示欢迎页）' },
+    { value: 'none', label: t('settings.nonePage') },
+    // Not gated on `status === 'running'` anymore: the container now auto-starts the
+    // configured default page on launch, so any page can be picked.
     ...pagesStore.pages.map<Option>((p) => ({
       value: `page:${p.id}`,
-      label: `${p.name}${p.external ? '（外部）' : p.kind === 'dsh' ? '（DSH）' : p.kind === 'terminal' ? '（终端）' : p.containerPort || p.port ? ` :${p.containerPort || p.port}` : ''}`,
-      disabled: !p.external && p.status !== 'running'
+      label: `${p.name}${p.external ? t('settings.tagExternal') : p.kind === 'dsh' ? t('settings.tagDsh') : p.kind === 'terminal' ? t('settings.tagTerminal') : p.containerPort || p.port ? ` :${p.containerPort || p.port}` : ''}`
     }))
   ]
   const groups: { label: string; options: Option[] }[] = settingsStore.settings.lastExternalUrls
     .length
     ? [
         {
-          label: '最近使用的外部地址',
+          label: t('settings.recentExternal'),
           options: settingsStore.settings.lastExternalUrls.map((u) => ({
             value: `ext:${u}`,
             label: u
@@ -116,7 +155,7 @@ const viewOptions = computed(() => {
 
 async function patch(
   partial: Parameters<typeof settingsStore.patch>[0],
-  msg = '已保存'
+  msg = t('settings.saved')
 ): Promise<void> {
   try {
     await settingsStore.patch(partial)
@@ -128,15 +167,24 @@ async function patch(
 
 function onThemeChange(mode: 'auto' | 'light' | 'dark'): void {
   emit('apply-theme', mode)
-  patch({ theme: mode }, '主题已切换')
+  patch({ theme: mode }, t('settings.themeSwitched'))
+}
+
+/**
+ * Switching language persists the choice; App.vue's watcher applies it reactively. No toast on
+ * purpose: the whole panel re-renders immediately (self-evident feedback), and a toast raised
+ * here would still carry the *previous* language's "saved" text.
+ */
+function onLocaleChange(next: 'zh' | 'en'): void {
+  settingsStore.patch({ locale: next }).catch((err) => ElMessage.error((err as Error).message))
 }
 </script>
 
 <template>
   <div class="settings-panel">
-    <h3>界面与默认视图</h3>
-    <el-form label-width="126px" label-position="left" size="small">
-      <el-form-item label="默认打开页面">
+    <h3>{{ t('settings.interfaceTitle') }}</h3>
+    <el-form label-position="left" size="small">
+      <el-form-item :label="t('settings.defaultPage')">
         <el-select v-model="viewValue" style="width: 340px">
           <el-option
             v-for="opt in viewOptions.plain"
@@ -154,67 +202,102 @@ function onThemeChange(mode: 'auto' | 'light' | 'dark'): void {
             />
           </el-option-group>
         </el-select>
-        <div class="tip">
-          未运行的 DSH 页面会由容器按需自动启动，普通 page 请先在「Pages」菜单中运行。
-        </div>
+        <div class="tip">{{ t('settings.defaultPageTip') }}</div>
       </el-form-item>
 
-      <el-form-item label="外部地址">
+      <el-form-item :label="t('settings.externalAddress')">
         <ExternalSitesManager class="ext-inline" @preview="emit('preview-site', $event)" />
       </el-form-item>
 
-      <el-form-item label="外部地址打开方式">
+      <el-form-item :label="t('settings.externalOpenMode')">
         <el-radio-group
           :model-value="settingsStore.settings.openExternalIn"
           @update:model-value="patch({ openExternalIn: $event as 'embedded' | 'system-browser' })"
         >
-          <el-radio-button value="embedded">容器内嵌显示</el-radio-button>
-          <el-radio-button value="system-browser">系统默认浏览器</el-radio-button>
+          <el-radio-button value="embedded">{{ t('settings.embedded') }}</el-radio-button>
+          <el-radio-button value="system-browser">{{
+            t('settings.systemBrowser')
+          }}</el-radio-button>
         </el-radio-group>
       </el-form-item>
 
-      <el-form-item label="主题">
+      <el-form-item :label="t('settings.theme')">
         <el-radio-group
           :model-value="settingsStore.settings.theme"
           @update:model-value="onThemeChange($event as 'auto' | 'light' | 'dark')"
         >
-          <el-radio-button value="auto">跟随系统</el-radio-button>
-          <el-radio-button value="light">亮色</el-radio-button>
-          <el-radio-button value="dark">暗色</el-radio-button>
+          <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
+          <el-radio-button value="light">{{ t('settings.themeLight') }}</el-radio-button>
+          <el-radio-button value="dark">{{ t('settings.themeDark') }}</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+
+      <el-form-item :label="t('settings.language')">
+        <el-radio-group
+          :model-value="settingsStore.settings.locale"
+          @update:model-value="onLocaleChange($event as 'zh' | 'en')"
+        >
+          <el-radio-button value="zh">{{ t('settings.langZh') }}</el-radio-button>
+          <el-radio-button value="en">{{ t('settings.langEn') }}</el-radio-button>
         </el-radio-group>
       </el-form-item>
     </el-form>
 
-    <h3>行为</h3>
-    <el-form label-width="126px" label-position="left" size="small">
-      <el-form-item label="最小化到任务栏">
+    <h3>{{ t('settings.behavior') }}</h3>
+    <el-form label-position="left" size="small">
+      <el-form-item :label="t('settings.minimizeToTray')">
         <el-switch
           :model-value="settingsStore.settings.minimizeToTray"
           @update:model-value="
             patch(
               { minimizeToTray: $event as boolean },
-              $event ? '关闭主窗口将隐藏到任务栏托盘，node 进程继续运行' : '关闭主窗口即退出容器'
+              $event ? t('settings.minimizeOn') : t('settings.minimizeOff')
             )
           "
         />
+        <div class="tip">{{ t('settings.minimizeTip') }}</div>
+      </el-form-item>
+    </el-form>
+
+    <h3>{{ t('settings.envDir') }}</h3>
+    <el-form label-position="left" size="small">
+      <el-form-item :label="t('settings.envRoot')">
+        <div class="env-root-row">
+          <el-input
+            v-model="envRootDraft"
+            :placeholder="
+              envRootInfo
+                ? `${t('settings.envRootFollow')}（${envRootInfo.installDir}/env）`
+                : t('settings.envRootFollow')
+            "
+            style="width: 340px"
+            clearable
+            @change="saveEnvRoot(String($event || ''))"
+          />
+          <el-button size="small" @click="browseEnvRoot">{{ t('common.browse') }}</el-button>
+        </div>
         <div class="tip">
-          开启后点 ✕ 不退出程序，托盘菜单可恢复窗口或彻底退出（退出会停止所有 node 进程）。
+          {{
+            t('settings.envRootTip', {
+              root: envRootInfo?.envRoot || t('settings.envRootLoaded'),
+              envRoot: '{envRoot}'
+            })
+          }}
         </div>
       </el-form-item>
     </el-form>
 
-    <h3>环境目录</h3>
     <template v-if="envSections.length">
       <div v-for="section in envSections" :key="section.pageId" class="env-section">
         <div class="env-page-name">{{ section.pageName }}</div>
-        <el-form label-width="126px" label-position="left" size="small">
+        <el-form label-position="left" size="small">
           <el-form-item v-for="row in section.vars" :key="row.key" :label="row.label">
             <el-input
               :model-value="envDrafts[draftKey(section.pageId, row.key)] || ''"
               :placeholder="
                 row.defaultPath
-                  ? `留空使用默认 ${row.defaultPath}；填任意路径切换（~ 会展开）`
-                  : '留空则不注入该变量'
+                  ? t('settings.envInputPlaceholderDefault', { path: displayPath(row.defaultPath) })
+                  : t('settings.envInputPlaceholderEmpty')
               "
               style="width: 340px"
               clearable
@@ -224,26 +307,55 @@ function onThemeChange(mode: 'auto' | 'light' | 'dark'): void {
             <div class="tip">
               <template v-if="row.description">{{ row.description }}</template>
               <template v-else>
-                以环境变量 <code>{{ row.key }}</code> 注入该页面子进程{{
-                  row.defaultPath ? `，默认 ${row.defaultPath}` : ''
-                }}。改动后重启该页面生效。
+                {{ t('settings.envInjectPrefix') }} <code>{{ row.key }}</code>
+                {{
+                  t('settings.envInjectSuffix', {
+                    def: row.defaultPath
+                      ? t('settings.envInjectDefault', { path: row.defaultPath })
+                      : ''
+                  })
+                }}
               </template>
             </div>
           </el-form-item>
         </el-form>
       </div>
     </template>
-    <div v-else class="env-empty">
-      当前没有可配置的环境目录。导入一个 node
-      项目后，它的安装目录会自动出现在这里成为可配置项；也可在
-      <code>container.json</code> 里声明更多 <code>envVars</code>（如
-      <code>{ "key": "MYAPP_HOME", "label": "数据目录", "defaultPath": "~/.myapp" }</code
-      >）追加自定义目录。
-    </div>
+    <div v-else class="env-empty">{{ t('settings.envSectionEmpty') }}</div>
   </div>
 </template>
 
 <style scoped>
+/* One label column shared by every form in this panel. Element Plus only computes
+   `label-width="auto"` per <el-form> instance, and this panel has four of them, so
+   `auto` would give each section a different width and break the cross-section
+   alignment. The column is set here instead, once, as a custom property.
+
+   The value is the old 126px + 40px: 126px was tuned to the Chinese labels, while
+   English needs ~162px for the longest one ("External address open mode"); i.e. the
+   label must fit on one line, or it would wrap out of its 24px box. */
+.settings-panel {
+  --settings-label-w: 166px;
+}
+
+.settings-panel :deep(.el-form-item__label) {
+  width: var(--settings-label-w);
+  /* `size="small"` pins the label box to 24px with `line-height:24px`; a longer label
+     wraps and drops its second line *outside* that box, on top of the next row's label.
+     Letting the box grow keeps such a label readable instead. `align-self` overrides
+     Element Plus's default `stretch`, which would stretch the auto-height box to the
+     whole row (and centre the text) whenever a multi-line tip makes the row tall. */
+  align-self: flex-start;
+  height: auto;
+  min-height: 24px;
+  align-items: center;
+  /* A container.json label is user-authored and can be arbitrarily long, so it may still
+     have to wrap inside the fixed column; wrapping (and growing the box, above) keeps it
+     fully readable instead of letting it run under the input. */
+  white-space: normal;
+  word-break: break-word;
+}
+
 .settings-panel h3 {
   margin: 16px 0 10px;
   font-size: 12.5px;
@@ -277,6 +389,11 @@ function onThemeChange(mode: 'auto' | 'light' | 'dark'): void {
 
 .env-section {
   margin-bottom: 6px;
+}
+.env-root-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .env-page-name {
   font-size: 12.5px;

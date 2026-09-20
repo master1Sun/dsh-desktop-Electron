@@ -4,6 +4,9 @@ import { join, dirname } from 'node:path'
 import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
 import { resolveDshProfileDir, resolveDshRuntimeDirs, resolvePagesDir } from './store'
 import type { DshPluginInfo, DshPluginUpdate, DshUpdateChannel } from '../shared/types'
+import type { ContainerManifest } from './pages'
+// aliased: `m` is already a local identifier in this file (regex match results)
+import { m as msg, msgIn } from './i18n'
 
 const DEFAULT_PROFILE = 'web'
 
@@ -158,7 +161,7 @@ function linkNativePnpm(root: string): void {
 }
 
 function pnpmMissingError(): Error {
-  return new Error('未找到 pnpm（dsh 的插件管理依赖 pnpm）。请先执行: npm install -g pnpm')
+  return new Error(msg('dsh.pnpmMissing'))
 }
 
 async function dshEnv(profileDir: string): Promise<NodeJS.ProcessEnv> {
@@ -182,10 +185,9 @@ async function dshEnv(profileDir: string): Promise<NodeJS.ProcessEnv> {
 function validateProfileName(profile: string): string {
   const p = profile.trim() || DEFAULT_PROFILE
   if (!/^[\w.-]+$/.test(p) || p === '.' || p === '..' || p === 'node_modules') {
-    throw new Error(`非法 profile 名: ${profile}`)
+    throw new Error(msg('dsh.invalidProfile', { profile }))
   }
-  if (p.toLowerCase() === 'desktop')
-    throw new Error('profile 名 "desktop" 由 dsh 的 Electron 应用保留')
+  if (p.toLowerCase() === 'desktop') throw new Error(msg('dsh.reservedProfile'))
   return p
 }
 
@@ -202,15 +204,15 @@ export async function getDshStatus(profile = DEFAULT_PROFILE): Promise<DshStatus
   if (!bin)
     return {
       ...base,
-      error: '未安装 @deepseek-ai/dsh（npm run setup:dsh 或 npm install @deepseek-ai/dsh）'
+      error: msg('dsh.notInstalled')
     }
   const pkgDir = dshPackageDir()
-  if (!pkgDir) return { ...base, binPath: bin, error: 'dsh 包缺少 package.json' }
+  if (!pkgDir) return { ...base, binPath: bin, error: msg('dsh.pkgNoManifest') }
   try {
     const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf-8'))
     return { ...base, installed: true, version: pkg.version, binPath: bin }
   } catch (err) {
-    return { ...base, binPath: bin, error: `dsh 包损坏：${(err as Error).message}` }
+    return { ...base, binPath: bin, error: msg('dsh.pkgBroken', { err: (err as Error).message }) }
   }
 }
 
@@ -220,7 +222,7 @@ async function runDsh(
   opts: { timeoutMs?: number; profile?: string } = {}
 ): Promise<string> {
   const status = await getDshStatus(opts.profile)
-  if (!status.binPath) throw new Error(status.error || 'dsh 不可用')
+  if (!status.binPath) throw new Error(status.error || msg('dsh.unavailable'))
   // bin.js carries a `#!/usr/bin/env node` shebang cmd.exe can't execute (silent exit 0),
   // so anything that isn't a .cmd/.bat shim runs as `node <bin.js> …` via plain Node
   // (resolveDshNodeExePath — dsh's node-pty terminals cannot load under Electron's ABI).
@@ -237,7 +239,9 @@ async function runDsh(
   // First boot of a profile prints an informational "initialized profile …" notice
   // on stderr while exiting 0 — success, not an error (code is what counts).
   if (res.code !== 0)
-    throw new Error(res.stderr.slice(-2000) || res.stdout.slice(-2000) || `dsh 退出码 ${res.code}`)
+    throw new Error(
+      res.stderr.slice(-2000) || res.stdout.slice(-2000) || msg('dsh.exitCode', { code: res.code })
+    )
   return res.stdout
 }
 
@@ -325,21 +329,20 @@ export function createDshPage(profile: string, port: number): string {
   const safe = validateProfileName(profile)
   const id = `dsh-${safe}`
   const dir = join(resolvePagesDir(), id)
-  if (existsSync(join(dir, 'container.json'))) throw new Error(`pages/${id} 已存在`)
+  if (existsSync(join(dir, 'container.json'))) throw new Error(msg('dsh.pageExists', { id }))
   mkdirSync(dir, { recursive: true })
-  writeFileSync(
-    join(dir, 'container.json'),
-    JSON.stringify(
-      {
-        name: `DSH (${safe})`,
-        description: `由容器管理的 @deepseek-ai/dsh profile「${safe}」，插件在本机 userData 的 profile 目录内管理`,
-        kind: 'dsh',
-        dsh: { profile: safe, port }
-      },
-      null,
-      2
-    )
-  )
+  // Both languages go into the file: it is user-owned and never rewritten afterwards, so a
+  // single-language snapshot would pin this page to the language active at creation time.
+  const manifest: ContainerManifest = {
+    name: `DSH (${safe})`,
+    description: {
+      zh: msgIn('zh', 'dsh.profilePageDesc', { profile: safe }),
+      en: msgIn('en', 'dsh.profilePageDesc', { profile: safe })
+    },
+    kind: 'dsh',
+    dsh: { profile: safe, port }
+  }
+  writeFileSync(join(dir, 'container.json'), JSON.stringify(manifest, null, 2))
   return id
 }
 
@@ -351,7 +354,7 @@ function validateNpmSpec(spec: string): string {
     !/^git[@+]/i.test(s) &&
     !/\.git(#.+)?$/.test(s)
   ) {
-    throw new Error(`非法包名/地址: ${s}`)
+    throw new Error(msg('dsh.invalidSpec', { spec: s }))
   }
   return s
 }
@@ -374,18 +377,20 @@ export async function updateDshPlugin(
   profile = DEFAULT_PROFILE
 ): Promise<string> {
   if (channel === 'git') {
-    if (!gitUrl) throw new Error('git 更新需要提供仓库地址')
+    if (!gitUrl) throw new Error(msg('dsh.gitNeedsUrl'))
     const parsed = parseGitSpec(gitUrl)
     const repo = parsed ? parsed.repo : gitUrl
     const ref = parsed?.ref
     // a pinned tag/sha installs that exact ref; a bare repo resolves the remote HEAD
-    const installSpec = ref ? `${repo}#${ref}` : `${repo}#${(await remoteHeadSha(repo)).slice(0, 8)}`
+    const installSpec = ref
+      ? `${repo}#${ref}`
+      : `${repo}#${(await remoteHeadSha(repo)).slice(0, 8)}`
     await dshPluginForward(['add', installSpec], profile)
-    return `已更新至 ${installSpec}`
+    return msg('dsh.updatedTo', { spec: installSpec })
   }
   const s = validateNpmSpec(name)
   await dshPluginForward(['update', s], profile)
-  return `已通过 npm 更新 ${s}`
+  return msg('dsh.npmUpdated', { spec: s })
 }
 
 export async function updateAllDshPlugins(profile = DEFAULT_PROFILE): Promise<string> {
@@ -456,7 +461,10 @@ function isNewerVersion(installed: string, latest: string): boolean {
   // isn't misread as major version 0 (which would flag every ranged plugin as outdated)
   const clean = (s: string): string => s.replace(/^[\^~>=<*v]+/i, '').trim()
   if (!/^\d/.test(clean(installed)) || !/^\d/.test(clean(latest))) return false
-  const seg = (s: string): number[] => clean(s).split(/[.+-]/).map((x) => parseInt(x, 10) || 0)
+  const seg = (s: string): number[] =>
+    clean(s)
+      .split(/[.+-]/)
+      .map((x) => parseInt(x, 10) || 0)
   const a = seg(installed)
   const b = seg(latest)
   for (let i = 0; i < 3; i++) {
@@ -466,11 +474,10 @@ function isNewerVersion(installed: string, latest: string): boolean {
 }
 
 async function npmLatestVersion(name: string): Promise<string> {
-  const res = await runCli(
-    'npm',
-    ['view', name, 'version', '--registry', NPM_REGISTRY_MIRROR],
-    { timeoutMs: 30_000, shell: process.platform === 'win32' }
-  )
+  const res = await runCli('npm', ['view', name, 'version', '--registry', NPM_REGISTRY_MIRROR], {
+    timeoutMs: 30_000,
+    shell: process.platform === 'win32'
+  })
   return res.code === 0 ? res.stdout.trim().replace(/^v/, '') : ''
 }
 
@@ -513,11 +520,11 @@ export async function checkDshPluginUpdates(profile = DEFAULT_PROFILE): Promise<
 }
 
 async function remoteHeadSha(repoUrl: string): Promise<string> {
-  if (/[\s;`$&|]/.test(repoUrl)) throw new Error('仓库地址包含非法字符')
+  if (/[\s;`$&|]/.test(repoUrl)) throw new Error(msg('dsh.illegalRepoChars'))
   const res = await runCli('git', ['ls-remote', repoUrl, 'HEAD'], { timeoutMs: 60_000 })
-  if (res.code !== 0) throw new Error(res.stderr.slice(-500) || 'git ls-remote 失败')
+  if (res.code !== 0) throw new Error(res.stderr.slice(-500) || msg('dsh.lsRemoteFail'))
   const sha = res.stdout.split(/\s+/)[0]
-  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('无法解析远端 HEAD')
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(msg('dsh.remoteHeadFail'))
   return sha
 }
 
@@ -531,9 +538,9 @@ export async function dshSpawnCommand(
   port: number
 ): Promise<{ cmd: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> {
   const status = await getDshStatus(profile)
-  if (!status.installed) throw new Error(status.error || 'dsh 不可用')
+  if (!status.installed) throw new Error(status.error || msg('dsh.unavailable'))
   const binJs = dshBinJs()
-  if (!binJs) throw new Error('未找到 @deepseek-ai/dsh/lib/bin.js（先运行 npm run setup:dsh）')
+  if (!binJs) throw new Error(msg('dsh.binMissing'))
   mkdirSync(status.profileDir, { recursive: true })
   return {
     cmd: resolveDshNodeExePath(),

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { simpleGit, type SimpleGitOptions } from 'simple-git'
 import type { UpdateCheckResult, UpdateOutcome } from '../shared/types'
+import { m } from './i18n'
 
 const CACHE_TTL_MS = 5 * 60_1000
 
@@ -38,19 +39,19 @@ export async function checkOne(
   const base: UpdateCheckResult = { name, dir, isContainer, ok: false }
   try {
     if (!existsSync(join(dir, '.git'))) {
-      return { ...base, error: '不是 git 仓库（本地目录安装或已移除）' }
+      return { ...base, error: m('git.notRepo') }
     }
     const git = makeGit(dir)
     const branch = (await git.revparse(['--abbrev-ref', 'HEAD'])).trim()
     const localHead = (await git.revparse(['HEAD'])).trim()
     const remotes = await git.getRemotes(true)
     const origin = remotes.find((r) => r.name === 'origin')
-    if (!origin?.refs.fetch) return { ...base, branch, localHead, error: '无 origin 远端' }
+    if (!origin?.refs.fetch) return { ...base, branch, localHead, error: m('git.noOrigin') }
     const ls = await git.listRemote([origin.refs.fetch])
     const headLine =
       ls.split('\n').find((l) => l.includes(`refs/heads/${branch}`)) ||
       ls.split('\n').find((l) => l.includes('HEAD'))
-    if (!headLine) return { ...base, branch, localHead, error: `远端没有分支 ${branch}` }
+    if (!headLine) return { ...base, branch, localHead, error: m('git.branchMissing', { branch }) }
     const remoteHead = headLine.split(/\s+/)[0]
     return {
       ...base,
@@ -74,7 +75,7 @@ export async function performUpdate(target: { name: string; dir: string }): Prom
         name: target.name,
         ok: false,
         updated: false,
-        error: '工作区有未提交改动，已跳过（请手动处理）'
+        error: m('git.dirtySkipped')
       }
     }
     const before = (await git.revparse(['HEAD'])).trim()

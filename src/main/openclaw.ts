@@ -1,9 +1,17 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
-import { resolveOpenclawHome, resolvePagesDir } from './store'
+import {
+  getSettings,
+  resolveOpenclawHome,
+  resolvePagesDir,
+  setDefaultView,
+  updateSettings
+} from './store'
 import { getNodeExePath, bundledEnv } from './node-runtime'
+import type { ContainerManifest } from './pages'
+import { m, msgIn } from './i18n'
 import { OPENCLAW_DEFAULT_PORT } from '../shared/types'
 
 /** Run a CLI without blocking the main-process event loop (a frozen UI otherwise). */
@@ -99,7 +107,7 @@ export async function getOpenclawStatus(): Promise<OpenclawStatus> {
   if (!resolved)
     return {
       ...base,
-      error: '未找到 openclaw CLI，请先运行 npm run setup:openclaw（或全局安装 openclaw@latest）'
+      error: m('openclaw.cliMissing')
     }
   try {
     const res = await runCli(resolved.cmd, [resolved.script, '--version'], {
@@ -111,7 +119,7 @@ export async function getOpenclawStatus(): Promise<OpenclawStatus> {
       return {
         ...base,
         binPath: resolved.script,
-        error: res.stderr.slice(-500) || `openclaw --version 退出码 ${res.code}`
+        error: res.stderr.slice(-500) || m('openclaw.versionFail', { code: res.code })
       }
     return {
       ...base,
@@ -123,9 +131,36 @@ export async function getOpenclawStatus(): Promise<OpenclawStatus> {
     return {
       ...base,
       binPath: resolved.script,
-      error: `openclaw 不可用：${(err as Error).message}`
+      error: m('openclaw.unavailable', { err: (err as Error).message })
     }
   }
+}
+
+/**
+ * Env vars declared by the managed gateway page. Older builds wrote the meta without
+ * them, so the "环境目录" input for openclaw never appeared — ensureDefaultOpenclawPage
+ * backfills this list into an existing container.json.
+ *
+ * Both languages are emitted so the labels follow the UI language; a single-language
+ * snapshot would have frozen whichever language was active when the file was written.
+ * A function, not a constant: the strings are produced per write, and module init runs
+ * before the locale source is registered.
+ */
+function openclawEnvVars(): NonNullable<ContainerManifest['envVars']> {
+  return [
+    {
+      key: 'OPENCLAW_HOME',
+      label: {
+        zh: msgIn('zh', 'openclaw.homeLabel'),
+        en: msgIn('en', 'openclaw.homeLabel')
+      },
+      defaultPath: '{envRoot}/openclaw',
+      description: {
+        zh: msgIn('zh', 'openclaw.homeDesc'),
+        en: msgIn('en', 'openclaw.homeDesc')
+      }
+    }
+  ]
 }
 
 /** register the managed gateway as a pages/<id> entry by writing container.json (no file copying). */
@@ -134,27 +169,35 @@ export function createOpenclawPage(port = OPENCLAW_DEFAULT_PORT): string {
   const id = 'openclaw'
   const dir = join(resolvePagesDir(), id)
   mkdirSync(dir, { recursive: true })
-  writeFileSync(
-    join(dir, 'container.json'),
-    JSON.stringify(
-      {
-        name: 'OpenClaw Gateway',
-        description:
-          '由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置在 ~/.openclaw',
-        kind: 'openclaw',
-        openclaw: { port: p }
-      },
-      null,
-      2
-    )
-  )
+  const manifest: ContainerManifest = {
+    name: 'OpenClaw Gateway',
+    description: {
+      zh: msgIn('zh', 'openclaw.pageDesc'),
+      en: msgIn('en', 'openclaw.pageDesc')
+    },
+    kind: 'openclaw',
+    openclaw: { port: p },
+    envVars: openclawEnvVars()
+  }
+  writeFileSync(join(dir, 'container.json'), JSON.stringify(manifest, null, 2))
   return id
 }
 
 /** ensure the default page exists once per install so "自带 openclaw" is visible without manual steps. */
 export function ensureDefaultOpenclawPage(): void {
   const metaFile = join(resolvePagesDir(), 'openclaw', 'container.json')
-  if (existsSync(metaFile)) return
+  if (existsSync(metaFile)) {
+    // Backfill: metas written before envVars existed hide the openclaw 环境目录 input.
+    try {
+      const raw = JSON.parse(readFileSync(metaFile, 'utf-8')) as Record<string, unknown>
+      if (!Array.isArray(raw.envVars) || !raw.envVars.length) {
+        writeFileSync(metaFile, JSON.stringify({ ...raw, envVars: openclawEnvVars() }, null, 2))
+      }
+    } catch {
+      /* unreadable meta: leave the user's file untouched */
+    }
+    return
+  }
   try {
     createOpenclawPage(OPENCLAW_DEFAULT_PORT)
   } catch {
@@ -163,28 +206,71 @@ export function ensureDefaultOpenclawPage(): void {
 }
 
 /**
- * Seed the remaining builtin pages (codex / dsh-web / dsh-plugin-market) into userData/pages
- * on first launch of a packaged build. The page metas ship inside the installer under
- * resources/pages (see electron-builder.yml extraResources) but must live in the writable
- * userData/pages dir so installs survive updates. openclaw is seeded separately by
- * ensureDefaultOpenclawPage; dev mode reads pages/ straight from the repo, so this is a
- * packaged-only, best-effort copy.
+ * Seed the remaining builtin pages (dsh-web) so they exist before the registry scans.
+ * Packaged builds copy from resources/pages into the writable userData/pages (installs
+ * survive updates); dev reads/writes the repo's pages/ directly and only recreates a
+ * deleted builtin dir from itself. openclaw is seeded by ensureDefaultOpenclawPage.
  */
 export function ensureBuiltinPages(): void {
-  if (!app.isPackaged) return
-  const srcRoot = join(process.resourcesPath || '', 'pages')
-  if (!existsSync(srcRoot)) return
+  removeLegacyBuiltinPages()
   const destRoot = resolvePagesDir()
-  for (const id of ['codex', 'dsh-web', 'dsh-plugin-market']) {
+  // Packaged builds seed from the bundled resources (userData survives updates);
+  // dev reads/writes the repo's pages/ directly — a missing builtin still gets seeded.
+  const srcRoot = app.isPackaged ? join(process.resourcesPath || '', 'pages') : destRoot
+  for (const id of ['dsh-web']) {
     const src = join(srcRoot, id)
     const dest = join(destRoot, id)
-    if (!existsSync(src) || existsSync(join(dest, 'container.json'))) continue
+    if (!existsSync(src)) continue
+    if (existsSync(join(dest, 'container.json'))) continue
     try {
       mkdirSync(dest, { recursive: true })
       cpSync(src, dest, { recursive: true })
     } catch {
       /* best-effort: a missing builtin page simply won't appear until manually added */
     }
+  }
+  // A persisted default view / auto-start pointing at a page that no longer exists would
+  // leave the shell on an empty market screen with no hint — drop the dead references.
+  try {
+    const s = getSettings()
+    const alive = (pageId: string): boolean => existsSync(join(destRoot, pageId, 'container.json'))
+    const dv = s.defaultView
+    if (dv.kind === 'page' && !alive(dv.pageId)) setDefaultView({ kind: 'none' })
+    const freshAuto = s.autoStartPages.filter(alive)
+    if (freshAuto.length !== s.autoStartPages.length) updateSettings({ autoStartPages: freshAuto })
+  } catch {
+    /* settings cleanup is best-effort */
+  }
+}
+
+/**
+ * Builtin pages retired from the container: the codex CLI page and the plugin-market
+ * server page (the market is now a renderer built-in view, MarketView.vue). Upgrades
+ * may still carry their dirs plus persisted settings references — remove the dirs and
+ * drop the stale settings so they don't linger as broken rows. Best-effort, never throws.
+ */
+function removeLegacyBuiltinPages(): void {
+  const retired = ['codex', 'dsh-plugin-market']
+  for (const id of retired) {
+    const dir = join(resolvePagesDir(), id)
+    if (!existsSync(dir)) continue
+    try {
+      rmSync(dir, { recursive: true, force: true })
+      console.log(`[pages] removed retired builtin page: ${id}`)
+    } catch (err) {
+      console.warn(`[pages] failed to remove retired builtin ${id}:`, (err as Error).message)
+    }
+  }
+  try {
+    const s = getSettings()
+    const dv = s.defaultView
+    const staleAutoStart = s.autoStartPages.some((id) => retired.includes(id))
+    const staleDefault = dv.kind === 'page' && retired.includes(dv.pageId)
+    if (staleAutoStart)
+      updateSettings({ autoStartPages: s.autoStartPages.filter((id) => !retired.includes(id)) })
+    if (staleDefault) setDefaultView({ kind: 'none' })
+  } catch {
+    /* settings cleanup is best-effort */
   }
 }
 
@@ -200,7 +286,7 @@ export function openclawSpawnSpec(port: number): {
   env: NodeJS.ProcessEnv
 } {
   const resolved = resolveOpenclawCommand()
-  if (!resolved) throw new Error('未找到 openclaw CLI，请先运行 npm run setup:openclaw')
+  if (!resolved) throw new Error(m('openclaw.cliMissingShort'))
   const home = resolveOpenclawHome()
   mkdirSync(home, { recursive: true })
   const p = Number(port) > 0 ? Number(port) : OPENCLAW_DEFAULT_PORT

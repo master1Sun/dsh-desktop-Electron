@@ -2,15 +2,28 @@ export const NODE_VERSION_REQUIRED = 'v24.21.0'
 
 export type PageStatus = 'stopped' | 'starting' | 'running' | 'error'
 
-/** 'terminal' = a CLI-only project (e.g. codex): no HTTP port, runs inside the embedded terminal */
+/** 'terminal' = a CLI-only project: no HTTP port, runs inside the embedded terminal */
 export type PageKind = 'page' | 'dsh' | 'openclaw' | 'terminal'
 
 /** default port openclaw's gateway listens on (matches `openclaw gateway --port`) */
 export const OPENCLAW_DEFAULT_PORT = 18789
 
+/**
+ * A text field in a page's `container.json`. A plain string is language-neutral and used
+ * for every locale (all pre-existing manifests keep working unchanged); the object form
+ * carries per-language variants. A locale that is not listed falls back to the other
+ * variant, then to the caller's default — see `resolveText()` in the main process, which
+ * resolves every field of this shape before the value travels over IPC.
+ */
+export type LocalizableText = string | { zh?: string; en?: string }
+
 /** A configurable "home"/directory env var a page declares in its container.json `envVars` list.
     The container renders one settings input per entry and injects `<key>=<resolved path>` into
-    that page's subprocess env at spawn (per-kind: only pages declaring the var receive it). */
+    that page's subprocess env at spawn (per-kind: only pages declaring the var receive it).
+
+    `label` / `description` are *resolved* here (plain strings in the active language): the file
+    may author them as {@link LocalizableText}, and the main process flattens them when it reads
+    the manifest, so no consumer downstream of IPC has to know about locales. */
 export interface EnvVarSpec {
   /** env var name to inject, e.g. DSH_HOME / OPENCLAW_STATE_DIR / MYAPP_HOME */
   key: string
@@ -18,6 +31,10 @@ export interface EnvVarSpec {
   label?: string
   /** default directory used when the user leaves the override empty (supports ~); also shown as placeholder */
   defaultPath?: string
+  /** A pre-existing directory the CLI used before the container managed it (e.g. ~/.codex).
+      While it exists it keeps winning over `defaultPath`, so an install that already
+      signed in / stored sessions there isn't silently orphaned by the move. */
+  legacyPath?: string
   /** helper text under the input explaining what this directory holds */
   description?: string
 }
@@ -77,10 +94,22 @@ export interface ExternalSite {
   url: string
 }
 
+/** Resolved "环境目录" info surfaced to the Settings panel. */
+export interface EnvRootInfo {
+  /** effective root every runtime's home dir defaults into */
+  envRoot: string
+  /** directory holding the app executable (the install dir when packaged) */
+  installDir: string
+  /** true when the user pinned a custom root instead of following the install dir */
+  custom: boolean
+}
+
 export type DefaultView =
   { kind: 'none' } | { kind: 'page'; pageId: string } | { kind: 'external'; url: string }
 
 export type ExternalOpenMode = 'embedded' | 'system-browser'
+
+export type Locale = 'zh' | 'en'
 
 export interface ContainerSettings {
   defaultView: DefaultView
@@ -91,9 +120,13 @@ export interface ContainerSettings {
   /** user-saved named external URLs, managed + previewable from the top bar */
   externalSites: ExternalSite[]
   theme: 'auto' | 'light' | 'dark'
-  /** dsh home override; empty = dsh's own default ~/.dsh */
+  /** UI display language; empty/default = Chinese */
+  locale: Locale
+  /** root for every runtime's config/state dir; empty = follow the install dir (<installDir>/env) */
+  envRoot: string
+  /** dsh home override; empty = <envRoot>/dsh (an existing ~/.dsh is kept as a migration fallback) */
   dshHome: string
-  /** openclaw config home override; empty = ~/.openclaw (matches the CLI's default) */
+  /** openclaw config home override; empty = <envRoot>/openclaw (existing ~/.openclaw kept as fallback) */
   openclawHome: string
   /** per-page directory env overrides: pageId -> (envVarKey -> path); empty value falls back to the spec defaultPath */
   pageEnvs: Record<string, Record<string, string>>
@@ -157,6 +190,20 @@ export interface DshPluginUpdate {
 
 export type DshUpdateChannel = 'npm' | 'git'
 
+/**
+ * Outcome of asking for a dsh profile's runtime token.
+ *
+ * Unlike openclaw's gateway token — readable from a config file or env var while the gateway
+ * is stopped — dsh mints its token per launch and prints it only in its ready line
+ * (`dsh web: http://127.0.0.1:8899/?token=…`). The running page's `launchUrl` is therefore
+ * the sole authoritative source, and "no token" has two distinct causes worth telling apart:
+ * the profile has no registered page at all, or its page is registered but not running.
+ */
+export type DshTokenResult =
+  | { kind: 'ok'; token: string; pageId: string; url: string }
+  | { kind: 'stopped'; pageId: string }
+  | { kind: 'no-page'; profile: string }
+
 export const IPC = {
   GetNodeInfo: 'container:get-node-info',
   ListPages: 'container:list-pages',
@@ -172,6 +219,7 @@ export const IPC = {
   OpenPageExternal: 'container:open-page-external',
   GetSettings: 'container:get-settings',
   UpdateSettings: 'container:update-settings',
+  EnvRoot: 'container:env-root',
   CheckUpdates: 'container:check-updates',
   PerformUpdate: 'container:perform-update',
   ShowWindow: 'container:show-window',
@@ -185,6 +233,7 @@ export const IPC = {
   DshUpdatePlugin: 'dsh:update-plugin',
   DshUpdateAll: 'dsh:update-all',
   DshCreatePage: 'dsh:create-page',
+  DshToken: 'dsh:token',
   OpenclawStatus: 'openclaw:status',
   OpenclawCreatePage: 'openclaw:create-page',
   OpenclawToken: 'openclaw:token',

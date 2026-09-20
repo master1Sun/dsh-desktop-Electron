@@ -2,18 +2,29 @@
 import { computed } from 'vue'
 import { Bell, Refresh } from '@element-plus/icons-vue'
 import { useUpdatesStore } from '../stores/updates'
+import { t } from '../i18n'
 
 const updates = useUpdatesStore()
 const count = computed(() => updates.outdated.length)
 </script>
 
 <template>
-  <div class="update-badge" :class="{ hot: count > 0 }" :title="`上次检测：${updates.lastCheckedAt ? new Date(updates.lastCheckedAt).toLocaleString() : '从未'}`">
+  <div
+    class="update-badge"
+    :class="{ hot: count > 0 }"
+    :title="
+      updates.lastCheckedAt
+        ? t('badge.lastChecked', { time: new Date(updates.lastCheckedAt).toLocaleString() })
+        : t('badge.never')
+    "
+  >
     <el-icon v-if="updates.checking" class="spin"><Refresh /></el-icon>
     <el-icon v-else><Bell /></el-icon>
-    <span v-if="count > 0">{{ count }} 个更新可用</span>
-    <span v-else-if="!updates.checking && updates.results.length" class="muted">已是最新</span>
-    <span v-else-if="!updates.checking" class="muted">未检测</span>
+    <span v-if="count > 0">{{ t('badge.updatesAvailable', { n: count }) }}</span>
+    <span v-else-if="!updates.checking && updates.results.length" class="muted">{{
+      t('badge.upToDate')
+    }}</span>
+    <span v-else-if="!updates.checking" class="muted">{{ t('badge.notChecked') }}</span>
   </div>
 </template>
 

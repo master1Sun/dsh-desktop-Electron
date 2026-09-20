@@ -8,10 +8,14 @@ import CliTerminalView from './components/CliTerminalView.vue'
 import HomeView from './views/HomeView.vue'
 import { usePagesStore, type PageState } from './stores/pages'
 import { useSettingsStore } from './stores/settings'
+import { useTerminalStore } from './stores/terminal'
 import { useUpdatesStore } from './stores/updates'
+import { ElConfigProvider } from 'element-plus'
+import { locale as i18nLocale, t, epLocale } from './i18n'
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
+const store = useTerminalStore()
 const hasBridge = typeof window !== 'undefined' && !!window.container
 const updatesStore = useUpdatesStore()
 
@@ -27,15 +31,85 @@ const cliTermRef = ref<{ restart: () => void } | null>(null)
 
 const pageUrl = (p: PageState): string => p.launchUrl || p.url || ''
 
-/** CLI-only pages (kind=terminal, e.g. codex) take over the whole content area with a terminal. */
+/** CLI-only pages (kind=terminal) take over the whole content area with a terminal. */
 const activeTerminalPage = computed(
   () => pagesStore.pages.find((p) => p.id === activePageId.value && p.kind === 'terminal') || null
 )
 
+/**
+ * The webview must stay mounted while it has content — including when the user picks
+ * 「工作台」to view the market page. Unmounting <webview> destroys the embedded page,
+ * which wipes its right-sidebar terminal tabs and leaves the host-side session holding
+ * ports that re-open then fails to start ("进程被占用").
+ */
+const webviewActive = computed(() => Boolean(webviewSrc.value) && !activeTerminalPage.value)
+
 /* Switcher trigger label in the top bar — reflects the page currently shown in the webview. */
 const currentTitle = computed(
-  () => pagesStore.pages.find((p) => p.id === activePageId.value)?.name || '选择页面'
+  () => pagesStore.pages.find((p) => p.id === activePageId.value)?.name || t('app.selectPage')
 )
+
+/** Page being started for the configured default view — drives the 启动中 overlay. */
+const pendingPageId = ref<string | null>(null)
+
+const startingText = computed(() => {
+  if (!pendingPageId.value) return ''
+  const p = pagesStore.pages.find((x) => x.id === pendingPageId.value)
+  return t('app.starting', { name: p?.name || t('menu.pages') })
+})
+
+/**
+ * Show the configured default page on entry, starting it on demand.
+ * Returns true once the page is (or is being) shown, false when there is nothing to do.
+ */
+async function restoreDefaultView(): Promise<boolean> {
+  const dv = settingsStore.settings.defaultView
+  if (activePageId.value || dv.kind !== 'page') return false
+  const page = pagesStore.pages.find((p) => p.id === dv.pageId)
+  if (!page) return false
+  // A CLI page owns the surface as soon as it is activated — no port to wait for.
+  if (page.kind === 'terminal') {
+    showInWebview(page)
+    return true
+  }
+  if (page.status === 'running') {
+    showInWebview(page)
+    return true
+  }
+  if (pendingPageId.value) return true // a start is already in flight
+  pendingPageId.value = page.id
+  webviewLoading.value = true
+  try {
+    await pagesStore.start(page.id)
+  } catch (err) {
+    pendingPageId.value = null
+    webviewLoading.value = false
+    ElMessage.error(t('app.startFail', { name: page.name, err: (err as Error).message }))
+    return false
+  }
+  const fresh = pagesStore.pages.find((p) => p.id === page.id)
+  if (fresh?.status === 'running') {
+    pendingPageId.value = null
+    showInWebview(fresh)
+    return true
+  }
+  // still booting: keep the overlay, the status watcher below completes the switch
+  return true
+}
+
+/** Start a page from the switcher; the row only becomes switchable once this succeeds. */
+async function startPage(id: string): Promise<void> {
+  try {
+    await pagesStore.start(id)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+    return
+  }
+  const p = pagesStore.pages.find((x) => x.id === id)
+  if (!p) return
+  ElMessage.success(t('app.started', { name: p.name }))
+  if (p.kind !== 'terminal') showInWebview(p)
+}
 
 function showInWebview(page: PageState): void {
   activePageId.value = page.id
@@ -57,10 +131,11 @@ function showInWebview(page: PageState): void {
   }
 }
 
-/** Leave the CLI terminal and return to the workbench (hero screen). */
+/** Leave the CLI terminal / market view and return to the workbench (default market screen). */
 function backToWorkbench(): void {
+  // Keep webviewSrc: the market overlay covers the still-mounted page, so its
+  // right-sidebar terminal sessions survive the switch.
   activePageId.value = null
-  webviewSrc.value = ''
   webviewLoading.value = false
 }
 
@@ -74,7 +149,7 @@ async function openPage(id: string): Promise<void> {
   }
   // Terminal-kind pages run their own command in the full-surface terminal — no port to wait for.
   if (page.kind !== 'terminal' && page.status !== 'running') {
-    ElMessage.info(`${page.name} 未运行，正在启动…`)
+    ElMessage.info(t('app.notRunningStarting', { name: page.name }))
     try {
       await pagesStore.start(id)
     } catch (err) {
@@ -162,6 +237,19 @@ watchEffect(() => {
   if (settingsStore.loaded && !userPinnedTheme) applyTheme(settingsStore.settings.theme)
 })
 
+// Apply the persisted UI language as soon as settings load, and keep the Element Plus
+// locale in lockstep so its built-in component text (empty states, pagination…) matches.
+const currentEpLocale = computed(() => epLocale())
+watchEffect(() => {
+  if (settingsStore.loaded) i18nLocale.value = settingsStore.settings.locale || 'zh'
+})
+
+// Keep the OS window/taskbar caption in the active language (index.html holds the zh default
+// so the very first paint before settings load is already Chinese).
+watchEffect(() => {
+  document.title = t('app.title')
+})
+
 // The title-bar button is a pure day/night switch: it pins the opposite of what
 // is currently shown (including when in 'auto'), never cycling back to auto.
 function quickThemeToggle(): void {
@@ -214,17 +302,22 @@ onMounted(async () => {
     })
   }
   await pagesStore.refresh().catch(() => undefined)
-  // Auto-run terminal-kind auto-start pages (e.g. codex) at launch. Only the full-surface
-  // CLI terminal (CliTerminalView) actually spawns their startCommand, so it must become the
-  // active page; web/server pages are started by the main process and keep running in the
-  // background. When several CLI pages are configured, the last one gets the surface.
-  const cliPage = (settingsStore.settings.autoStartPages || [])
-    .map((id) => pagesStore.pages.find((x) => x.id === id))
-    .filter((p) => p?.kind === 'terminal')
-    .at(-1)
-  if (cliPage) {
-    activePageId.value = cliPage.id
-    webviewSrc.value = ''
+  // The configured default page wins over the CLI auto-start surface: it is what the
+  // user asked to see on entry and gets started on demand when it isn't running yet.
+  const restored = await restoreDefaultView().catch(() => false)
+  if (!restored) {
+    // Auto-run terminal-kind auto-start pages at launch. Only the full-surface CLI
+    // terminal (CliTerminalView) actually spawns their startCommand, so it must become
+    // the active page; web/server pages are started by the main process and keep running
+    // in the background. When several CLI pages are configured, the last one gets the surface.
+    const cliPage = (settingsStore.settings.autoStartPages || [])
+      .map((id) => pagesStore.pages.find((x) => x.id === id))
+      .filter((p) => p?.kind === 'terminal')
+      .at(-1)
+    if (cliPage) {
+      activePageId.value = cliPage.id
+      webviewSrc.value = ''
+    }
   }
   updatesStore.check().catch(() => undefined)
 })
@@ -251,26 +344,48 @@ watch(
   }
 )
 
+// Re-evaluate the default view whenever pages or settings arrive — the panel can mount
+// before either is loaded.
 watch(
   () => [pagesStore.pages.length, settingsStore.loaded] as const,
-  () => {
-    const dv = settingsStore.settings.defaultView
-    if (activePageId.value || dv.kind !== 'page') return
-    const page = pagesStore.pages.find((p) => p.id === dv.pageId)
-    // Never auto-launch a CLI page's terminal — it should only appear on explicit pick.
-    if (page?.kind !== 'terminal' && page?.status === 'running') showInWebview(page)
-  },
+  () => void restoreDefaultView().catch(() => false),
   { immediate: true }
 )
 
+// A default page that was still booting when start() resolved is switched in here once
+// its port answers (or reported back as failed).
+watch(
+  () => pagesStore.pages.find((p) => p.id === pendingPageId.value)?.status,
+  (status) => {
+    const id = pendingPageId.value
+    if (!id || !status) return
+    if (status === 'running') {
+      pendingPageId.value = null
+      const p = pagesStore.pages.find((x) => x.id === id)
+      if (p) showInWebview(p)
+      return
+    }
+    if (status === 'error' || status === 'stopped') {
+      pendingPageId.value = null
+      webviewLoading.value = false
+      ElMessage.error(
+      t('app.pageStartFail', {
+        name: pagesStore.pages.find((x) => x.id === id)?.name || t('menu.pages')
+      })
+    )
+    }
+  }
+)
+
 const runningCount = computed(() => pagesStore.runningPages.length)
-/** The top-bar reload/devtools buttons act on the live webview; disable them on the hero screen
-    and while a CLI page owns the content area (the terminal has its own restart button). */
+/** The top-bar reload/devtools buttons act on the live webview; disable them on the market
+    screen and while a CLI page owns the content area (the terminal has its own restart). */
 const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPage.value)
 </script>
 
 <template>
-  <div class="shell">
+  <el-config-provider :locale="currentEpLocale">
+    <div class="shell">
     <MenuBar
       :current="activePanel"
       :running-count="runningCount"
@@ -280,6 +395,7 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
       :theme-mode="themeMode"
       :pages="pagesStore.pages"
       :active-page-id="activePageId"
+      :busy-pages="pagesStore.busy"
       :switcher-title="currentTitle"
       :is-maximized="isMaximized"
       :can-operate="canOperate"
@@ -289,6 +405,7 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
       @open-panel="(p: PanelKind) => (activePanel = p)"
       @toggle-theme="quickThemeToggle"
       @select-page="openPage"
+      @start-page="startPage"
       @open-terminal="(id: string) => openPage(id)"
       @preview-site="previewSiteById"
       @manage="activePanel = 'pages'"
@@ -376,18 +493,22 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
         @exit="backToWorkbench"
       />
       <HomeView
-        v-show="!activeTerminalPage"
         ref="homeRef"
         :url="webviewSrc"
         :loading="webviewLoading"
+        :starting-text="startingText"
+        :market-active="!webviewActive && !activeTerminalPage"
         @guest-stop-loading="webviewLoading = false"
         @install-pages="activePanel = 'pages'"
       />
     </main>
 
-    <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC. -->
-    <TerminalDrawer v-if="hasBridge" />
-  </div>
+    <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
+         v-show, not v-if: unmounting drops the global onPtyData subscription, which
+         would silently kill output for every embedded shell terminal tab. -->
+    <TerminalDrawer v-if="hasBridge" v-show="store.open" />
+    </div>
+  </el-config-provider>
 </template>
 
 <style scoped>

@@ -8,7 +8,33 @@ import { registerIpc } from './ipc'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './openclaw'
 import { getSettings, resolvePagesDir, resolveProjectDir } from './store'
 import { getNodeRuntimeInfo } from './node-runtime'
+import { m, onLocaleChanged, registerLocaleSource } from './i18n'
 import icon from '../../resources/icon.png?asset'
+
+// Main-process strings (window title, tray, dialogs, IPC errors) follow the persisted locale.
+// Reading it lazily keeps a mid-session language switch reflected without extra plumbing.
+registerLocaleSource(() => getSettings().locale)
+
+// Surfaces that cache translated text rebuild themselves when the language changes.
+onLocaleChanged(() => {
+  mainWindow?.setTitle(m('app.title'))
+  rebuildTrayMenu()
+})
+
+/**
+ * Resolve the app icon at runtime. `?asset` points inside app.asar, but the
+ * installer also unpacks resources/icon.png next to the exe — and on some builds the
+ * asar copy is missing (electron-builder files filters). Probing both keeps the
+ * taskbar/tray icon from silently coming up empty in a packaged install.
+ */
+function appIconPath(): string {
+  const candidates = [
+    icon,
+    join(process.resourcesPath || '', 'icon.png'),
+    join(app.getAppPath(), 'resources', 'icon.png')
+  ].filter(Boolean)
+  return candidates.find((p) => existsSync(p)) || icon
+}
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -33,12 +59,12 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
-    title: 'Desktop Container',
-    backgroundColor: '#0f1420',
+    title: m('app.title'),
+    backgroundColor: '#000000',
     // frameless: MenuBar doubles as the OS title bar with custom window controls
     frame: false,
     // win + linux read this for the taskbar/window chrome; mac uses build/icon.icns
-    icon,
+    icon: appIconPath(),
     webPreferences: {
       preload: resolvePreload(),
       sandbox: false,
@@ -96,34 +122,35 @@ function rebuildTrayMenu(): void {
   const running = registry.running()
   const stopped = registry.list().filter((p) => p.status !== 'running' && !p.external)
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: '显示主界面', click: showWindow },
+    { label: m('tray.show'), click: showWindow },
     { type: 'separator' },
     ...running.map((p): Electron.MenuItemConstructorOptions => ({
-      label: `停止 ${p.name}`,
+      label: m('tray.stop', { name: p.name }),
       click: () => registry?.stop(p.id)
     })),
     ...stopped.slice(0, 8).map((p): Electron.MenuItemConstructorOptions => ({
-      label: `启动 ${p.name}`,
+      label: m('tray.start', { name: p.name }),
       click: () => {
         registry?.start(p.id).catch((err) => console.warn('[tray] start failed:', err.message))
       }
     })),
     { type: 'separator' },
     {
-      label: '退出容器（将停止所有 node 进程）',
+      label: m('tray.quit'),
       click: () => {
         isQuitting = true
         app.quit()
       }
     }
   ]
-  tray.setToolTip(`Desktop Container · ${running.length} 个 page 运行中`)
+  tray.setToolTip(m('tray.tooltip', { n: running.length }))
   tray.setContextMenu(Menu.buildFromTemplate(template))
 }
 
 function createTray(): void {
   if (tray) return
-  const image = existsSync(icon) ? nativeImage.createFromPath(icon) : nativeImage.createEmpty()
+  const path = appIconPath()
+  const image = existsSync(path) ? nativeImage.createFromPath(path) : nativeImage.createEmpty()
   tray = new Tray(image.isEmpty() ? image : image.resize({ width: 16, height: 16 }))
   tray.on('click', showWindow)
   rebuildTrayMenu()
@@ -133,8 +160,8 @@ async function verifyNodeRuntime(): Promise<void> {
   const info = await getNodeRuntimeInfo()
   if (!info.ok) {
     const msg = info.version
-      ? `内置 Node 版本异常：${info.version}（期望 v24.21.0）`
-      : '未找到内置 Node 运行时，请先运行 npm run setup:node'
+      ? m('err.nodeVersion', { version: info.version })
+      : m('err.nodeMissing')
     console.error(`[container] ${msg}`)
     dialogWarn(msg)
   } else {
@@ -143,7 +170,7 @@ async function verifyNodeRuntime(): Promise<void> {
 }
 
 function dialogWarn(msg: string): void {
-  dialog.showMessageBox({ type: 'warning', title: 'DSH 容器', message: msg }).catch(() => undefined)
+  dialog.showMessageBox({ type: 'warning', title: m('dialog.title'), message: msg }).catch(() => undefined)
 }
 
 const gotLock = app.requestSingleInstanceLock()

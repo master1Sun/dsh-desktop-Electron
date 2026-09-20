@@ -1,6 +1,8 @@
 import { app } from 'electron'
+import { accessSync, existsSync, mkdirSync } from 'node:fs'
+import { constants } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import Store from 'electron-store'
 import type { ContainerSettings, DefaultView } from '../shared/types'
 
@@ -8,11 +10,15 @@ const DEFAULTS: ContainerSettings = {
   defaultView: { kind: 'none' },
   openExternalIn: 'embedded',
   minimizeToTray: true,
-  // auto-run the three bundled runtimes on launch: codex (terminal), openclaw (gateway), dsh-web (server)
-  autoStartPages: ['codex', 'openclaw', 'dsh-web'],
+  // auto-run the bundled runtimes on launch: openclaw (gateway) + dsh-web (server)
+  autoStartPages: ['openclaw', 'dsh-web'],
   lastExternalUrls: [],
   externalSites: [],
   theme: 'auto',
+  // UI display language; defaults to Chinese
+  locale: 'zh',
+  // empty = follow the install directory (<installDir>/env); see resolveEnvRoot()
+  envRoot: '',
   dshHome: '',
   openclawHome: '',
   pageEnvs: {},
@@ -62,6 +68,63 @@ export function resolvePagesDir(): string {
   return join(resolveProjectDir(), 'pages')
 }
 
+/** Directory holding the app executable — the install dir when packaged, the repo root in dev. */
+export function resolveInstallDir(): string {
+  if (app.isPackaged) {
+    try {
+      return dirname(app.getPath('exe'))
+    } catch {
+      /* fall through to the app path */
+    }
+  }
+  return resolveProjectDir()
+}
+
+/** True when `dir` exists (or can be created) and is writable — runtime state needs both. */
+function isWritableDir(dir: string): boolean {
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    accessSync(dir, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Root of the container's "环境目录": every runtime's config/state dir defaults into a
+ * subdir of it (dsh → <root>/dsh, openclaw → <root>/openclaw).
+ * Default follows the install directory so a self-contained install keeps its data next
+ * to the app; when the install dir isn't writable (e.g. C:\Program Files) it falls back
+ * to userData. A non-empty `settings.envRoot` always wins.
+ */
+export function resolveEnvRoot(): string {
+  const override = (getSettings().envRoot || '').trim()
+  if (override) return expandHome(override)
+  if (app.isPackaged) {
+    const candidate = join(resolveInstallDir(), 'env')
+    if (isWritableDir(candidate)) return candidate
+  }
+  return join(app.getPath('userData'), 'env')
+}
+
+/** Expand the `{envRoot}` / `{userData}` placeholders used by container.json defaultPaths. */
+export function expandEnvTemplate(p: string): string {
+  if (!p) return p
+  return expandHome(p)
+    .replace(/\{envRoot\}/g, resolveEnvRoot())
+    .replace(/\{userData\}/g, app.getPath('userData'))
+}
+
+/**
+ * Pick between the new env-root default and a legacy home dir: moving an existing
+ * install's data would silently orphan its profiles/plugins, so keep the old location
+ * while it exists and only adopt the new default when nothing is there yet.
+ */
+function preferExisting(candidate: string, legacy: string): string {
+  return existsSync(candidate) || !existsSync(legacy) ? candidate : legacy
+}
+
 /** dsh runtime roots, most-recently-writable first: userData survives packaged updates
     (reprovision upgrade target), resources/dsh ships with the installer / dev provision.
     Deliberately NOT the repo root: dsh locates pnpm via `import.meta.resolve('@pnpm/exe/pnpm')`
@@ -85,7 +148,10 @@ export function resolveDshHome(): string {
   const override =
     (getSettings().dshHome || '').trim() ||
     (getSettings().pageEnvs?.['dsh-web']?.DSH_HOME || '').trim()
-  if (!override) return join(homedir(), '.dsh')
+  if (!override) {
+    // Follow the install dir by default, but never orphan an already-provisioned ~/.dsh.
+    return preferExisting(join(resolveEnvRoot(), 'dsh'), join(homedir(), '.dsh'))
+  }
   return expandHome(override)
 }
 
@@ -107,18 +173,34 @@ export function resolveOpenclawHome(): string {
   const override =
     (getSettings().openclawHome || '').trim() ||
     (getSettings().pageEnvs?.['openclaw']?.OPENCLAW_HOME || '').trim()
-  if (!override) return join(homedir(), '.openclaw')
+  if (!override) {
+    // Follow the install dir by default, but keep an already-provisioned ~/.openclaw.
+    return preferExisting(join(resolveEnvRoot(), 'openclaw'), join(homedir(), '.openclaw'))
+  }
   return expandHome(override)
 }
 
 /** Resolve one page-declared directory env var: process.env → user override → spec default.
-    Returns '' when none is set so callers can omit the var entirely. `~` is expanded. */
-export function resolvePageEnv(pageId: string, key: string, defaultPath?: string): string {
+    Returns '' when none is set so callers can omit the var entirely. `~` is expanded.
+    `legacyPath` names the CLI's own pre-container home: while it exists it wins over the
+    new default, so an existing install (login state, sessions, config) stays in use —
+    same migration guard dsh/openclaw get. */
+export function resolvePageEnv(
+  pageId: string,
+  key: string,
+  defaultPath?: string,
+  legacyPath?: string
+): string {
   const fromEnv = (process.env[key] || '').trim()
   if (fromEnv) return expandHome(fromEnv)
   const override = (getSettings().pageEnvs?.[pageId]?.[key] || '').trim()
   if (override) return expandHome(override)
-  if (defaultPath && defaultPath.trim()) return expandHome(defaultPath.trim())
+  // Declared defaults may use {envRoot} so they follow the install dir / user override.
+  if (defaultPath && defaultPath.trim()) {
+    const candidate = expandEnvTemplate(defaultPath.trim())
+    const legacy = (legacyPath || '').trim()
+    return legacy ? preferExisting(candidate, expandHome(legacy)) : candidate
+  }
   return ''
 }
 

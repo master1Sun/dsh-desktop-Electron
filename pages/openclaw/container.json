@@ -1,6 +1,9 @@
 {
   "name": "OpenClaw Gateway",
-  "description": "由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置在 ~/.openclaw",
+  "description": {
+    "zh": "由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置在 ~/.openclaw",
+    "en": "Container-managed openclaw gateway (bundled latest); the Control UI opens embedded in the main window; config lives in ~/.openclaw"
+  },
   "kind": "openclaw",
   "openclaw": {
     "port": 18789
@@ -8,9 +11,15 @@
   "envVars": [
     {
       "key": "OPENCLAW_HOME",
-      "label": "OPENCLAW 配置目录",
-      "defaultPath": "~/.openclaw",
-      "description": "留空即用 ~/.openclaw"
+      "label": {
+        "zh": "OPENCLAW 配置目录",
+        "en": "OPENCLAW config directory"
+      },
+      "defaultPath": "{envRoot}/openclaw",
+      "description": {
+        "zh": "留空即跟随环境目录（默认在安装目录下的 env/openclaw）",
+        "en": "Leave empty to follow the environment directory (env/openclaw under the install dir by default)"
+      }
     }
   ]
 }

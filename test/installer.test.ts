@@ -97,7 +97,7 @@ describe('removePage built-in protection', () => {
   it('refuses to delete container-shipped pages and keeps their dirs', () => {
     const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-builtin-'))
     try {
-      for (const id of ['dsh-web', 'codex', 'openclaw', 'dsh-plugin-market']) {
+      for (const id of ['dsh-web', 'openclaw']) {
         mkdirSync(join(pagesDir, id), { recursive: true })
         expect(() => removePage(pagesDir, id)).toThrow(/内置页面，不可删除/)
         expect(existsSync(join(pagesDir, id))).toBe(true)

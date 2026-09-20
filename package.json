@@ -19,7 +19,7 @@
     "setup:node": "node scripts/setup-node.mjs",
     "setup:openclaw": "node scripts/setup-openclaw.mjs",
     "setup:dsh": "node scripts/setup-dsh.mjs",
-    "prebuild": "npm run ensure:pages && npm run setup:openclaw && npm run setup:dsh && npm run setup:codex",
+    "prebuild": "npm run ensure:pages && npm run setup:openclaw && npm run setup:dsh",
     "ensure:pages": "node scripts/ensure-pages.mjs",
     "test": "vitest run && vitest run --config vitest.ui.config.ts",
     "test:unit": "vitest run",

@@ -1,6 +1,9 @@
 {
   "name": "DSH (web)",
-  "description": "由容器管理的 @deepseek-ai/dsh profile「web」，插件在本机 userData 的 profile 目录内管理",
+  "description": {
+    "zh": "由容器管理的 @deepseek-ai/dsh profile「web」，插件在本机 userData 的 profile 目录内管理",
+    "en": "Container-managed @deepseek-ai/dsh profile \"web\"; plugins are managed in this machine’s userData profile directory"
+  },
   "kind": "dsh",
   "dsh": {
     "profile": "web",
@@ -9,9 +12,15 @@
   "envVars": [
     {
       "key": "DSH_HOME",
-      "label": "DSH 配置目录",
-      "defaultPath": "~/.dsh",
-      "description": "留空即用 ~/.dsh"
+      "label": {
+        "zh": "DSH 配置目录",
+        "en": "DSH config directory"
+      },
+      "defaultPath": "{envRoot}/dsh",
+      "description": {
+        "zh": "留空即跟随环境目录（默认在安装目录下的 env/dsh）",
+        "en": "Leave empty to follow the environment directory (env/dsh under the install dir by default)"
+      }
     }
   ]
 }

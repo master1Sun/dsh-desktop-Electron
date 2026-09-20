@@ -1,6 +1,7 @@
 import { reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ExternalSite } from '../../../shared/types'
+import type { ExternalSite, Locale } from '../../../shared/types'
+import { t } from '../i18n'
 
 export interface DefaultView {
   kind: 'none' | 'page' | 'external'
@@ -16,6 +17,10 @@ export interface Settings {
   lastExternalUrls: string[]
   externalSites: ExternalSite[]
   theme: 'auto' | 'light' | 'dark'
+  /** UI display language; 'zh' default, 'en' for English */
+  locale: Locale
+  /** root for every runtime's config dir; empty = follow the install dir */
+  envRoot: string
   dshHome: string
   openclawHome: string
   pageEnvs: Record<string, Record<string, string>>
@@ -24,7 +29,7 @@ export interface Settings {
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
   const res = await p
-  if (!res.ok) throw new Error(res.error || '未知错误')
+  if (!res.ok) throw new Error(res.error || t('common.unknownError'))
   return res.data as T
 }
 
@@ -37,6 +42,8 @@ export const useSettingsStore = defineStore('settings', () => {
     lastExternalUrls: [],
     externalSites: [],
     theme: 'auto',
+    locale: 'zh',
+    envRoot: '',
     dshHome: '',
     openclawHome: '',
     pageEnvs: {},

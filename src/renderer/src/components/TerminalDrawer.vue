@@ -1,134 +1,115 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { Close, Cpu, Refresh, ArrowUp, ArrowDown, Rank } from '@element-plus/icons-vue'
+import { Close, Cpu, Minus, Plus, Refresh } from '@element-plus/icons-vue'
 import { useTerminalStore } from '../stores/terminal'
+import { t } from '../i18n'
 
+/**
+ * 内嵌终端面板：默认停靠在窗口底部（可拖上边缘调高度）；最小化后收成一个
+ * 可拖动的小图标，松手时横向吸附到窗口右缘，点图标即展开回底部面板。
+ */
 const store = useTerminalStore()
-const winEl = ref<HTMLElement | null>(null)
 const containerEl = ref<HTMLElement | null>(null)
+const fabEl = ref<HTMLElement | null>(null)
 let term: Terminal | null = null
 let fit: FitAddon | null = null
 let disposeData: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 
-// Floating-window geometry (bottom-right anchored via left/top once dragged).
-const pos = ref({ x: 0, y: 0 }) // 0 = unset → CSS anchors to bottom-right corner
-const size = ref({ w: 720, h: 460 })
 const minimized = ref(false)
-const drag = ref<'move' | 'e' | 's' | 'se' | null>(null)
-let startPointer = { x: 0, y: 0 }
-let startPos = { x: 0, y: 0 }
-let startSize = { w: 0, h: 0 }
+const size = ref({ h: 320 })
+const MIN_H = 160
 
-const MIN_W = 380
-const MIN_H = 200
-/** Collapsed drawer keeps exactly the title bar on screen (bar padding + ~24px content). */
-const BAR_H = 37
+/* ---- minimized FAB: draggable, snaps back to the right edge on release ---- */
+const FAB_SIZE = 42
+const fabY = ref(Math.round(window.innerHeight * 0.35))
+const fabDragging = ref(false)
+const fabDragPos = ref({ x: 0, y: 0 })
+let fabStart = { px: 0, py: 0, x: 0, y: 0 }
+let fabMoved = false
 
-const winStyle = (): Record<string, string> => {
-  if (store.docked) {
-    // Full-width strip flush under the title bar; collapsing slides it back up so
-    // only the tab bar peeks out (mirrors the floating window's bottom collapse).
-    const s: Record<string, string> = {
-      width: 'auto',
-      left: '0',
-      right: '0',
-      top: '38px',
-      bottom: 'auto',
-      height: `${size.value.h}px`,
-      transform: minimized.value ? `translateY(-${size.value.h - BAR_H}px)` : ''
-    }
-    return s
-  }
-  // Height stays at full size even when minimized: the collapse is done by moving
-  // the window down so only the title bar peeks out. Animating height to 0 would
-  // hide the bar (overflow:hidden) and leave no way to expand again.
-  const s: Record<string, string> = {
-    width: `${size.value.w}px`,
-    height: `${size.value.h}px`,
-    transform: minimized.value ? `translateY(calc(100% - ${BAR_H}px))` : ''
-  }
-  if (pos.value.x || pos.value.y) {
-    s.left = `${pos.value.x}px`
-    s.top = `${pos.value.y}px`
-    s.right = 'auto'
-    s.bottom = 'auto'
-  }
-  return s
+const fabStyle = computed<Record<string, string>>(() => {
+  if (fabDragging.value)
+    return { left: `${fabDragPos.value.x}px`, top: `${fabDragPos.value.y}px`, right: 'auto' }
+  return { left: 'auto', top: `${fabY.value}px`, right: '12px' }
+})
+
+function onFabDown(e: PointerEvent): void {
+  fabMoved = false
+  const rect = fabEl.value?.getBoundingClientRect()
+  fabStart = { px: e.clientX, py: e.clientY, x: rect?.left ?? 0, y: rect?.top ?? fabY.value }
+  fabDragging.value = true
+  fabEl.value?.setPointerCapture?.(e.pointerId)
+  window.addEventListener('pointermove', onFabMove)
+  window.addEventListener('pointerup', onFabUp)
 }
 
-// Switching dock modes invalidates any dragged position.
-watch(
-  () => store.docked,
-  () => {
-    pos.value = { x: 0, y: 0 }
+function onFabMove(e: PointerEvent): void {
+  const dx = e.clientX - fabStart.px
+  const dy = e.clientY - fabStart.py
+  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) fabMoved = true
+  fabDragPos.value = {
+    x: Math.max(0, Math.min(fabStart.x + dx, window.innerWidth - FAB_SIZE)),
+    y: Math.max(46, Math.min(fabStart.y + dy, window.innerHeight - FAB_SIZE - 8))
   }
-)
-
-function clampPos(): void {
-  const maxY = window.innerHeight - BAR_H // keep the title bar reachable
-  pos.value.x = Math.max(0, Math.min(pos.value.x, window.innerWidth - size.value.w))
-  pos.value.y = Math.max(0, Math.min(pos.value.y, maxY))
 }
 
-function onPointerDown(e: PointerEvent, mode: 'move' | 'e' | 's' | 'se'): void {
-  if (store.docked && mode !== 's') return
-  if (minimized.value && mode === 'move') {
+function onFabUp(): void {
+  window.removeEventListener('pointermove', onFabMove)
+  window.removeEventListener('pointerup', onFabUp)
+  fabDragging.value = false
+  if (!fabMoved) {
+    // a click, not a drag → expand back to the bottom panel
     minimized.value = false
     return
   }
-  if (mode === 'move' && (e.target as HTMLElement).closest('button')) return
-  // Materialize current on-screen position so we can move freely from the corner anchor.
-  const rect = winEl.value?.getBoundingClientRect()
-  // getBoundingClientRect reflects the collapse transform; subtract it back to the
-  // un-transformed origin that winStyle's top/left refers to.
-  if (rect) pos.value = { x: rect.left, y: rect.top + (minimized.value ? size.value.h - BAR_H : 0) }
-  startPointer = { x: e.clientX, y: e.clientY }
-  startPos = { ...pos.value }
-  startSize = { ...size.value }
-  drag.value = mode
+  // 吸附：横向回到右缘，纵向停在松手位置（已夹在窗口内）
+  fabY.value = fabDragPos.value.y
+}
+
+/* ---- bottom-dock height resize via the panel's top edge ---- */
+let resizing = false
+let resizeStart = { py: 0, h: 0 }
+
+function onResizeDown(e: PointerEvent): void {
+  resizing = true
+  resizeStart = { py: e.clientY, h: size.value.h }
   ;(e.currentTarget as HTMLElement)?.setPointerCapture?.(e.pointerId)
-  window.addEventListener('pointermove', onPointerMove)
-  window.addEventListener('pointerup', onPointerUp)
+  window.addEventListener('pointermove', onResizeMove)
+  window.addEventListener('pointerup', onResizeUp)
 }
 
-function onPointerMove(e: PointerEvent): void {
-  if (!drag.value) return
-  const dx = e.clientX - startPointer.x
-  const dy = e.clientY - startPointer.y
-  if (drag.value === 'move') {
-    pos.value = { x: startPos.x + dx, y: startPos.y + dy }
-    clampPos()
-  } else {
-    if (drag.value === 'e' || drag.value === 'se') size.value.w = Math.max(MIN_W, startSize.w + dx)
-    if (drag.value === 's' || drag.value === 'se') size.value.h = Math.max(MIN_H, startSize.h + dy)
-  }
+function onResizeMove(e: PointerEvent): void {
+  if (!resizing) return
+  const dy = e.clientY - resizeStart.py
+  size.value.h = Math.max(MIN_H, Math.min(resizeStart.h - dy, window.innerHeight - 80))
 }
 
-function onPointerUp(): void {
-  drag.value = null
-  window.removeEventListener('pointermove', onPointerMove)
-  window.removeEventListener('pointerup', onPointerUp)
+function onResizeUp(): void {
+  resizing = false
+  window.removeEventListener('pointermove', onResizeMove)
+  window.removeEventListener('pointerup', onResizeUp)
   fitActive()
 }
 
 function themeColors(): { bg: string; fg: string } {
   const light = document.documentElement.classList.contains('light')
-  return light ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#0f1420', fg: '#e6edf3' }
+  return light ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
 }
 
 function ensureTerm(): void {
   if (term || !containerEl.value) return
+  const c = themeColors()
   term = new Terminal({
     convertEol: true,
     cursorBlink: true,
     fontFamily: 'Consolas, Menlo, "Cascadia Code", monospace',
     fontSize: 13,
     scrollback: 5000,
-    theme: { background: '#0f1420', foreground: '#e6edf3' }
+    theme: { background: c.bg, foreground: c.fg }
   })
   fit = new FitAddon()
   term.loadAddon(fit)
@@ -138,6 +119,7 @@ function ensureTerm(): void {
   })
   // Only forward the active session's bytes into the single shared terminal surface.
   disposeData = window.container.onPtyData(({ id, data }) => {
+    store.feed(id, data)
     if (id === store.activeId) term?.write(data)
   })
   resizeObserver = new ResizeObserver(() => fitActive())
@@ -155,11 +137,13 @@ function fitActive(): void {
   }
 }
 
-/** Wipe the visible buffer and re-print the freshly-started shell's prompt. */
+/** Repaint the shared surface with the active tab's buffered scrollback. */
 function loadActive(): void {
   if (!term) return
   term.reset()
   fitActive()
+  const s = store.activeId ? store.sessionById(store.activeId) : null
+  if (s?.buffer) term.write(s.buffer)
   term.focus()
 }
 
@@ -194,7 +178,7 @@ watch(minimized, async (m) => {
 
 // Re-apply colors when the shell chrome flips between light/dark.
 watch(
-  () => store.open,
+  () => document.documentElement.className,
   () => {
     if (!term) return
     const c = themeColors()
@@ -213,9 +197,17 @@ function relaunchActive(): void {
   store.start(s.target, s.title).catch(() => undefined)
 }
 
+/** 新开一个终端 Tab：沿用当前会话的目标目录，没有会话时退回容器根目录。 */
+function newTerminal(): void {
+  const target = store.activeSession?.target ?? 'container'
+  store.start(target, store.activeSession?.title ?? t('terminal.rootTitle')).catch(() => undefined)
+}
+
 onBeforeUnmount(() => {
-  window.removeEventListener('pointermove', onPointerMove)
-  window.removeEventListener('pointerup', onPointerUp)
+  window.removeEventListener('pointermove', onResizeMove)
+  window.removeEventListener('pointerup', onResizeUp)
+  window.removeEventListener('pointermove', onFabMove)
+  window.removeEventListener('pointerup', onFabUp)
   disposeData?.()
   resizeObserver?.disconnect()
   term?.dispose()
@@ -224,8 +216,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section v-show="store.open" ref="winEl" class="term-win" :style="winStyle()">
-    <header class="term-bar" @pointerdown="onPointerDown($event, 'move')">
+  <!-- Bottom-docked full-width terminal strip. -->
+  <section v-show="store.open && !minimized" class="term-dock">
+    <header class="term-bar">
       <div class="tabs">
         <button
           v-for="s in store.sessions"
@@ -239,32 +232,27 @@ onBeforeUnmount(() => {
           {{ s.title }}
           <el-icon class="tab-close" size="12" @click.stop="onClose(s.id)"><Close /></el-icon>
         </button>
+        <button class="tab tab-new" :title="t('terminal.newTab')" @click.stop="newTerminal">
+          <el-icon size="12"><Plus /></el-icon>
+        </button>
       </div>
       <div class="bar-actions">
         <span class="cwd">{{ store.activeSession?.cwd }}</span>
-        <el-button size="small" text title="重启当前终端" @click.stop="relaunchActive">
+        <el-button size="small" text :title="t('terminal.restart')" @click.stop="relaunchActive">
           <el-icon><Refresh /></el-icon>
         </el-button>
         <el-button
           size="small"
           text
-          :title="store.docked ? '取消顶部停靠（恢复为浮动窗口）' : '停靠到顶部标题栏下方'"
-          @click.stop="store.setDocked(!store.docked)"
+          :title="t('terminal.minimize')"
+          @click.stop="minimized = true"
         >
-          <el-icon><Rank /></el-icon>
+          <el-icon><Minus /></el-icon>
         </el-button>
         <el-button
           size="small"
           text
-          :title="minimized ? '展开终端' : '折叠终端'"
-          @click.stop="minimized = !minimized"
-        >
-          <el-icon><ArrowUp v-if="!minimized" /><ArrowDown v-else /></el-icon>
-        </el-button>
-        <el-button
-          size="small"
-          text
-          title="关闭全部终端（结束进程）"
+          :title="t('terminal.closeAll')"
           @click.stop="store.closeAll()"
         >
           <el-icon><Close /></el-icon>
@@ -272,45 +260,45 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div v-show="!minimized" ref="containerEl" class="term-surface">
+    <div ref="containerEl" class="term-surface">
       <div v-if="!store.sessions.length" class="term-empty">
-        <el-icon size="18"><Cpu /></el-icon> 点各面板的「终端」按钮在此打开内嵌 shell
+        <el-icon size="18"><Cpu /></el-icon> {{ t('terminal.emptyHint') }}
       </div>
     </div>
 
-    <!-- resize handles -->
-    <div
-      v-if="!store.docked"
-      v-show="!minimized"
-      class="rz rz-e"
-      @pointerdown="onPointerDown($event, 'e')"
-    />
-    <div v-show="!minimized" class="rz rz-s" @pointerdown="onPointerDown($event, 's')" />
-    <div
-      v-if="!store.docked"
-      v-show="!minimized"
-      class="rz rz-se"
-      @pointerdown="onPointerDown($event, 'se')"
-    />
+    <!-- top-edge resize handle -->
+    <div class="rz rz-n" @pointerdown="onResizeDown" />
   </section>
+
+  <!-- Minimized: a draggable icon that hugs the right edge. -->
+  <button
+    v-if="store.open && minimized"
+    ref="fabEl"
+    class="term-fab"
+    :class="{ dragging: fabDragging }"
+    :style="fabStyle"
+    :title="t('terminal.collapsed')"
+    @pointerdown="onFabDown"
+  >
+    <el-icon :size="18"><Cpu /></el-icon>
+    <span v-if="store.sessions.length" class="fab-badge">{{ store.sessions.length }}</span>
+  </button>
 </template>
 
 <style scoped>
-.term-win {
+.term-dock {
   position: fixed;
-  right: 18px;
-  bottom: 18px;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 2000;
   display: flex;
   flex-direction: column;
-  max-width: calc(100vw - 24px);
-  max-height: calc(100vh - 24px);
-  border: 1px solid var(--border);
-  border-radius: 10px;
   background: var(--surface);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  border-top: 1px solid var(--border);
+  border-radius: 10px 10px 0 0;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.35);
   overflow: hidden;
-  transition: transform 0.15s ease;
 }
 
 .term-bar {
@@ -322,12 +310,7 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
   flex: none;
-  cursor: move;
   user-select: none;
-  touch-action: none;
-}
-.term-win.minimized .term-bar {
-  border-bottom: none;
 }
 
 .tabs {
@@ -415,30 +398,56 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.rz {
+.rz-n {
   position: absolute;
-  z-index: 5;
-  touch-action: none;
-}
-.rz-e {
   top: 0;
-  right: 0;
-  width: 6px;
-  height: 100%;
-  cursor: ew-resize;
-}
-.rz-s {
   left: 0;
-  bottom: 0;
-  width: 100%;
+  right: 0;
   height: 6px;
   cursor: ns-resize;
+  touch-action: none;
+  z-index: 5;
 }
-.rz-se {
-  right: 0;
-  bottom: 0;
-  width: 14px;
-  height: 14px;
-  cursor: nwse-resize;
+
+/* ---- minimized floating icon ---- */
+.term-fab {
+  position: fixed;
+  right: 12px;
+  z-index: 2000;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.term-fab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.term-fab.dragging {
+  cursor: grabbing;
+}
+
+.fab-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  line-height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  text-align: center;
 }
 </style>

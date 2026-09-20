@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -6,22 +6,26 @@ import { createConnection } from 'node:net'
 import { nativeTheme } from 'electron'
 import { getNodeExePath, bundledEnv } from './node-runtime'
 import { resolvePageEnv, resolvePagePort, expandHome, isValidPort, getSettings } from './store'
+// aliased: `m` is already a local identifier in this file (regex match / map callback)
+import { m as msg, resolveText } from './i18n'
 import {
   OPENCLAW_DEFAULT_PORT,
+  type DshTokenResult,
+  type LocalizableText,
   type PageMeta,
   type PageState,
   type PageStatus
 } from '../shared/types'
 
-const LOG_LIMIT = 200
+const LOG_LIMIT = 1000
 const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 30_000)
 /** openclaw's first boot self-installs provider plugins + runs state migrations, so it can take ~30s+ to bind; give it generous headroom. */
 const OPENCLAW_READY_TIMEOUT_MS = Number(process.env.DSH_OPENCLAW_READY_TIMEOUT_MS || 120_000)
 /** How long the declared-port fallback waits for dsh's token-bearing ready line before launching without it. */
 const ANNOUNCE_GRACE_MS = 1500
 
-/** Pages shipped with the container (ensure-pages.mjs / repo `pages/`) — never removable. */
-export const BUILTIN_PAGE_IDS = new Set(['dsh-web', 'codex', 'openclaw', 'dsh-plugin-market'])
+/** Pages shipped with the container (repo `pages/`) — never removable. */
+export const BUILTIN_PAGE_IDS = new Set(['dsh-web', 'openclaw'])
 
 /** Run a short-lived CLI without blocking the main-process event loop (a frozen UI otherwise). */
 function runCli(
@@ -71,7 +75,7 @@ export function defaultStartCommand(dir: string): string {
   } catch {
     /* no package.json */
   }
-  throw new Error(`无法推断启动命令：目录缺少 server.js / index.js / package.json(start script)`)
+  throw new Error(msg('page.noEntryCommand'))
 }
 
 function startCommandInferable(dir: string): boolean {
@@ -94,25 +98,45 @@ export interface OpenclawConfig {
   port?: number
 }
 
+/**
+ * The on-disk shape of a page's `container.json`, i.e. what a project author (or an import
+ * seed) writes. Its text fields are {@link LocalizableText}: a plain string serves every
+ * language, an object carries the per-language variants. Everything here is resolved into
+ * plain strings by `readPageMeta` before it becomes a {@link PageMeta}, so no consumer —
+ * the renderer, the tray, the update checker — has to deal with locales.
+ */
+export interface ContainerManifest {
+  name?: LocalizableText
+  description?: LocalizableText
+  port?: number
+  startCommand?: string
+  external?: boolean
+  externalUrl?: string
+  kind?: PageKind
+  dsh?: DshConfig
+  openclaw?: OpenclawConfig
+  envVars?: Array<{
+    key: string
+    label?: LocalizableText
+    description?: LocalizableText
+    defaultPath?: string
+    legacyPath?: string
+  }>
+}
+
 /** Env var automatically exposed (and injected) for every plain imported page so its
     install directory is configurable from Settings without declaring container.json envVars. */
 export const PAGE_DIR_ENV_KEY = 'APP_DIR'
 
 export function readPageMeta(pagesDir: string, id: string): PageMeta {
   const dir = join(pagesDir, id)
-  let raw: Partial<PageMeta> & {
-    port?: number
-    startCommand?: string
-    kind?: PageKind
-    dsh?: DshConfig
-    openclaw?: OpenclawConfig
-  } = {}
+  let raw: ContainerManifest = {}
   const metaFile = join(dir, 'container.json')
   if (existsSync(metaFile)) {
     try {
       raw = JSON.parse(readFileSync(metaFile, 'utf-8'))
     } catch (err) {
-      throw new Error(`container.json 解析失败: ${(err as Error).message}`)
+      throw new Error(msg('page.metaParseFail', { err: (err as Error).message }))
     }
   }
   const kind: PageKind =
@@ -137,40 +161,49 @@ export function readPageMeta(pagesDir: string, id: string): PageMeta {
     startCommand = `openclaw gateway run --force --allow-unconfigured --port ${port}`
   } else if (kind === 'terminal') {
     // CLI-only project: no HTTP port; it runs inside the embedded terminal.
-    if (!startCommand) throw new Error(`container.json 缺少 startCommand（terminal 类型必填）`)
+    if (!startCommand) throw new Error(msg('page.metaNoStart'))
   } else if (!external && !port && !startCommand) {
     // No declared port is fine when the project has an inferable entry point —
     // the listener picks its own port then. Only a dead end (neither) is rejected.
     if (startCommandInferable(dir)) startCommand = defaultStartCommand(dir)
-    else
-      throw new Error(
-        `container.json 缺少 port（或设置 external=true / kind=terminal，或项目自带可推断的启动入口）`
-      )
+    else throw new Error(msg('page.metaNoPort'))
   }
   if (kind === 'page' && !external && !startCommand) startCommand = defaultStartCommand(dir)
   const declared = Array.isArray(raw.envVars) ? raw.envVars : []
+  // Flatten the per-language fields right here: every consumer downstream of this point
+  // (Settings panel, env injection, the renderer's page list) deals in plain strings only.
+  const declaredSpecs = declared
+    .filter((v) => Boolean(v?.key))
+    .map((v) => {
+      const { label, description, ...rest } = v
+      return {
+        ...rest,
+        label: resolveText(label) || undefined,
+        description: resolveText(description) || undefined
+      }
+    })
   // Auto-expose the install directory for plain pages so importing alone yields a
   // configurable env var in Settings — no container.json envVars declaration needed.
-  let envVars: PageMeta['envVars'] = declared.length ? declared : undefined
-  if (kind === 'page' && !external && !declared.some((v) => v?.key === PAGE_DIR_ENV_KEY)) {
+  let envVars: PageMeta['envVars'] = declaredSpecs.length ? declaredSpecs : undefined
+  if (kind === 'page' && !external && !declaredSpecs.some((v) => v.key === PAGE_DIR_ENV_KEY)) {
     envVars = [
       {
         key: PAGE_DIR_ENV_KEY,
-        label: '页面目录',
+        label: msg('page.dirEnvLabel'),
         defaultPath: dir,
-        description: '自动生成的应用安装目录，以环境变量注入该页面子进程。留空即用导入时的目录。'
+        description: msg('page.dirEnvDesc')
       },
-      ...declared
+      ...declaredSpecs
     ]
   }
   return {
     id,
-    name: raw.name || id,
+    name: resolveText(raw.name, id),
     dir,
     port,
     containerPort: resolvePagePort(id, port),
     startCommand,
-    description: raw.description,
+    description: resolveText(raw.description) || undefined,
     external,
     externalUrl: raw.externalUrl,
     kind,
@@ -192,7 +225,7 @@ export function scanInstalledPages(pagesDir: string): PageMeta[] {
     } catch (err) {
       out.push({
         id: entry,
-        name: `${entry} (配置无效)`,
+        name: msg('page.metaInvalid', { entry }),
         dir: full,
         port: 0,
         containerPort: resolvePagePort(entry, 0),
@@ -216,7 +249,7 @@ export function waitPortReady(port: number, timeoutMs = START_TIMEOUT_MS): Promi
       sock.on('error', () => {
         sock.destroy()
         if (Date.now() > deadline) {
-          reject(new Error(`端口 ${port} 在 ${Math.round(timeoutMs / 1000)}s 内未就绪`))
+          reject(new Error(msg('page.portNotReady', { port, sec: Math.round(timeoutMs / 1000) })))
         } else {
           setTimeout(attempt, 400)
         }
@@ -241,6 +274,46 @@ export function parseLaunchLine(text: string): { port: number; url: string } | n
 }
 
 /**
+ * Pull the `?token=` auth param out of a page's launch URL — the same value the webview is
+ * handed, so it is guaranteed to be the one the server actually accepts.
+ *
+ * A stopped page yields null rather than a bogus token: `toState()` substitutes a bare
+ * origin (`http://127.0.0.1:8899`) once `launchUrl` has been cleared, and a bare origin has
+ * no token param to read. `URLSearchParams` decodes percent-escapes, so callers get the raw
+ * token the server compares against, not the escaped form shown in an address bar.
+ */
+export function tokenFromLaunchUrl(url: string | undefined): string | null {
+  if (!url) return null
+  try {
+    const token = new URL(url).searchParams.get('token')
+    return token && token.trim() ? token.trim() : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve a dsh profile's runtime token from the page list — the shape behind `IPC.DshToken`.
+ *
+ * Matching goes by `dshProfile` rather than the `dsh-<profile>` directory name, so a page the
+ * user registered under a different folder still answers. A running page always wins: its
+ * `launchUrl` carries the token dsh is enforcing right now, whereas a stopped entry only
+ * reports a bare origin. Kept pure (pages in, verdict out) so the branch that actually matters
+ * — "no page yet" vs "page not started" — is unit-testable without booting Electron.
+ */
+export function resolveDshToken(pages: PageState[], profile: string): DshTokenResult {
+  const wanted = profile.trim() || 'web'
+  const candidates = pages.filter((p) => p.kind === 'dsh' && (p.dshProfile || 'web') === wanted)
+  for (const p of candidates) {
+    const token = tokenFromLaunchUrl(p.launchUrl)
+    if (token && p.launchUrl) return { kind: 'ok', token, pageId: p.id, url: p.launchUrl }
+  }
+  return candidates.length
+    ? { kind: 'stopped', pageId: candidates[0].id }
+    : { kind: 'no-page', profile: wanted }
+}
+
+/**
  * dsh's web UI honors a `?theme=` launch param. Since the container only knows
  * the OS theme (nativeTheme), we pass it through when dark and omit it for
  * light — so an OS-light user sees dsh's own default (light) unchanged.
@@ -259,6 +332,18 @@ function withThemeParam(url: string | undefined, kind?: PageKind): string | unde
   return url
 }
 
+/** Create a directory-typed env value before the runtime starts. Some CLIs abort on
+    launch when their home dir does not exist yet, which shows up as a dead terminal
+    that accepts no input. Best-effort: a failure here must not block the spawn (the
+    CLI reports it itself). */
+function ensureEnvDir(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {
+    /* read-only root or a file already there: let the CLI surface the problem */
+  }
+}
+
 /** Build the per-page env extras from its declared envVars, resolving each override.
     Plain node pages only — dsh/openclaw kinds already pin their own homes. Also expands a
     leading `~` in the start command so tilde paths work without a shell. */
@@ -266,8 +351,12 @@ export function buildPageEnv(meta: PageMeta): Record<string, string> {
   const out: Record<string, string> = {}
   for (const spec of meta.envVars ?? []) {
     if (!spec?.key) continue
-    const v = resolvePageEnv(meta.id, spec.key, spec.defaultPath)
-    if (v) out[spec.key] = v
+    const v = resolvePageEnv(meta.id, spec.key, spec.defaultPath, spec.legacyPath)
+    if (!v) continue
+    // A declared defaultPath means the var names a directory (CODEX_HOME, …); make it
+    // exist so a first-launch runtime doesn't refuse to start.
+    if (spec.defaultPath) ensureEnvDir(v)
+    out[spec.key] = v
   }
   return out
 }
@@ -289,11 +378,11 @@ export class PageRegistry extends EventEmitter {
   containerEntry(): PageMeta {
     return {
       id: '__container__',
-      name: 'Desktop Container',
+      name: msg('app.title'),
       dir: this.root.projectDir,
       port: 0,
       startCommand: '',
-      description: '容器主程序（git 更新检测对象）',
+      description: msg('page.containerDesc'),
       external: true
     }
   }
@@ -349,9 +438,9 @@ export class PageRegistry extends EventEmitter {
 
   async start(id: string): Promise<PageState> {
     const e = this.entries.get(id)
-    if (!e) throw new Error(`未知 page: ${id}`)
+    if (!e) throw new Error(msg('page.unknown', { id }))
     if (e.status === 'running' || e.status === 'starting') return this.toState(e)
-    if (e.meta.external) throw new Error(`${e.meta.name} 是外部地址项目，无需启动进程`)
+    if (e.meta.external) throw new Error(msg('page.externalNoStart', { name: e.meta.name }))
 
     const isDsh = e.meta.kind === 'dsh'
     const isOpenclaw = e.meta.kind === 'openclaw'
@@ -359,14 +448,14 @@ export class PageRegistry extends EventEmitter {
     /** the user port override wins over container.json for every kind */
     const port = e.meta.containerPort || e.meta.port
     if (!isDsh && !isOpenclaw && !isTerminal && (!port || !e.meta.startCommand)) {
-      throw new Error(`${e.meta.name} 配置无效，无法启动（请先设置端口）`)
+      throw new Error(msg('page.invalidConfig', { name: e.meta.name }))
     }
     if (isTerminal && !e.meta.startCommand) {
-      throw new Error(`${e.meta.name} 缺少启动命令，无法在终端中运行`)
+      throw new Error(msg('page.noStartCommand', { name: e.meta.name }))
     }
 
     this.setStatus(e, 'starting')
-    e.logs = []
+    e.logs = [msg('page.logStarting', { name: e.meta.name, port })]
     e.lastError = undefined
     e.exitCode = undefined
     e.resolvedPort = undefined
@@ -388,7 +477,7 @@ export class PageRegistry extends EventEmitter {
           shell: false
         })
       } catch (err) {
-        this.fail(e, `dsh 启动失败: ${(err as Error).message}`)
+        this.fail(e, msg('page.dshStartFail', { err: (err as Error).message }))
         throw new Error(e.lastError)
       }
     } else if (isOpenclaw) {
@@ -405,16 +494,16 @@ export class PageRegistry extends EventEmitter {
           shell: false
         })
       } catch (err) {
-        this.fail(e, `openclaw 启动失败: ${(err as Error).message}`)
+        this.fail(e, msg('page.openclawStartFail', { err: (err as Error).message }))
         throw new Error(e.lastError)
       }
     } else {
-      // Terminal kinds are interactive CLIs (codex…) that need a PTY; a detached
-      // spawn exits at once without one and would masquerade as an error. They run
-      // in the embedded terminal (CliTerminalView / PtyManager), never via start().
+      // Terminal kinds are interactive CLIs that need a PTY; a detached spawn exits
+      // at once without one and would masquerade as an error. They run in the
+      // embedded terminal (CliTerminalView / PtyManager), never via start().
       if (isTerminal) {
         this.setStatus(e, 'stopped')
-        throw new Error(`${e.meta.name} 是命令行项目，请点击「终端」在内置终端中运行`)
+        throw new Error(msg('page.cliNeedsTerminal', { name: e.meta.name }))
       }
       const [cmd, ...args] = expandStartCommand(e.meta.startCommand).split(/\s+/)
       const executable = cmd === 'node' ? getNodeExePath() : cmd
@@ -426,7 +515,7 @@ export class PageRegistry extends EventEmitter {
           shell: false
         })
       } catch (err) {
-        this.fail(e, `spawn 失败: ${(err as Error).message}`)
+        this.fail(e, msg('page.spawnFail', { err: (err as Error).message }))
         throw new Error(e.lastError)
       }
     }
@@ -441,7 +530,10 @@ export class PageRegistry extends EventEmitter {
       if (e.status === 'starting' || e.status === 'running') {
         this.setStatus(e, code === 0 || this.quitting ? 'stopped' : 'error')
         e.exitCode = code
-        if (code !== 0 && !this.quitting) e.lastError = `进程退出，code=${code}`
+        if (code !== 0 && !this.quitting) {
+          e.lastError = msg('page.processExited', { code: code ?? '' })
+          e.logs.push(`[container] ${e.lastError}`)
+        }
       }
       e.proc = undefined
       e.pid = undefined
@@ -459,6 +551,7 @@ export class PageRegistry extends EventEmitter {
         launchUrl = (await resolveOpenclawLaunchUrl()) || url
       }
       e.launchUrl = launchUrl
+      e.logs.push(msg('page.logReady', { port }))
       this.setStatus(e, 'running')
       this.emitChanged()
       return this.toState(e)
@@ -509,7 +602,10 @@ export class PageRegistry extends EventEmitter {
           cleanup()
           failWith(
             new Error(
-              `dsh profile 在 ${Math.round(START_TIMEOUT_MS / 1000)}s 内未就绪（端口 ${wantPort}）`
+              msg('page.dshProfileNotReady', {
+                sec: Math.round(START_TIMEOUT_MS / 1000),
+                port: wantPort
+              })
             )
           )
         }
@@ -535,6 +631,7 @@ export class PageRegistry extends EventEmitter {
     const e = this.entries.get(id)
     if (!e?.proc) return
     const proc = e.proc
+    e.logs.push(msg('page.logStopping'))
     // mark intentional kill so the close handler doesn't flip to 'error'
     e.exitCode = undefined
     if (process.platform === 'win32') {
@@ -690,12 +787,14 @@ export class PageRegistry extends EventEmitter {
   }
 
   /** auto-start configured pages; failures are logged, never thrown.
-      Terminal-kind pages (e.g. codex) run in the embedded terminal and are opened by the
-      renderer, so they are skipped here to avoid a spurious "run in terminal" error. */
+      Terminal-kind pages run in the embedded terminal and are opened by the renderer,
+      so they are skipped here to avoid a spurious "run in terminal" error. Unknown ids
+      (a retired builtin still listed in persisted settings) are skipped silently. */
   async autoStart(ids: string[]): Promise<void> {
     for (const id of ids) {
       const entry = this.entries.get(id)
-      if (entry?.meta.kind === 'terminal') continue
+      if (!entry) continue
+      if (entry.meta.kind === 'terminal') continue
       try {
         await this.start(id)
       } catch (err) {
@@ -728,7 +827,10 @@ export class PageRegistry extends EventEmitter {
     }
   }
 
-  private emitChanged(): void {
+  /** Ask every listener to re-read state. Out-of-band callers (e.g. a language change, which
+      changes the strings resolved out of container.json) use this; `reconcile()` first if the
+      manifests themselves need re-reading. */
+  emitChanged(): void {
     this.emit('changed')
   }
 }

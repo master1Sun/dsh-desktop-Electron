@@ -20,13 +20,13 @@
 html.dark {
   --accent: #5b9bff;
   --accent-strong: #7cb0ff;
-  --bg: #0f1420;
-  --surface: #171e2c;
-  --surface-2: #1d2636;
-  --text: #e6ebf4;
-  --text-dim: #9aa7bd;
-  --border: #273043;
-  --shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --surface-2: #121212;
+  --text: #e8ecf3;
+  --text-dim: #8e99ad;
+  --border: #1a1a1a;
+  --shadow: 0 10px 32px rgba(0, 0, 0, 0.75);
   color-scheme: dark;
 
   /* Element Plus semantic tokens → theme vars (EP defaults are light-only) */
@@ -44,14 +44,43 @@ html.dark {
   --el-border-color-extra-light: var(--border);
   --el-border-color-hover: color-mix(in srgb, var(--accent) 55%, var(--border));
   --el-fill-color-blank: var(--surface);
-  --el-fill-color-lighter: var(--surface);
-  --el-fill-color-light: var(--surface-2);
-  --el-fill-color: color-mix(in srgb, var(--surface-2) 80%, white 2%);
+  /* Hover/active fills must stay distinguishable from the surfaces they sit on:
+     light === surface-2 made dropdown/button hover invisible on an overlay. */
+  --el-fill-color-lighter: color-mix(in srgb, var(--surface) 92%, white 8%);
+  --el-fill-color-light: color-mix(in srgb, var(--surface-2) 80%, white 12%);
+  --el-fill-color: color-mix(in srgb, var(--surface-2) 68%, white 18%);
   --el-fill-color-dark: var(--border);
   --el-fill-color-darker: color-mix(in srgb, var(--border) 70%, black);
   --el-color-primary: var(--accent);
+  /* EP derives these tints from its own #409eff; rebuild them from our accent.
+     light-9 is the default button's hover background — the stock value is ~90%
+     white and flashed bright against the dark shell. */
+  --el-color-primary-light-3: color-mix(in srgb, var(--accent) 78%, white 22%);
+  --el-color-primary-light-5: color-mix(in srgb, var(--accent) 62%, var(--surface) 38%);
+  --el-color-primary-light-7: color-mix(in srgb, var(--accent) 42%, var(--surface) 58%);
+  --el-color-primary-light-8: color-mix(in srgb, var(--accent) 30%, var(--surface) 70%);
+  --el-color-primary-light-9: color-mix(in srgb, var(--accent) 15%, var(--surface) 85%);
+  --el-color-primary-dark-2: color-mix(in srgb, var(--accent) 84%, black 16%);
+  /* Same treatment for the status palettes: el-tag / plain buttons fill their
+     background with `--el-color-{type}-light-9`, whose stock value is ~90% white —
+     bright pills on the dark shell. Rebuild as subtle tinted chips. */
+  --el-color-success-light-3: color-mix(in srgb, var(--ok) 78%, white 22%);
+  --el-color-success-light-8: color-mix(in srgb, var(--ok) 30%, var(--surface) 70%);
+  --el-color-success-light-9: color-mix(in srgb, var(--ok) 15%, var(--surface) 85%);
+  --el-color-warning-light-3: color-mix(in srgb, var(--warn) 78%, white 22%);
+  --el-color-warning-light-8: color-mix(in srgb, var(--warn) 30%, var(--surface) 70%);
+  --el-color-warning-light-9: color-mix(in srgb, var(--warn) 15%, var(--surface) 85%);
+  --el-color-danger-light-3: color-mix(in srgb, var(--err) 78%, white 22%);
+  --el-color-danger-light-8: color-mix(in srgb, var(--err) 30%, var(--surface) 70%);
+  --el-color-danger-light-9: color-mix(in srgb, var(--err) 15%, var(--surface) 85%);
+  --el-color-error-light-3: color-mix(in srgb, var(--err) 78%, white 22%);
+  --el-color-error-light-8: color-mix(in srgb, var(--err) 30%, var(--surface) 70%);
+  --el-color-error-light-9: color-mix(in srgb, var(--err) 15%, var(--surface) 85%);
+  --el-color-info-light-3: color-mix(in srgb, var(--text-dim) 78%, white 22%);
+  --el-color-info-light-8: color-mix(in srgb, var(--text-dim) 30%, var(--surface) 70%);
+  --el-color-info-light-9: color-mix(in srgb, var(--text-dim) 15%, var(--surface) 85%);
   --el-disabled-bg-color: var(--surface-2);
-  --el-mask-color: rgba(8, 11, 18, 0.7);
+  --el-mask-color: rgba(0, 0, 0, 0.7);
   /* status palettes: only these carry light-mode tints component-by-component */
   --el-color-success: var(--ok);
   --el-color-warning: var(--warn);
@@ -132,7 +161,7 @@ html.dark {
     }
   }
   .el-loading-mask {
-    background-color: rgba(8, 11, 18, 0.6);
+    background-color: rgba(0, 0, 0, 0.6);
   }
   .el-dialog,
   .el-message-box {
@@ -173,7 +202,12 @@ body,
 
 body {
   font-family:
-    'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Microsoft YaHei UI', sans-serif;
+    'Segoe UI Variable Text',
+    'Segoe UI',
+    system-ui,
+    -apple-system,
+    'Microsoft YaHei UI',
+    sans-serif;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
@@ -199,6 +233,59 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
+}
+
+/* --- click feedback ---------------------------------------------------------
+   Icon-only `text` buttons gave no visible response at all, so a click that did
+   register looked exactly like a miss. Two layers, because they cover different
+   halves of the problem: the `:active` dip handles "is the press landing at all",
+   and the fading wash answers "did that click go through" after the fact — a press
+   lasts ~80ms, which is far too brief for a transition on its own to be seen.
+   `::after` is free on `.el-button` (Element Plus only repaints colours on :active). */
+.el-button {
+  position: relative;
+  overflow: hidden;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    transform 0.09s ease;
+}
+.el-button::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: currentColor;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.24s ease;
+}
+.el-button:active:not(.is-disabled) {
+  transform: scale(0.94);
+}
+.el-button:active:not(.is-disabled)::after {
+  opacity: 0.16;
+  transition-duration: 0.03s;
+}
+.el-radio-button__inner {
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.09s ease;
+}
+.el-radio-button__inner:active {
+  transform: scale(0.96);
+}
+@media (prefers-reduced-motion: reduce) {
+  .el-button,
+  .el-button:active:not(.is-disabled),
+  .el-radio-button__inner,
+  .el-radio-button__inner:active {
+    transform: none;
+  }
 }
 
 .status-dot {

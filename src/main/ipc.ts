@@ -3,11 +3,12 @@ import {
   IPC,
   type IpcResult,
   type DefaultView,
+  type DshTokenResult,
   type DshUpdateChannel,
   type UpdateCheckResult
 } from '../shared/types'
 import { getNodeRuntimeInfo } from './node-runtime'
-import { PageRegistry, expandStartCommand, buildPageEnv } from './pages'
+import { PageRegistry, expandStartCommand, buildPageEnv, resolveDshToken } from './pages'
 import {
   getSettings,
   updateSettings,
@@ -16,7 +17,10 @@ import {
   isValidPort,
   resolveProjectDir,
   resolveDshProfileDir,
-  resolveOpenclawHome
+  resolveDshHome,
+  resolveOpenclawHome,
+  resolveEnvRoot,
+  resolveInstallDir
 } from './store'
 import { installFromGit, installFromLocalDir, removePage } from './installer'
 import { checkUpdates, performUpdate, clearUpdateCache } from './update-service'
@@ -32,10 +36,12 @@ import {
   createDshPage
 } from './dsh'
 import { getOpenclawStatus, createOpenclawPage, getOpenclawGatewayToken } from './openclaw'
+import { m, notifyLocaleChanged } from './i18n'
 
 export function registerIpc(registry: PageRegistry): void {
   const ok = <T>(data?: T): IpcResult<T> => ({ ok: true, data })
-  const fail = (err: unknown): IpcResult => ({
+  // Generic so a handler annotated `IpcResult<Foo>` can still `return fail(err)` and keep its type.
+  const fail = <T = unknown>(err: unknown): IpcResult<T> => ({
     ok: false,
     error: err instanceof Error ? err.message : String(err)
   })
@@ -169,12 +175,12 @@ export function registerIpc(registry: PageRegistry): void {
     }
   )
 
-  ipcMain.handle(IPC.ChooseDirectory, async (e): Promise<IpcResult> => {
+  ipcMain.handle(IPC.ChooseDirectory, async (e, title?: string): Promise<IpcResult> => {
     try {
       const win = BrowserWindow.fromWebContents(e.sender)
       const opts: Electron.OpenDialogOptions = {
         properties: ['openDirectory', 'createDirectory'],
-        title: '选择要托管的本地项目目录'
+        title: title || m('dialog.chooseDir')
       }
       const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
       if (res.canceled || !res.filePaths.length) return ok(null)
@@ -203,7 +209,7 @@ export function registerIpc(registry: PageRegistry): void {
   ipcMain.handle(IPC.SetPagePort, (_e, id: string, port?: number): IpcResult => {
     try {
       const clear = port === undefined || port === null || Number(port) === 0
-      if (!clear && !isValidPort(port)) return { ok: false, error: '端口需为 1-65535 的整数' }
+      if (!clear && !isValidPort(port)) return { ok: false, error: m('ipc.portRange') }
       const pagePorts = { ...getSettings().pagePorts }
       if (clear) delete pagePorts[id]
       else pagePorts[id] = Number(port)
@@ -236,6 +242,8 @@ export function registerIpc(registry: PageRegistry): void {
         minimizeToTray?: boolean
         autoStartPages?: string[]
         theme?: 'auto' | 'light' | 'dark'
+        locale?: 'zh' | 'en'
+        envRoot?: string
         dshHome?: string
         openclawHome?: string
         pageEnvs?: Record<string, Record<string, string>>
@@ -247,11 +255,28 @@ export function registerIpc(registry: PageRegistry): void {
         const rest = { ...partial }
         delete rest.defaultView
         if (Object.keys(rest).length) updateSettings(rest)
+        // The tray menu / window caption are rendered by the main process, so a language
+        // change is fanned out to them explicitly (see main/index.ts). container.json text
+        // is resolved in the *active* language when a manifest is read, so the cached metas
+        // have to be re-read first and the windows told to refetch their page list.
+        if (partial.locale) {
+          registry.reconcile()
+          notifyLocaleChanged()
+          registry.emitChanged()
+        }
         return ok(getSettings())
       } catch (err) {
         return fail(err)
       }
     }
+  )
+
+  ipcMain.handle(IPC.EnvRoot, (): IpcResult =>
+    ok({
+      envRoot: resolveEnvRoot(),
+      installDir: resolveInstallDir(),
+      custom: Boolean((getSettings().envRoot || '').trim())
+    })
   )
 
   ipcMain.handle(IPC.CheckUpdates, async (_e, force?: boolean): Promise<IpcResult> => {
@@ -296,7 +321,7 @@ export function registerIpc(registry: PageRegistry): void {
   ipcMain.handle(IPC.OpenTerminalPage, (_e, id: string): IpcResult => {
     try {
       const meta = registry.get(id)
-      if (!meta || meta.kind !== 'terminal') throw new Error(`${id} 不是终端类项目`)
+      if (!meta || meta.kind !== 'terminal') throw new Error(m('ipc.notTerminal', { id }))
       for (const w of BrowserWindow.getAllWindows()) {
         if (!w.isDestroyed()) w.webContents.send(IPC.OpenTerminalPage, id)
       }
@@ -309,9 +334,10 @@ export function registerIpc(registry: PageRegistry): void {
   const terminalDirFor = (target: string): string => {
     if (target === 'container') return resolveProjectDir()
     if (target === 'openclaw') return resolveOpenclawHome()
+    if (target === 'dsh-root') return resolveDshHome()
     if (target.startsWith('dsh:')) return resolveDshProfileDir(target.slice(4))
     const page = registry.get(target)
-    if (!page) throw new Error(`未知的目标: ${target}`)
+    if (!page) throw new Error(m('ipc.unknownTarget', { target }))
     return page.dir
   }
 
@@ -324,7 +350,7 @@ export function registerIpc(registry: PageRegistry): void {
     ): Promise<IpcResult> => {
       try {
         const cwd = terminalDirFor(target)
-        const title = target === 'container' ? '容器根目录' : target
+        const title = target === 'container' ? m('ipc.containerRoot') : target
         const info = await ptyManager.start(
           cwd,
           title,
@@ -333,11 +359,31 @@ export function registerIpc(registry: PageRegistry): void {
         const session = ptyManager.get(info.id)
         if (session) {
           const sender = e.sender
+          // Coalesce output before it crosses the process boundary. A full-screen TUI
+          // repaints in hundreds of tiny chunks per second; sending each one as its own
+          // IPC message floods the renderer's event loop until the window stops
+          // responding. Flush at most once per frame (or when the buffer gets big).
+          let buf = ''
+          let timer: NodeJS.Timeout | null = null
+          const FLUSH_MS = 16
+          const FLUSH_MAX = 64 * 1024
+          const flush = (): void => {
+            if (timer) {
+              clearTimeout(timer)
+              timer = null
+            }
+            if (!buf) return
+            const data = buf
+            buf = ''
+            if (!sender.isDestroyed()) sender.send(IPC.OnPtyData, { id: info.id, data })
+          }
           session.on('data', (chunk) => {
-            if (!sender.isDestroyed())
-              sender.send(IPC.OnPtyData, { id: info.id, data: String(chunk) })
+            buf += String(chunk)
+            if (buf.length >= FLUSH_MAX) flush()
+            else if (!timer) timer = setTimeout(flush, FLUSH_MS)
           })
           session.on('exit', (code) => {
+            flush()
             if (!sender.isDestroyed())
               sender.send(IPC.OnPtyExit, { id: info.id, code: Number(code) })
           })
@@ -380,7 +426,7 @@ export function registerIpc(registry: PageRegistry): void {
   ipcMain.handle(IPC.ToggleDevTools, (e, guestId?: number): IpcResult => {
     try {
       const guest = typeof guestId === 'number' ? webContents.fromId(guestId) : undefined
-      if (typeof guestId === 'number' && !guest) return fail(new Error('内嵌页面已不可用'))
+      if (typeof guestId === 'number' && !guest) return fail(new Error(m('ipc.guestGone')))
       const target = guest ?? BrowserWindow.fromWebContents(e.sender)?.webContents ?? e.sender
       if (target.isDevToolsOpened()) target.closeDevTools()
       else target.openDevTools({ mode: 'detach' })
@@ -469,6 +515,23 @@ export function registerIpc(registry: PageRegistry): void {
       const id = createDshPage(profile, Number(port) || 5173)
       registry.reconcile()
       return ok(id)
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  /**
+   * The dsh web UI's auth token, for the DSH panel's token row.
+   *
+   * dsh mints its token per launch, so the running page's `launchUrl` is the only place it
+   * exists — there is no config file to fall back to while the page is stopped. `reconcile()`
+   * runs first because the DSH panel can be opened without ever listing pages, and an
+   * unreconciled registry would report "no page" for a profile that is in fact registered.
+   */
+  ipcMain.handle(IPC.DshToken, (_e, profile?: string): IpcResult<DshTokenResult> => {
+    try {
+      registry.reconcile()
+      return ok(resolveDshToken(registry.list(), profile || ''))
     } catch (err) {
       return fail(err)
     }

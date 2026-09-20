@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Edit, Position, Plus, Refresh } from '@element-plus/icons-vue'
+import { Delete, Edit, Position, Refresh } from '@element-plus/icons-vue'
 import type { ExternalSite } from '../../../shared/types'
 import { useSettingsStore } from '../stores/settings'
+import { t } from '../i18n'
 
 const emit = defineEmits<{ preview: [url: string] }>()
 
@@ -47,7 +48,7 @@ async function save(list: ExternalSite[]): Promise<void> {
 async function submit(): Promise<void> {
   const url = normalizeUrl(form.url)
   if (!url) {
-    ElMessage.warning('请输入外部地址')
+    ElMessage.warning(t('extMgr.msgEnterUrl'))
     return
   }
   const name = form.name.trim() || new URL(url).host
@@ -57,33 +58,33 @@ async function submit(): Promise<void> {
     if (idx >= 0) list[idx] = { ...list[idx], name, url }
   } else {
     if (list.some((s) => s.url === url)) {
-      ElMessage.info('该地址已在列表中')
+      ElMessage.info(t('extMgr.msgDuplicate'))
       formVisible.value = false
       return
     }
     list.push({ id: genId(), name, url })
   }
   await save(list)
-  ElMessage.success(editingId.value ? '已更新外部地址' : '已添加外部地址')
+  ElMessage.success(editingId.value ? t('extMgr.msgUpdated') : t('extMgr.msgAdded'))
   formVisible.value = false
 }
 
 async function remove(site: ExternalSite): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `将从列表移除「${site.name}」，不影响已运行的进程。`,
-      '删除外部地址',
+      t('extMgr.msgRemoveConfirm', { name: site.name }),
+      t('extMgr.msgRemoveTitle'),
       {
         type: 'warning',
-        confirmButtonText: '删除',
-        cancelButtonText: '取消'
+        confirmButtonText: t('extMgr.msgRemoveConfirmBtn'),
+        cancelButtonText: t('extMgr.cancel')
       }
     )
   } catch {
     return
   }
   await save(settingsStore.settings.externalSites.filter((s) => s.id !== site.id))
-  ElMessage.success('已删除')
+  ElMessage.success(t('extMgr.msgDeleted'))
 }
 
 function preview(site: ExternalSite): void {
@@ -95,12 +96,12 @@ async function adopt(url: string): Promise<void> {
   const norm = normalizeUrl(url)
   if (!norm) return
   if (settingsStore.settings.externalSites.some((s) => s.url === norm)) {
-    ElMessage.info('该地址已在列表中')
+    ElMessage.info(t('extMgr.msgDuplicate'))
     return
   }
   const name = new URL(norm).host
   await save([...settingsStore.settings.externalSites, { id: genId(), name, url: norm }])
-  ElMessage.success(`已保存 ${name}`)
+  ElMessage.success(t('extMgr.msgSaved', { name }))
 }
 
 async function removeRecent(url: string): Promise<void> {
@@ -112,10 +113,10 @@ async function removeRecent(url: string): Promise<void> {
 async function clearRecent(): Promise<void> {
   if (!settingsStore.settings.lastExternalUrls.length) return
   try {
-    await ElMessageBox.confirm('将清空「最近使用」列表，不影响已保存的固定地址。', '清理最近使用', {
+    await ElMessageBox.confirm(t('extMgr.msgClearRecentConfirm'), t('extMgr.msgClearRecentTitle'), {
       type: 'warning',
-      confirmButtonText: '清空',
-      cancelButtonText: '取消'
+      confirmButtonText: t('extMgr.recentClear'),
+      cancelButtonText: t('extMgr.cancel')
     })
   } catch {
     return
@@ -124,21 +125,23 @@ async function clearRecent(): Promise<void> {
     ElMessage.error((err as Error).message)
     throw err
   })
-  ElMessage.success('已清空最近使用')
+  ElMessage.success(t('extMgr.msgCleared'))
 }
 </script>
 
 <template>
   <div class="ext-manager">
     <div class="head">
-      <span class="title">外部地址（{{ settingsStore.settings.externalSites.length }}）</span>
+      <span class="title">{{
+        t('extMgr.title', { n: settingsStore.settings.externalSites.length })
+      }}</span>
       <el-button size="small" text @click="openAdd">
-        <el-icon><Plus /></el-icon> 新增
+        {{ t('extMgr.add') }}
       </el-button>
     </div>
 
     <div v-if="!settingsStore.settings.externalSites.length" class="empty">
-      还没有保存的外部地址。点「新增」把常用 URL 存成带名称的条目，之后可在顶部切换器一键预览。
+      {{ t('extMgr.empty') }}
     </div>
 
     <div v-else class="list">
@@ -148,17 +151,17 @@ async function clearRecent(): Promise<void> {
           <div class="url">{{ site.url }}</div>
         </div>
         <div class="actions">
-          <el-tooltip content="在内嵌视图预览" placement="top">
+          <el-tooltip :content="t('extMgr.previewTip')" placement="top">
             <el-button circle size="small" text type="primary" @click="preview(site)">
               <el-icon><Position /></el-icon>
             </el-button>
           </el-tooltip>
-          <el-tooltip content="重命名 / 改地址" placement="top">
+          <el-tooltip :content="t('extMgr.editTip')" placement="top">
             <el-button circle size="small" text @click="openEdit(site)">
               <el-icon><Edit /></el-icon>
             </el-button>
           </el-tooltip>
-          <el-tooltip content="删除" placement="top">
+          <el-tooltip :content="t('extMgr.deleteTip')" placement="top">
             <el-button circle size="small" text type="danger" @click="remove(site)">
               <el-icon><Delete /></el-icon>
             </el-button>
@@ -169,9 +172,9 @@ async function clearRecent(): Promise<void> {
 
     <div v-if="settingsStore.settings.lastExternalUrls.length" class="recent">
       <div class="recent-head">
-        <span>最近使用（点击保存为固定地址）</span>
+        <span>{{ t('extMgr.recentHead') }}</span>
         <el-button size="small" text type="danger" @click="clearRecent">
-          <el-icon><Delete /></el-icon> 清空
+          {{ t('extMgr.recentClear') }}
         </el-button>
       </div>
       <div class="recent-list">
@@ -193,19 +196,15 @@ async function clearRecent(): Promise<void> {
 
     <el-dialog
       v-model="formVisible"
-      :title="editingId ? '编辑外部地址' : '新增外部地址'"
+      :title="editingId ? t('extMgr.dialogTitleEdit') : t('extMgr.dialogTitleAdd')"
       width="480px"
     >
       <el-form label-position="top" @submit.prevent="submit">
-        <el-form-item label="名称">
-          <el-input v-model="form.name" placeholder="留空则用域名，如「内部门户」" clearable />
+        <el-form-item :label="t('extMgr.labelName')">
+          <el-input v-model="form.name" :placeholder="t('extMgr.namePlaceholder')" clearable />
         </el-form-item>
-        <el-form-item label="地址">
-          <el-input
-            v-model="form.url"
-            placeholder="https://example.com 或 192.168.1.10:8080"
-            clearable
-          >
+        <el-form-item :label="t('extMgr.labelUrl')">
+          <el-input v-model="form.url" :placeholder="t('extMgr.urlPlaceholder')" clearable>
             <template #prefix
               ><el-icon><Refresh /></el-icon
             ></template>
@@ -213,8 +212,8 @@ async function clearRecent(): Promise<void> {
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="formVisible = false">取消</el-button>
-        <el-button type="primary" @click="submit">保存</el-button>
+        <el-button @click="formVisible = false">{{ t('extMgr.cancel') }}</el-button>
+        <el-button type="primary" @click="submit">{{ t('extMgr.save') }}</el-button>
       </template>
     </el-dialog>
   </div>

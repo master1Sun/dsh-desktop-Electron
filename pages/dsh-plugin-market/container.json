@@ -1,6 +1,0 @@
-{
-  "name": "DSH 插件市场",
-  "port": 8889,
-  "startCommand": "node server.js",
-  "description": "内置推荐页：DSH 文件编辑器精选插件（一键复制安装命令）"
-}

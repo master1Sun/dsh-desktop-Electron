@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Position, Refresh, View, Hide, CopyDocument } from '@element-plus/icons-vue'
+import { Refresh, View, Hide, CopyDocument } from '@element-plus/icons-vue'
 import { usePagesStore } from '../stores/pages'
+import { t } from '../i18n'
 
 interface OpenclawStatusInfo {
   installed: boolean
@@ -35,7 +36,7 @@ async function load(): Promise<void> {
   loading.value = true
   try {
     const s = await window.container.openclawStatus()
-    if (!s.ok) throw new Error(s.error || '状态获取失败')
+    if (!s.ok) throw new Error(s.error || t('common.statusFail'))
     status.value = s.data as OpenclawStatusInfo
     if (status.value?.installed) loadToken()
   } catch (err) {
@@ -60,13 +61,13 @@ async function loadToken(): Promise<void> {
 onMounted(load)
 
 async function copyToken(): Promise<void> {
-  const t = token.value?.token
-  if (!t) return
+  const tokenValue = token.value?.token
+  if (!tokenValue) return
   try {
-    await navigator.clipboard.writeText(t)
-    ElMessage.success('令牌已复制到剪贴板')
+    await navigator.clipboard.writeText(tokenValue)
+    ElMessage.success(t('openclawMgr.msgTokenCopied'))
   } catch {
-    ElMessage.error('复制失败，请手动选中')
+    ElMessage.error(t('openclawMgr.msgCopyFail'))
   }
 }
 
@@ -82,10 +83,10 @@ async function openHomeTerminal(): Promise<void> {
 <template>
   <div v-loading="loading && !status" class="openclaw-manager">
     <div v-if="status && !status.installed" class="empty">
-      <p>{{ status.error || '未找到 openclaw CLI' }}</p>
+      <p>{{ status.error || t('openclawMgr.emptyError') }}</p>
       <code>npm run setup:openclaw</code>
       <el-button size="small" text @click="load">
-        <el-icon><Refresh /></el-icon> 重新检测
+        {{ t('openclawMgr.recheck') }}
       </el-button>
     </div>
 
@@ -93,39 +94,48 @@ async function openHomeTerminal(): Promise<void> {
       <div class="head">
         <div class="ver">
           <span class="status-dot running" /> openclaw <b>v{{ status.version || '?' }}</b>
-          <el-tag size="small" effect="plain" round>自带最新版</el-tag>
+          <el-tag size="small" effect="plain" round>{{ t('openclawMgr.verTag') }}</el-tag>
         </div>
         <div class="head-actions">
           <el-button size="small" text :loading="loading" @click="load">
-            <el-icon><Refresh /></el-icon> 刷新
+            {{ t('common.refresh') }}
           </el-button>
         </div>
       </div>
-      <div class="sub">
-        CLI：<code>{{ status.binPath }}</code>
-      </div>
-      <div class="sub">
-        配置目录（OpenClaw Home）：<code>{{ status.home }}</code>
-      </div>
+      <div class="sub">{{ t('openclawMgr.cliPath', { path: status.binPath ?? '' }) }}</div>
+      <div class="sub">{{ t('openclawMgr.homeDir', { dir: status.home }) }}</div>
 
       <div v-if="token" class="sub token-row">
-        Gateway 令牌
-        <el-tag size="small" effect="plain" round>{{ token.source === 'env' ? '环境变量' : '配置文件' }}</el-tag>
+        {{ t('openclawMgr.gatewayToken') }}
+        <el-tag size="small" effect="plain" round>{{
+          token.source === 'env' ? t('openclawMgr.tokenEnv') : t('openclawMgr.tokenConfig')
+        }}</el-tag>
         <code class="token-val">{{ tokenRevealed ? token.token : maskedToken }}</code>
-        <el-button size="small" text :title="tokenRevealed ? '隐藏' : '显示'" @click="tokenRevealed = !tokenRevealed">
+        <el-button
+          size="small"
+          text
+          :title="tokenRevealed ? t('openclawMgr.hide') : t('openclawMgr.show')"
+          @click="tokenRevealed = !tokenRevealed"
+        >
           <el-icon><component :is="tokenRevealed ? Hide : View" /></el-icon>
         </el-button>
-        <el-button size="small" text title="复制到剪贴板" @click="copyToken">
+        <el-button size="small" text :title="t('openclawMgr.copy')" @click="copyToken">
           <el-icon><CopyDocument /></el-icon>
         </el-button>
-        <el-button size="small" text :loading="tokenLoading" title="重新读取" @click="loadToken">
+        <el-button
+          size="small"
+          text
+          :loading="tokenLoading"
+          :title="t('openclawMgr.reread')"
+          @click="loadToken"
+        >
           <el-icon><Refresh /></el-icon>
         </el-button>
       </div>
       <div v-else class="sub token-hint">
-        Gateway 令牌：<span class="muted">尚未生成</span>
+        {{ t('openclawMgr.tokenNotGenerated') }}
         <el-button size="small" text :loading="tokenLoading" @click="loadToken">
-          <el-icon><Refresh /></el-icon> 重试
+          {{ t('openclawMgr.retry') }}
         </el-button>
       </div>
 
@@ -134,17 +144,13 @@ async function openHomeTerminal(): Promise<void> {
         :closable="false"
         show-icon
         class="tip-alert"
-        title="首次启动会自动就绪，无需手动配置鉴权"
-      >
-        容器会在 <code>~/.openclaw/openclaw.json</code> 缺失时写入最小
-        <code>{gateway:{mode:"local"}}</code>；网关无 token 时自动生成运行时 token
-        并配对本地设备，Control UI 根路径即可打开。频道 / 模型仍需在「终端」里跑
-        <code>openclaw onboard</code> 自行配置。容器只负责启停 gateway 与内嵌打开页面。
-      </el-alert>
+        :title="t('openclawMgr.alertTitle')"
+        :description="t('openclawMgr.alertDesc')"
+      />
 
       <div class="term-row">
         <el-button size="small" @click="openHomeTerminal">
-          <el-icon><Position /></el-icon> 在 OpenClaw Home 打开终端
+          {{ t('openclawMgr.openclawTerminal') }}
         </el-button>
       </div>
     </template>

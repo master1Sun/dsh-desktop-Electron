@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import MarketView from '../views/MarketView.vue'
+import { t } from '../i18n'
 
-const props = defineProps<{ url: string; loading: boolean }>()
+const props = defineProps<{
+  url: string
+  loading: boolean
+  startingText?: string
+  /** Show the market view as an overlay ON TOP of the webview — the embedded page
+      stays mounted (its right-sidebar terminal survives), only hidden. */
+  marketActive?: boolean
+}>()
 
 const emit = defineEmits<{
   'guest-stop-loading': []
@@ -33,9 +42,15 @@ defineExpose({ webviewEl })
 
 <template>
   <div class="workbench card">
-    <div v-if="props.url" class="webview-wrap">
+    <!-- A page configured as the default view but not up yet: full-surface boot animation. -->
+    <div v-if="props.startingText" class="boot-screen">
+      <span class="boot-spinner" />
+      <span class="boot-text">{{ props.startingText }}</span>
+    </div>
+
+    <div v-show="props.url" class="webview-wrap">
       <div v-if="props.loading" class="webview-loading">
-        <span class="status-dot starting" /> 加载中…
+        <span class="status-dot starting" /> {{ t('common.loading') }}
       </div>
       <!-- eslint-disable-next-line vue/html-self-closing -->
       <webview
@@ -48,21 +63,13 @@ defineExpose({ webviewEl })
       />
     </div>
 
-    <div v-else class="hero">
-      <div class="hero-glow" />
-      <h1>Desktop Container</h1>
-      <p>内置 Node v24.21.0 的桌面端多页容器。用顶部「选择页面」下拉切换运行中的 page，或：</p>
-      <div class="hero-actions">
-        <el-button type="primary" round size="large" @click="emit('install-pages')"
-          >安装并管理 Pages</el-button
-        >
-      </div>
-      <ul class="hero-tips">
-        <li><span class="status-dot running" /> pages/ 下的项目由内置 node 托管启停</li>
-        <li><span class="status-dot starting" /> 关闭主窗口会最小化到任务栏继续运行</li>
-        <li><span class="status-dot" /> 顶部「视图」菜单可切换默认视图、外部地址与主题</li>
-      </ul>
-    </div>
+    <!-- Default workbench: the built-in plugin market static view, overlaid so the
+         webview below it never unmounts when the user switches to it. -->
+    <MarketView
+      v-if="!props.startingText && (props.marketActive || !props.url)"
+      class="market-layer"
+      @install-pages="emit('install-pages')"
+    />
   </div>
 </template>
 
@@ -79,6 +86,13 @@ defineExpose({ webviewEl })
   flex: 1;
   min-height: 0;
   background: var(--bg);
+}
+
+/* Market overlay: covers the (still-mounted) webview when 「工作台」is active. */
+.market-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
 }
 
 .wv {
@@ -99,68 +113,34 @@ defineExpose({ webviewEl })
   z-index: 5;
 }
 
-.hero {
+/* Boot overlay for the configured default page: centered spinner + status text. */
+.boot-screen {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  text-align: center;
-  position: relative;
-  overflow: hidden;
-  padding: 32px;
+  gap: 14px;
+  background: var(--bg);
 }
 
-.hero-glow {
-  position: absolute;
-  width: 480px;
-  height: 480px;
+.boot-spinner {
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    color-mix(in srgb, var(--accent) 22%, transparent),
-    transparent 65%
-  );
-  top: -180px;
-  right: -140px;
-  pointer-events: none;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: boot-spin 0.8s linear infinite;
 }
 
-.hero h1 {
-  font-size: 30px;
-  font-weight: 700;
-  margin: 0 0 10px;
-  background: linear-gradient(120deg, var(--text), var(--accent-strong));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.hero p {
-  color: var(--text-dim);
-  max-width: 460px;
-}
-
-.hero-actions {
-  display: flex;
-  gap: 12px;
-  margin: 22px 0 30px;
-}
-
-.hero-tips {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  color: var(--text-dim);
+.boot-text {
   font-size: 13px;
+  color: var(--text-dim);
 }
 
-.hero-tips li {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+@keyframes boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Download, FolderOpened, Position, Refresh, Setting } from '@element-plus/icons-vue'
+import { Delete, FolderOpened } from '@element-plus/icons-vue'
 import { usePagesStore, type PageState } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
+import { t } from '../i18n'
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
@@ -15,7 +16,7 @@ async function runRow(row: PageState): Promise<void> {
     const res = await window.container
       .openTerminalPage(row.id)
       .catch((e) => ({ ok: false, error: String(e) }))
-    if (!res.ok) ElMessage.error(res.error || '终端启动失败')
+    if (!res.ok) ElMessage.error(res.error || t('pageMgr.msgTerminalStartFail'))
     else emit('close')
     return
   }
@@ -31,13 +32,13 @@ function parsePort(raw: string): number | undefined {
   const s = raw.trim()
   if (!s) return undefined
   const n = Number(s)
-  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error('端口需为 1-65535 的整数')
+  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error(t('pageMgr.msgPortRange'))
   return n
 }
 
 async function installGit(): Promise<void> {
   if (!gitForm.url.trim()) {
-    ElMessage.warning('请输入 git 仓库地址')
+    ElMessage.warning(t('pageMgr.msgEnterRepo'))
     return
   }
   installing.value = 'git'
@@ -47,7 +48,7 @@ async function installGit(): Promise<void> {
       gitForm.name.trim() || undefined,
       parsePort(gitForm.port)
     )
-    ElMessage.success(`已安装到 pages/${id}`)
+    ElMessage.success(t('pageMgr.msgInstalledGit', { id }))
     gitForm.url = ''
     gitForm.name = ''
     gitForm.port = ''
@@ -60,7 +61,7 @@ async function installGit(): Promise<void> {
 
 async function installDir(): Promise<void> {
   if (!dirForm.path.trim()) {
-    ElMessage.warning('请输入本地项目目录的绝对路径')
+    ElMessage.warning(t('pageMgr.msgEnterLocalPath'))
     return
   }
   installing.value = 'dir'
@@ -70,7 +71,7 @@ async function installDir(): Promise<void> {
       dirForm.name.trim() || undefined,
       parsePort(dirForm.port)
     )
-    ElMessage.success(`已复制到 pages/${id}`)
+    ElMessage.success(t('pageMgr.msgCopiedDir', { id }))
     dirForm.path = ''
     dirForm.name = ''
     dirForm.port = ''
@@ -85,7 +86,7 @@ async function installDir(): Promise<void> {
 async function chooseDir(): Promise<void> {
   try {
     const res = await window.container.chooseDirectory()
-    if (!res.ok) throw new Error(res.error || '选择目录失败')
+    if (!res.ok) throw new Error(res.error || t('pageMgr.msgChooseDirFail'))
     if (res.data) dirForm.path = String(res.data)
   } catch (err) {
     ElMessage.error((err as Error).message)
@@ -95,16 +96,20 @@ async function chooseDir(): Promise<void> {
 async function remove(page: PageState): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `将删除 pages/${page.id} 目录（进程会先停止）。此操作不可恢复。`,
-      `移除 ${page.name}`,
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+      t('pageMgr.msgRemoveConfirm', { id: page.id }),
+      t('pageMgr.msgRemoveTitle', { name: page.name }),
+      {
+        type: 'warning',
+        confirmButtonText: t('common.delete'),
+        cancelButtonText: t('common.cancel')
+      }
     )
   } catch {
     return
   }
   try {
     await pagesStore.remove(page.id)
-    ElMessage.success('已移除')
+    ElMessage.success(t('pageMgr.msgRemoved'))
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
@@ -138,7 +143,7 @@ async function saveConfig(): Promise<void> {
   if (raw) {
     const n = Number(raw)
     if (!Number.isInteger(n) || n < 1 || n > 65535) {
-      ElMessage.error('端口需为 1-65535 的整数')
+      ElMessage.error(t('pageMgr.msgPortRange'))
       return
     }
     // 0/unset semantics: clearing the field reverts to the declared port
@@ -155,7 +160,7 @@ async function saveConfig(): Promise<void> {
     if (Object.keys(vars).length) next[page.id] = vars
     else delete next[page.id]
     await settingsStore.patch({ pageEnvs: next })
-    ElMessage.success('配置已保存，重启该页面后生效')
+    ElMessage.success(t('pageMgr.msgConfigSaved'))
     configVisible.value = false
   } catch (err) {
     ElMessage.error((err as Error).message)
@@ -181,58 +186,104 @@ async function showLogs(page: PageState): Promise<void> {
 function refreshLogs(): void {
   if (logFor.value) pagesStore.logs(logFor.value.id).then((l) => (logFor.value!.lines = l))
 }
+
+/** the page state backing the open log dialog — exposes status / exitCode / lastError for the detail header */
+const logPage = computed(() => pagesStore.pages.find((p) => p.id === logFor.value?.id))
+
+let logTimer: number | undefined
+watch(logsVisible, (open) => {
+  window.clearInterval(logTimer)
+  if (open) logTimer = window.setInterval(refreshLogs, 1500)
+})
+onBeforeUnmount(() => window.clearInterval(logTimer))
+
+function statusText(s?: string): string {
+  return (
+    {
+      running: t('pageMgr.statusRunning'),
+      starting: t('pageMgr.statusStarting'),
+      error: t('pageMgr.statusError'),
+      stopped: t('pageMgr.statusStopped')
+    }[s ?? ''] ??
+    s ??
+    t('pageMgr.unknown')
+  )
+}
+
+function formatTime(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString()
+  } catch {
+    return String(ms)
+  }
+}
 </script>
 
 <template>
   <div class="page-manager">
     <el-tabs>
-      <el-tab-pane label="从 Git 安装">
-        <p class="hint">
-          支持 https / git@ 仓库地址（deepseek-harness、codex、openclaw 等任意带 node http
-          服务的项目，纯 CLI 项目可在 container.json 里写 <code>"kind": "terminal"</code> +
-          startCommand）。克隆到 <code>pages/&lt;repo名&gt;</code>，需项目根目录含
-          <code>container.json</code> 或可推断的启动入口。
-        </p>
+      <el-tab-pane :label="t('pageMgr.tabGit')">
+        <p class="hint">{{ t('pageMgr.hintGit') }}</p>
         <el-form label-position="top" @submit.prevent="installGit">
-          <el-form-item label="仓库地址">
+          <el-form-item :label="t('pageMgr.labelRepo')">
             <el-input
               v-model="gitForm.url"
               placeholder="https://github.com/owner/deepseek-harness.git"
               clearable
             />
           </el-form-item>
-          <el-form-item label="自定义目录名（可选）">
-            <el-input v-model="gitForm.name" placeholder="默认取仓库名" clearable />
+          <el-form-item :label="t('pageMgr.labelCustomDir')">
+            <el-input
+              v-model="gitForm.name"
+              :placeholder="t('pageMgr.placeholderDirName')"
+              clearable
+            />
           </el-form-item>
-          <el-form-item label="端口（可选，留空用项目声明的端口）">
-            <el-input v-model="gitForm.port" placeholder="如 3000" clearable />
+          <el-form-item :label="t('pageMgr.labelPort')">
+            <el-input
+              v-model="gitForm.port"
+              :placeholder="t('pageMgr.placeholderPort')"
+              clearable
+            />
           </el-form-item>
           <el-button type="primary" :loading="installing === 'git'" @click="installGit">
-            <el-icon><Download /></el-icon> 克隆并安装
+            {{ t('pageMgr.btnClone') }}
           </el-button>
         </el-form>
       </el-tab-pane>
 
-      <el-tab-pane label="从本地目录安装">
-        <p class="hint">复制现有项目目录（排除 node_modules/.git）到 pages/ 下托管。</p>
+      <el-tab-pane :label="t('pageMgr.tabDir')">
+        <p class="hint">{{ t('pageMgr.hintDir') }}</p>
         <el-form label-position="top" @submit.prevent="installDir">
-          <el-form-item label="本地绝对路径">
-            <el-input v-model="dirForm.path" placeholder="D:\projects\my-node-web" clearable>
+          <el-form-item :label="t('pageMgr.labelLocalPath')">
+            <el-input
+              v-model="dirForm.path"
+              :placeholder="t('pageMgr.placeholderLocalPath')"
+              clearable
+            >
               <template #prefix>
-                <el-icon class="pick-dir" title="浏览选择目录" @click="chooseDir"
+                <el-icon class="pick-dir" :title="t('common.browse')" @click="chooseDir"
                   ><FolderOpened
                 /></el-icon>
               </template>
             </el-input>
           </el-form-item>
-          <el-form-item label="目标目录名（可选）">
-            <el-input v-model="dirForm.name" placeholder="默认取源目录名" clearable />
+          <el-form-item :label="t('pageMgr.labelTargetDir')">
+            <el-input
+              v-model="dirForm.name"
+              :placeholder="t('pageMgr.placeholderTargetDir')"
+              clearable
+            />
           </el-form-item>
-          <el-form-item label="端口（可选，留空用项目声明的端口）">
-            <el-input v-model="dirForm.port" placeholder="如 3000" clearable />
+          <el-form-item :label="t('pageMgr.labelPort')">
+            <el-input
+              v-model="dirForm.port"
+              :placeholder="t('pageMgr.placeholderPort')"
+              clearable
+            />
           </el-form-item>
           <el-button type="primary" :loading="installing === 'dir'" @click="installDir">
-            <el-icon><Download /></el-icon> 复制并安装
+            {{ t('pageMgr.btnCopy') }}
           </el-button>
         </el-form>
       </el-tab-pane>
@@ -240,39 +291,53 @@ function refreshLogs(): void {
 
     <div class="installed">
       <div class="installed-head">
-        <span>已安装（{{ pagesStore.pages.length }}）</span>
-        <el-button size="small" text @click="pagesStore.refresh()"
-          ><el-icon><Refresh /></el-icon> 刷新</el-button
-        >
+        <span>{{ t('pageMgr.installed', { n: pagesStore.pages.length }) }}</span>
+        <el-button size="small" text @click="pagesStore.refresh()">{{
+          t('common.refresh')
+        }}</el-button>
       </div>
-      <el-table :data="pagesStore.pages" size="small" empty-text="还没有安装任何 page">
-        <el-table-column prop="name" label="名称" min-width="150">
+      <el-table :data="pagesStore.pages" size="small" :empty-text="t('pageMgr.msgEmpty')">
+        <el-table-column
+          prop="name"
+          :label="t('pageMgr.colName')"
+          min-width="120"
+          show-overflow-tooltip
+        >
           <template #default="{ row }">
             <div class="cell-name">
               <span class="status-dot" :class="row.status" />
               {{ row.name }}
             </div>
             <div class="cell-sub">{{ row.description || row.dir }}</div>
+            <div
+              v-if="row.lastError"
+              class="cell-sub err-text"
+              style="cursor: pointer"
+              :title="t('pageMgr.viewLogs')"
+              @click="showLogs(row)"
+            >
+              {{ row.lastError }}
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="端口/地址" width="150">
+        <el-table-column :label="t('pageMgr.colPort')" width="88" show-overflow-tooltip>
           <template #default="{ row }">
             <template v-if="row.external">
-              <span class="cell-sub">external</span>
+              <span class="cell-sub">{{ t('pageMgr.external') }}</span>
             </template>
             <template v-else-if="row.kind === 'terminal'">
-              <span class="cell-sub">终端运行（CLI）</span>
+              <span class="cell-sub">{{ t('pageMgr.terminalRunning') }}</span>
             </template>
             <template v-else-if="row.containerPort || row.port">
               <code>:{{ row.containerPort || row.port }}</code>
               <span v-if="row.containerPort && row.containerPort !== row.port" class="cell-sub">
-                自定义
+                {{ t('pageMgr.custom') }}
               </span>
             </template>
-            <span v-else class="err-text">未设置</span>
+            <span v-else class="err-text">{{ t('pageMgr.notSet') }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="90">
+        <el-table-column :label="t('pageMgr.colStatus')" width="70">
           <template #default="{ row }">
             <el-tag
               size="small"
@@ -288,14 +353,22 @@ function refreshLogs(): void {
               round
             >
               {{
-                { running: '运行中', starting: '启动中', error: '异常', stopped: '停止' }[
-                  row.status
-                ]
+                {
+                  running: t('pageMgr.statusRunning'),
+                  starting: t('pageMgr.statusStarting'),
+                  error: t('pageMgr.statusError'),
+                  stopped: t('pageMgr.statusStopped')
+                }[row.status]
               }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="300" align="right" class-name="col-actions">
+        <el-table-column
+          :label="t('pageMgr.colAction')"
+          width="300"
+          align="right"
+          class-name="col-actions"
+        >
           <template #default="{ row }">
             <el-button
               v-if="!row.external && (row.kind === 'terminal' || row.containerPort || row.port)"
@@ -304,16 +377,20 @@ function refreshLogs(): void {
               :loading="pagesStore.busy[row.id]"
               @click="row.status === 'running' ? pagesStore.stop(row.id) : runRow(row)"
             >
-              {{ row.status === 'running' ? '停止' : '启动' }}
+              {{ row.status === 'running' ? t('pageMgr.actionStop') : t('pageMgr.actionStart') }}
             </el-button>
             <el-button v-if="!row.external" size="small" text @click="openConfig(row)">
-              <el-icon><Setting /></el-icon> 配置
+              {{ t('pageMgr.actionConfig') }}
             </el-button>
             <el-button size="small" text @click="openTerminal(row)">
-              <el-icon><Position /></el-icon> 终端
+              {{ t('pageMgr.actionTerminal') }}
             </el-button>
-            <el-button size="small" text @click="showLogs(row)">日志</el-button>
-            <span v-if="row.builtin" class="builtin-tag" title="容器内置页面，不可删除">内置</span>
+            <el-button size="small" text @click="showLogs(row)">{{
+              t('pageMgr.actionLogs')
+            }}</el-button>
+            <span v-if="row.builtin" class="builtin-tag" :title="t('pageMgr.builtinTip')">{{
+              t('pageMgr.builtin')
+            }}</span>
             <el-button v-else size="small" text type="danger" @click="remove(row)">
               <el-icon><Delete /></el-icon>
             </el-button>
@@ -324,55 +401,77 @@ function refreshLogs(): void {
 
     <el-dialog
       v-model="logsVisible"
-      :title="`${logFor?.name ?? ''} · 输出日志`"
+      :title="t('pageMgr.logTitle', { name: logFor?.name ?? '' })"
       width="720px"
       top="6vh"
     >
-      <pre class="log-box">{{ logFor?.lines.join('\n') || '（暂无输出）' }}</pre>
-      <template #footer>
-        <el-button @click="refreshLogs"
-          ><el-icon><Refresh /></el-icon> 刷新</el-button
+      <div class="log-meta">
+        <span
+          >{{ t('pageMgr.logStatus') }}<b>{{ statusText(logPage?.status) }}</b></span
         >
-        <el-button type="primary" @click="logsVisible = false">关闭</el-button>
+        <span v-if="logPage?.exitCode != null"
+          >{{ t('pageMgr.logExitCode') }}{{ logPage.exitCode }}</span
+        >
+        <span v-if="logPage?.startedAt"
+          >{{ t('pageMgr.logStarted') }}{{ formatTime(logPage.startedAt) }}</span
+        >
+        <span v-if="logPage?.lastError" class="log-err"
+          >{{ t('pageMgr.logError') }}{{ logPage.lastError }}</span
+        >
+      </div>
+      <pre class="log-box">{{ logFor?.lines.join('\n') || t('pageMgr.logEmpty') }}</pre>
+      <template #footer>
+        <el-button @click="refreshLogs">{{ t('pageMgr.logRefresh') }}</el-button>
+        <el-button type="primary" @click="logsVisible = false">{{
+          t('pageMgr.logClose')
+        }}</el-button>
       </template>
     </el-dialog>
 
     <el-dialog
       v-model="configVisible"
-      :title="`${configFor?.name ?? ''} · 配置`"
+      :title="t('pageMgr.configTitle', { name: configFor?.name ?? '' })"
       width="560px"
       top="8vh"
     >
       <el-form label-position="top" @submit.prevent="saveConfig">
         <el-form-item
           v-if="configFor && configFor.kind !== 'terminal'"
-          label="端口（留空 = 使用项目 container.json 声明的端口）"
+          :label="t('pageMgr.configPortLabel')"
         >
-          <el-input v-model="configDraft.port" placeholder="如 3000" clearable />
+          <el-input
+            v-model="configDraft.port"
+            :placeholder="t('pageMgr.configPortPlaceholder')"
+            clearable
+          />
           <span v-if="configFor?.port" class="cfg-hint">
-            项目声明端口 :{{ configFor.port }}
+            {{ t('pageMgr.configDeclaredPort', { port: configFor.port }) }}
             <template v-if="configFor.containerPort && configFor.containerPort !== configFor.port">
-              ，当前覆盖为 :{{ configFor.containerPort }}</template
+              {{ t('pageMgr.configPortOverride', { port: configFor.containerPort }) }}</template
             >
           </span>
         </el-form-item>
         <el-form-item v-for="v in configEnvVars" :key="v.key" :label="v.label || v.key">
           <el-input
             v-model="configDraft.envs[v.key]"
-            :placeholder="v.defaultPath ? `默认：${v.defaultPath}` : '输入目录路径'"
+            :placeholder="
+              v.defaultPath
+                ? t('pageMgr.configEnvPlaceholder', { path: v.defaultPath })
+                : t('pageMgr.configEnvInputPlaceholder')
+            "
             clearable
           />
           <span v-if="v.description" class="cfg-hint">{{ v.description }}</span>
         </el-form-item>
         <p v-if="configFor && !configEnvVars.length" class="cfg-hint">
-          该项目未声明可配置的环境目录；在它的 container.json 里加
-          <code>"envVars": [{ "key": "MYAPP_HOME", "label": "数据目录" }]</code>
-          后重新打开即可在此配置。
+          {{ t('pageMgr.configNoEnv') }}
         </p>
       </el-form>
       <template #footer>
-        <el-button @click="configVisible = false">取消</el-button>
-        <el-button type="primary" :loading="configSaving" @click="saveConfig">保存</el-button>
+        <el-button @click="configVisible = false">{{ t('pageMgr.configCancel') }}</el-button>
+        <el-button type="primary" :loading="configSaving" @click="saveConfig">{{
+          t('pageMgr.configSave')
+        }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -406,6 +505,13 @@ function refreshLogs(): void {
 }
 .pick-dir:hover {
   color: var(--accent-strong);
+}
+/* The panel card is ~860px wide and `label-position="top"` lets the fields stretch the whole
+   way across, which reads as a broken layout. Cap the install fields to a normal form width.
+   (The ⚙ config dialog is a 560px teleport rendered on <body>, so scoped styles cannot — and
+   should not — reach it.) */
+.page-manager :deep(.el-form-item .el-input) {
+  max-width: 440px;
 }
 .installed {
   margin-top: 18px;
@@ -457,6 +563,21 @@ function refreshLogs(): void {
 }
 .installed :deep(.el-table .el-button.is-text + .el-button.is-text) {
   margin-left: 2px;
+}
+.log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.log-meta b {
+  color: var(--text);
+}
+.log-meta .log-err {
+  color: var(--err);
+  font-weight: 600;
 }
 .log-box {
   background: var(--surface-2);

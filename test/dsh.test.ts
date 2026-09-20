@@ -2,6 +2,7 @@ import { describe, it, expect, afterAll, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { PageState } from '../src/shared/types'
 
 const repoRoot = join(__dirname, '..')
 const scratch = mkdtempSync(join(tmpdir(), 'dsh-home-'))
@@ -138,5 +139,101 @@ describe('launch URL discovery', () => {
     })
     expect(pages.parseLaunchLine('unrelated log line')).toBeNull()
     expect(pages.parseLaunchLine('dsh web: not-a-url')).toBeNull()
+  })
+
+  it('extracts the token for the DSH panel', () => {
+    expect(pages.tokenFromLaunchUrl('http://127.0.0.1:8899/?token=abc123')).toBe('abc123')
+    // Percent-escapes are decoded: the panel must copy the raw token the server compares
+    // against, not the escaped form as it appears in an address bar.
+    expect(pages.tokenFromLaunchUrl('http://127.0.0.1:8899/?token=a%2Bb%3Dc')).toBe('a+b=c')
+    // toState() appends ?theme=dark on a dark OS theme; the token has to survive that.
+    expect(pages.tokenFromLaunchUrl('http://127.0.0.1:8899/?token=abc123&theme=dark')).toBe(
+      'abc123'
+    )
+  })
+
+  it('reports no token rather than a wrong one', () => {
+    // A stopped page reports a bare origin (launchUrl was cleared on start) — the panel then
+    // shows its "not generated yet" hint instead of a stale credential.
+    expect(pages.tokenFromLaunchUrl('http://127.0.0.1:8899')).toBeNull()
+    expect(pages.tokenFromLaunchUrl('http://127.0.0.1:8899/?token=')).toBeNull()
+    expect(pages.tokenFromLaunchUrl('http://127.0.0.1:8899/?token=%20')).toBeNull()
+    expect(pages.tokenFromLaunchUrl(undefined)).toBeNull()
+    expect(pages.tokenFromLaunchUrl('not a url')).toBeNull()
+  })
+})
+
+describe('dsh token resolution (DSH panel)', () => {
+  const dshPage = (over: Partial<PageState> = {}): PageState => ({
+    id: 'dsh-web',
+    name: 'DSH (web)',
+    dir: 'pages/dsh-web',
+    port: 8899,
+    startCommand: 'dsh --profile web',
+    kind: 'dsh',
+    dshProfile: 'web',
+    status: 'running',
+    ...over
+  })
+
+  it('reads the token off a running dsh page', () => {
+    expect(
+      pages.resolveDshToken([dshPage({ launchUrl: 'http://127.0.0.1:8899/?token=abc123' })], 'web')
+    ).toEqual({
+      kind: 'ok',
+      token: 'abc123',
+      pageId: 'dsh-web',
+      url: 'http://127.0.0.1:8899/?token=abc123'
+    })
+  })
+
+  it('matches by profile, not by folder name', () => {
+    const renamed = dshPage({
+      id: 'my-harness',
+      dshProfile: 'web',
+      launchUrl: 'http://127.0.0.1:8899/?token=t1'
+    })
+    expect(pages.resolveDshToken([renamed], 'web')).toMatchObject({
+      kind: 'ok',
+      pageId: 'my-harness'
+    })
+  })
+
+  it('prefers the live page over an idle one for the same profile', () => {
+    const idle = dshPage({ id: 'dsh-web-old', status: 'stopped' })
+    const live = dshPage({ launchUrl: 'http://127.0.0.1:8899/?token=live' })
+    expect(pages.resolveDshToken([idle, live], 'web')).toMatchObject({ kind: 'ok', token: 'live' })
+  })
+
+  it('says "not started" when the profile has a page but no live token', () => {
+    // launchUrl is cleared on start, so a stopped entry reports a bare origin.
+    expect(pages.resolveDshToken([dshPage({ status: 'stopped' })], 'web')).toEqual({
+      kind: 'stopped',
+      pageId: 'dsh-web'
+    })
+    expect(
+      pages.resolveDshToken(
+        [dshPage({ status: 'stopped', launchUrl: 'http://127.0.0.1:8899' })],
+        'web'
+      )
+    ).toEqual({ kind: 'stopped', pageId: 'dsh-web' })
+  })
+
+  it('says "no page" when the profile was never registered', () => {
+    expect(pages.resolveDshToken([], 'web')).toEqual({ kind: 'no-page', profile: 'web' })
+    expect(pages.resolveDshToken([dshPage()], 'acp')).toEqual({ kind: 'no-page', profile: 'acp' })
+  })
+
+  it('ignores non-dsh pages and treats a blank profile as "web"', () => {
+    const plain = dshPage({
+      id: 'my-app',
+      kind: 'page',
+      dshProfile: undefined,
+      launchUrl: 'http://127.0.0.1:3000/?token=nope'
+    })
+    expect(pages.resolveDshToken([plain], 'web')).toEqual({ kind: 'no-page', profile: 'web' })
+    expect(
+      pages.resolveDshToken([dshPage({ launchUrl: 'http://127.0.0.1:8899/?token=x' })], '  ')
+    ).toMatchObject({ kind: 'ok', token: 'x' })
   })
 })

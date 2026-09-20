@@ -7,12 +7,14 @@ import { getNodeExePath } from './node-runtime'
 import { getDshStatus, repairPnpmCmd } from './dsh'
 import { openclawVersion } from './openclaw'
 import { resolveProjectDir } from './store'
+import { m } from './i18n'
 import type { PageMeta, UpdateCheckResult, UpdateOutcome } from '../shared/types'
 
 const REGISTRY = process.env.npm_config_registry || 'https://registry.npmmirror.com/'
 const DSH_PKG = '@deepseek-ai/dsh'
 const OPENCLAW_PKG = 'openclaw'
-const CONTAINER_NAME = 'Desktop Container'
+/** Translated at use time — this row's name is rendered in the Updates panel. */
+const containerName = (): string => m('app.title')
 const CACHE_TTL_MS = 5 * 60_1000
 
 let cache: { at: number; results: UpdateCheckResult[] } | null = null
@@ -80,7 +82,7 @@ async function checkPage(p: PageMeta): Promise<UpdateCheckResult> {
       ok: false,
       source: 'npm',
       currentVersion: pkg.version,
-      error: '无法访问 npm registry'
+      error: m('upd.registryUnreachable')
     }
   return {
     name: p.name,
@@ -114,9 +116,9 @@ async function checkBuiltin(
     action: 'reprovision',
     canAutoUpdate: true
   }
-  if (!currentVersion) return { ...base, error: '未检测到已安装版本' }
+  if (!currentVersion) return { ...base, error: m('upd.versionNotDetected') }
   const latest = await fetchNpmLatest(packageName)
-  if (!latest) return { ...base, currentVersion, error: '无法访问 npm registry' }
+  if (!latest) return { ...base, currentVersion, error: m('upd.registryUnreachable') }
   return {
     ...base,
     ok: true,
@@ -127,7 +129,7 @@ async function checkBuiltin(
 }
 
 async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
-  const container = { name: CONTAINER_NAME, dir: resolveProjectDir() }
+  const container = { name: containerName(), dir: resolveProjectDir() }
   return Promise.all([
     checkOne(container.name, container.dir, true).then((r) => ({
       ...r,
@@ -137,7 +139,7 @@ async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
     })),
     ...pages.filter((p) => !p.id.startsWith('__')).map(checkPage),
     checkBuiltin(
-      'DSH 本体',
+      m('upd.dshName'),
       join(app.getPath('userData'), 'dsh'),
       DSH_PKG,
       (await getDshStatus()).version
@@ -203,11 +205,11 @@ async function runNpm(
     child.on('close', (code) => resolve({ code: code ?? -1, stderr }))
   })
   if (res.code !== 0)
-    throw new Error(`${res.stderr.slice(-500) || `npm 退出码 ${res.code}`}（${args.join(' ')}）`)
+    throw new Error(`${res.stderr.slice(-500) || m('upd.npmExitCode', { code: res.code })}（${args.join(' ')}）`)
 }
 
 async function updateDshSelf(): Promise<UpdateOutcome> {
-  const name = 'DSH 本体'
+  const name = m('upd.dshName')
   // Upgrade target: the writable userData root (first candidate dsh.ts resolves),
   // so a packaged install — where resources/ is read-only — can still self-update.
   const root = join(app.getPath('userData'), 'dsh')
@@ -218,7 +220,7 @@ async function updateDshSelf(): Promise<UpdateOutcome> {
     const node = getNodeExePath()
     const npmCli = bundledNpmCli()
     if (!existsSync(npmCli))
-      throw new Error(`缺少内置 npm（${npmCli}），请先运行 npm run setup:node`)
+      throw new Error(m('upd.npmMissing', { npm: npmCli }))
     await runNpm(
       node,
       [
@@ -255,7 +257,7 @@ async function updateDshSelf(): Promise<UpdateOutcome> {
   } catch (err) {
     const msg = (err as Error).message || String(err)
     const hint = /EPERM|EACCES|EROFS|permission/i.test(msg)
-      ? '（目录不可写：请检查用户数据目录权限，或手动运行 npm run setup:dsh --force）'
+      ? m('upd.dshDirNotWritable')
       : ''
     return { name, ok: false, updated: false, error: msg + hint }
   }
@@ -266,15 +268,15 @@ async function updateDshSelf(): Promise<UpdateOutcome> {
     updated: Boolean(after && after !== before),
     message:
       after && after !== before
-        ? `DSH 已升级至 ${after}，重启 dsh 页面后生效`
-        : `DSH 已是最新（${after || '?'}）`
+        ? m('upd.dshUpgraded', { after })
+        : m('upd.dshUpToDate', { after: after || '?' })
   }
 }
 
 async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
   const name = 'OpenClaw'
   const root = openclawRoot()
-  if (!root) return { name, ok: false, updated: false, error: '未找到 openclaw 安装目录' }
+  if (!root) return { name, ok: false, updated: false, error: m('upd.openclawDirMissing') }
   const before = openclawVersion()
   try {
     mkdirSync(root, { recursive: true })
@@ -282,7 +284,7 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
     const node = getNodeExePath()
     const npmCli = bundledNpmCli()
     if (!existsSync(npmCli))
-      throw new Error(`缺少内置 npm（${npmCli}），请先运行 npm run setup:node`)
+      throw new Error(m('upd.npmMissing', { npm: npmCli }))
     await runNpm(
       node,
       [
@@ -300,7 +302,7 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
   } catch (err) {
     const msg = (err as Error).message || String(err)
     const hint = /EPERM|EACCES|EROFS|permission/i.test(msg)
-      ? '（安装目录不可写：请以管理员身份重新构建，或手动运行 npm run setup:openclaw --force）'
+      ? m('upd.openclawDirNotWritable')
       : ''
     return { name, ok: false, updated: false, error: msg + hint }
   }
@@ -311,8 +313,8 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
     updated: Boolean(after && after !== before),
     message:
       after && after !== before
-        ? `OpenClaw 已升级至 ${after}，重启该页面后生效`
-        : `OpenClaw 已是最新（${after || '?'}）`
+        ? m('upd.openclawUpgraded', { after })
+        : m('upd.openclawUpToDate', { after: after || '?' })
   }
 }
 
@@ -327,9 +329,9 @@ export async function performUpdate(target: UpdateCheckResult): Promise<UpdateOu
         name: target.name,
         ok: false,
         updated: false,
-        error: '本地项目不支持自动更新，请在其仓库拉取新版后重装/复制'
+        error: m('upd.localNoAuto')
       }
     default:
-      return { name: target.name, ok: false, updated: false, error: '未知的更新方式' }
+      return { name: target.name, ok: false, updated: false, error: m('upd.unknownChannel') }
   }
 }

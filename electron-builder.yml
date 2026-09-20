@@ -14,9 +14,15 @@ files:
   - '!pages/**'
   - '!scripts/**'
   - '!tools/**'
-  # Bundled runtimes (node/openclaw/dsh/codex) ship via extraResources only. Packing
-  # resources/** into app.asar as well would duplicate ~500 MB in the installer.
-  - '!resources/**'
+  # Bundled runtimes (node/openclaw/dsh) ship via extraResources only — packing
+  # them into app.asar as well would duplicate the installer. Everything else
+  # under resources/ stays: icon.png is required at runtime (taskbar + tray) and is read
+  # from inside the asar by the `?asset` import, so excluding all of resources/** made the
+  # packaged app come up with an empty icon.
+  - '!resources/node/**'
+  - '!resources/openclaw/**'
+  - '!resources/dsh/**'
+  - '!resources/icon-src.png'
 asarUnpack:
   - '**/node_modules/node-pty/**'
 extraResources:
@@ -31,8 +37,8 @@ extraResources:
   - from: resources
     to: .
     filter: ['**/*']
-  # builtin page metas (codex / dsh-web / openclaw / dsh-plugin-market) — seeded into
-  # userData/pages on first launch so they survive packaged updates.
+  # builtin page metas (dsh-web; openclaw is seeded by ensureDefaultOpenclawPage at
+  # runtime) — seeded into userData/pages on first launch so they survive packaged updates.
   - from: pages
     to: pages
     filter: ['**/*']

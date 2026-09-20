@@ -1,5 +1,6 @@
 import { reactive, ref, computed } from 'vue'
 import { defineStore } from 'pinia'
+import { t } from '../i18n'
 
 export interface TerminalSession {
   id: string
@@ -8,11 +9,15 @@ export interface TerminalSession {
   cwd: string
   status: 'open' | 'exited'
   exitCode?: number
+  /** Raw bytes this tab received; capped, used to repaint the shared xterm surface on switch. */
+  buffer: string
 }
+
+const MAX_BUFFER = 256 * 1024
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
   const res = await p
-  if (!res.ok) throw new Error(res.error || '终端启动失败')
+  if (!res.ok) throw new Error(res.error || t('common.terminalStartFail'))
   return res.data as T
 }
 
@@ -25,21 +30,19 @@ export const useTerminalStore = defineStore('terminal', () => {
   const activeId = ref<string | null>(null)
   const open = ref(false)
 
-  /** Dock against the title bar (top strip) instead of floating bottom-right. */
-  const DOCK_KEY = 'dsh-container.term-docked'
-  const docked = ref(
-    typeof localStorage === 'undefined' ? true : localStorage.getItem(DOCK_KEY) !== '0'
-  )
-  function setDocked(v: boolean): void {
-    docked.value = v
-    try {
-      localStorage.setItem(DOCK_KEY, v ? '1' : '0')
-    } catch {
-      /* storage disabled: keep in-memory state */
-    }
+  const activeSession = computed(() => sessions.find((s) => s.id === activeId.value) || null)
+
+  function sessionById(id: string): TerminalSession | undefined {
+    return sessions.find((s) => s.id === id)
   }
 
-  const activeSession = computed(() => sessions.find((s) => s.id === activeId.value) || null)
+  /** Accumulate output for every tab — the shared surface only shows one at a time. */
+  function feed(id: string, data: string): void {
+    const s = sessionById(id)
+    if (!s) return
+    if (s.buffer.length > MAX_BUFFER) s.buffer = s.buffer.slice(-MAX_BUFFER / 2)
+    s.buffer += data
+  }
 
   async function start(target: string, title: string): Promise<TerminalSession> {
     const info = await unwrap<{ id: string; title: string; cwd: string }>(
@@ -50,7 +53,8 @@ export const useTerminalStore = defineStore('terminal', () => {
       target,
       title: title || info.title,
       cwd: info.cwd,
-      status: 'open'
+      status: 'open',
+      buffer: ''
     }
     sessions.push(session)
     activeId.value = session.id
@@ -97,13 +101,13 @@ export const useTerminalStore = defineStore('terminal', () => {
     sessions,
     activeId,
     open,
-    docked,
-    setDocked,
     activeSession,
     start,
     focus,
     close,
     closeAll,
-    toggle
+    toggle,
+    feed,
+    sessionById
   }
 })

@@ -13,13 +13,14 @@ const api = {
     ipcRenderer.invoke(IPC.InstallPageFromGit, repoUrl, name, port),
   installPageFromDir: (srcDir: string, name?: string, port?: number) =>
     ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port),
-  chooseDirectory: () => ipcRenderer.invoke(IPC.ChooseDirectory),
+  chooseDirectory: (title?: string) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id: string) => ipcRenderer.invoke(IPC.RemovePage, id),
   setPagePort: (id: string, port?: number) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
   openExternal: (url: string) => ipcRenderer.invoke(IPC.OpenPageExternal, url),
   getSettings: () => ipcRenderer.invoke(IPC.GetSettings),
   updateSettings: (partial: Record<string, unknown>) =>
     ipcRenderer.invoke(IPC.UpdateSettings, partial),
+  getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
   checkUpdates: (force?: boolean) => ipcRenderer.invoke(IPC.CheckUpdates, force),
   performUpdate: (target: UpdateCheckResult) => ipcRenderer.invoke(IPC.PerformUpdate, target),
   dshStatus: (profile?: string) => ipcRenderer.invoke(IPC.DshStatus, profile),
@@ -34,6 +35,7 @@ const api = {
   dshUpdateAll: (profile?: string) => ipcRenderer.invoke(IPC.DshUpdateAll, profile),
   dshCreatePage: (profile: string, port?: number) =>
     ipcRenderer.invoke(IPC.DshCreatePage, profile, port),
+  dshToken: (profile?: string) => ipcRenderer.invoke(IPC.DshToken, profile),
   openclawStatus: () => ipcRenderer.invoke(IPC.OpenclawStatus),
   openclawToken: () => ipcRenderer.invoke(IPC.OpenclawToken),
   openclawCreatePage: (port?: number) => ipcRenderer.invoke(IPC.OpenclawCreatePage, port),

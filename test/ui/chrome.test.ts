@@ -57,6 +57,7 @@ function makeContainerMock(): Record<string, unknown> {
       return Promise.resolve(ok({ ...persistedSettings }))
     },
     checkUpdates: () => Promise.resolve(ok([])),
+    getEnvRoot: () => Promise.resolve(ok({ envRoot: '/env', installDir: '/', custom: false })),
     getNativeTheme: () => Promise.resolve(ok(true)), // pretend OS is dark
     setNativeTheme: () => Promise.resolve(ok(true)),
     onNativeTheme: () => () => undefined,
@@ -113,6 +114,7 @@ beforeEach(() => {
   document.documentElement.className = ''
   document.body.innerHTML = ''
   persistedSettings.theme = 'auto'
+  persistedSettings.locale = 'zh'
   ;(window as unknown as { container: unknown }).container = makeContainerMock()
 })
 
@@ -180,7 +182,7 @@ describe('shell chrome theme + layout', () => {
     expect(dlg?.querySelectorAll('input').length).toBeGreaterThanOrEqual(2)
   })
 
-  it('clicking a group trigger never shows panel and drop list together', async () => {
+  it('clicking a group trigger toggles its panel and never swaps to a list', async () => {
     await mountApp()
     const viewTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
       b.textContent?.includes('视图')
@@ -188,12 +190,29 @@ describe('shell chrome theme + layout', () => {
     await click(viewTrigger ?? null) // first click → panel opens, no list
     expect(document.querySelector('.panel-card')).not.toBeNull()
     expect(document.querySelector('.dropdown.drop-list')).toBeNull()
-    await click(viewTrigger ?? null) // re-click → list appears, panel retracts
-    expect(document.querySelector('.dropdown.drop-list')).not.toBeNull()
+    await click(viewTrigger ?? null) // re-click → everything closes (no list swap)
     expect(document.querySelector('.panel-card')).toBeNull()
-    await click(viewTrigger ?? null) // third click → panel back, list gone
+    expect(document.querySelector('.dropdown.drop-list')).toBeNull()
+    await click(viewTrigger ?? null) // third click → panel reopens
     expect(document.querySelector('.panel-card')).not.toBeNull()
     expect(document.querySelector('.dropdown.drop-list')).toBeNull()
+  })
+
+  it('switching the language to English re-renders the menu chrome', async () => {
+    await mountApp()
+    const zhLabels = [...document.querySelectorAll('.menubar .group-trigger')].map((b) =>
+      b.textContent?.trim()
+    )
+    expect(zhLabels.some((x) => x?.includes('视图'))).toBe(true)
+    const store = useSettingsStore(pinia)
+    await store.patch({ locale: 'en' })
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 30))
+    const enLabels = [...document.querySelectorAll('.menubar .group-trigger')].map((b) =>
+      b.textContent?.trim()
+    )
+    expect(enLabels.some((x) => x?.includes('View'))).toBe(true)
+    expect(enLabels.some((x) => x?.includes('视图'))).toBe(false)
   })
 
   it('the merged 应用 group lists external/dsh/openclaw and opens panels from rows', async () => {

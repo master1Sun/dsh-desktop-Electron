@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { Refresh } from '@element-plus/icons-vue'
 import type { PageState } from '../stores/pages'
+import { t } from '../i18n'
 
 const props = defineProps<{ page: PageState | null }>()
 const emit = defineEmits<{ exit: [] }>()
@@ -15,22 +15,60 @@ let fit: FitAddon | null = null
 let resizeObserver: ResizeObserver | null = null
 let disposeData: (() => void) | null = null
 let disposeExit: (() => void) | null = null
+/** Last grid size pushed to the PTY — see fitActive(). */
+let lastCols = -1
+let lastRows = -1
 
 const ptyId = ref<string | null>(null)
 const state = ref<'idle' | 'starting' | 'running' | 'exited'>('idle')
 const exitCode = ref<number | null>(null)
 const errorText = ref('')
 
-/** CLI 全屏终端始终使用深色配色，不跟随应用主题（浅色主题下白底终端不可读）。 */
+/** Overlay copy for the `exited` state: an explicit error wins, else the localized exit notice. */
+const exitedText = computed(() => {
+  if (errorText.value) return errorText.value
+  const name = props.page?.name || t('cliView.process')
+  const code = exitCode.value
+  return t('cliView.exited', { name }) + (code !== null ? t('cliView.exitCode', { code }) : '')
+})
+
+/** Bytes waiting to be painted. A full-screen TUI repaints in many small chunks;
+    writing each one synchronously makes xterm re-render dozens of times per frame,
+    which shows up as flicker and eventually wedges the renderer. Batch them into one
+    write per animation frame instead. */
+let pendingWrite = ''
+let writeScheduled = false
+
+function flushWrite(): void {
+  writeScheduled = false
+  if (!pendingWrite || !term) return
+  const data = pendingWrite
+  pendingWrite = ''
+  term.write(data)
+}
+
+function queueWrite(data: string): void {
+  if (!term) return
+  pendingWrite += data
+  if (writeScheduled) return
+  writeScheduled = true
+  requestAnimationFrame(flushWrite)
+}
+
+/** 终端配色跟随应用白天/黑夜主题（与内嵌终端抽屉一致）。 */
 function themeColors(): { bg: string; fg: string } {
-  return { bg: '#0f1420', fg: '#e6edf3' }
+  const light = document.documentElement.classList.contains('light')
+  return light ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
 }
 
 function ensureTerm(): void {
   if (term || !containerEl.value) return
   const c = themeColors()
   term = new Terminal({
-    convertEol: true,
+    // Full-screen TUIs position the cursor themselves. Translating every bare \n
+    // into \r\n makes each repaint land one line lower, so the screen scrolls/
+    // flickers continuously until the renderer stalls.
+    convertEol: false,
     cursorBlink: true,
     fontFamily: 'Consolas, Menlo, "Cascadia Code", monospace',
     fontSize: 13,
@@ -51,35 +89,50 @@ function fitActive(): void {
   if (!term || !fit || !ptyId.value) return
   try {
     fit.fit()
+    // Only push a resize when the grid actually changed: a TUI repaints on every
+    // SIGWINCH, so redundant resizes turn into an endless repaint loop.
+    if (term.cols === lastCols && term.rows === lastRows) return
+    lastCols = term.cols
+    lastRows = term.rows
     window.container.ptyResize(ptyId.value, term.cols, term.rows).catch(() => undefined)
   } catch {
     /* container not laid out yet */
   }
 }
 
+/** Guards against overlapping runs: a page refresh while one is starting would
+    otherwise spawn a second PTY and reset the surface mid-paint (flicker). */
+let runInFlight = false
+
 async function run(page: PageState): Promise<void> {
-  stopPty()
-  state.value = 'starting'
-  errorText.value = ''
-  exitCode.value = null
-  await nextTick()
-  ensureTerm()
-  term?.reset()
+  if (runInFlight) return
+  runInFlight = true
   try {
+    stopPty()
+    state.value = 'starting'
+    errorText.value = ''
+    exitCode.value = null
+    await nextTick()
+    ensureTerm()
+    term?.reset()
+    lastCols = -1
+    lastRows = -1
     const res = await window.container.pageRunSpec(page.id)
-    if (!res.ok) throw new Error(res.error || '无法获取运行配置')
+    if (!res.ok) throw new Error(res.error || t('cliView.noConfig'))
     const spec = res.data as { command: string; env?: Record<string, string> } | null
-    if (!spec?.command) throw new Error(`${page.name} 缺少启动命令，无法在终端中运行`)
+    if (!spec?.command) throw new Error(t('cliView.missingCommand', { name: page.name }))
     const start = await window.container.ptyStart(page.id, spec)
-    if (!start.ok) throw new Error(start.error || '终端启动失败')
+    if (!start.ok) throw new Error(start.error || t('common.terminalStartFail'))
     const info = start.data as { id: string }
     ptyId.value = info.id
     state.value = 'running'
     disposeData = window.container.onPtyData(({ id, data }) => {
-      if (id === ptyId.value) term?.write(data)
+      if (id === ptyId.value) queueWrite(data)
     })
     disposeExit = window.container.onPtyExit(({ id, code }) => {
       if (id !== ptyId.value) return
+      // Paint whatever arrived with the exit before covering the surface.
+      flushWrite()
       state.value = 'exited'
       exitCode.value = code
       cleanupListeners()
@@ -89,6 +142,8 @@ async function run(page: PageState): Promise<void> {
   } catch (err) {
     state.value = 'exited'
     errorText.value = (err as Error).message
+  } finally {
+    runInFlight = false
   }
 }
 
@@ -101,6 +156,7 @@ function cleanupListeners(): void {
 
 function stopPty(): void {
   cleanupListeners()
+  pendingWrite = ''
   if (ptyId.value) window.container.ptyKill(ptyId.value).catch(() => undefined)
   ptyId.value = null
 }
@@ -123,6 +179,15 @@ watch(
   { immediate: true }
 )
 
+watch(
+  () => document.documentElement.className,
+  () => {
+    if (!term) return
+    const c = themeColors()
+    term.options.theme = { ...term.options.theme, background: c.bg, foreground: c.fg }
+  }
+)
+
 onBeforeUnmount(stopPty)
 </script>
 
@@ -130,16 +195,12 @@ onBeforeUnmount(stopPty)
   <div class="cli-term">
     <div ref="containerEl" class="cli-term-surface" />
     <div v-if="state === 'starting'" class="cli-term-overlay">
-      <span class="status-dot starting" /> 正在于内置终端启动 {{ props.page?.name }}…
+      <span class="status-dot starting" />
+      {{ t('cliView.launching', { name: props.page?.name || t('cliView.process') }) }}
     </div>
     <div v-else-if="state === 'exited'" class="cli-term-overlay">
       <div class="cli-term-exited">
-        <p>
-          {{
-            errorText ||
-            `${props.page?.name ?? '进程'} 已退出${exitCode !== null ? `（code=${exitCode}）` : ''}`
-          }}
-        </p>
+        <p>{{ exitedText }}</p>
         <div class="cli-term-actions">
           <el-button
             type="primary"
@@ -147,9 +208,9 @@ onBeforeUnmount(stopPty)
             :disabled="!props.page"
             @click="props.page && run(props.page)"
           >
-            <el-icon><Refresh /></el-icon> 重新运行
+            {{ t('cliView.rerun') }}
           </el-button>
-          <el-button round @click="leave">返回工作台</el-button>
+          <el-button round @click="leave">{{ t('cliView.backToWorkbench') }}</el-button>
         </div>
       </div>
     </div>
@@ -164,7 +225,7 @@ onBeforeUnmount(stopPty)
   height: 100%;
   min-height: 0;
   display: flex;
-  background: #0f1420;
+  background: var(--surface);
 }
 
 .cli-term-surface {
@@ -179,8 +240,10 @@ onBeforeUnmount(stopPty)
   display: grid;
   place-content: center;
   gap: 12px;
-  color: #8b949e;
-  background: rgba(15, 20, 32, 0.88);
+  color: var(--text-dim);
+  /* Kept translucent: when a CLI aborts (bad config, missing dir) its own error is
+     the only clue, and it is printed on the terminal underneath this overlay. */
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
   z-index: 5;
 }
 
