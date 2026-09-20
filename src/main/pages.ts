@@ -6,6 +6,7 @@ import { createConnection } from 'node:net'
 import { nativeTheme } from 'electron'
 import { getNodeExePath, bundledEnv } from './node-runtime'
 import { resolvePageEnv, resolvePagePort, expandHome, isValidPort, getSettings } from './store'
+import { logPageLine } from './logger'
 // aliased: `m` is already a local identifier in this file (regex match / map callback)
 import { m as msg, resolveText } from './i18n'
 import {
@@ -13,6 +14,7 @@ import {
   type DshTokenResult,
   type LocalizableText,
   type PageMeta,
+  type PageProgress,
   type PageState,
   type PageStatus
 } from '../shared/types'
@@ -23,6 +25,16 @@ const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 30_000)
 const OPENCLAW_READY_TIMEOUT_MS = Number(process.env.DSH_OPENCLAW_READY_TIMEOUT_MS || 120_000)
 /** How long the declared-port fallback waits for dsh's token-bearing ready line before launching without it. */
 const ANNOUNCE_GRACE_MS = 1500
+
+/* ---- crash health-guard ----
+ * A page that was up and then dies on its own (OOM, unhandled exception in the child,
+ * a crashed gateway) is usually worth another attempt; a page that never booted is a
+ * configuration problem and retrying only spams. Back off between attempts and give up
+ * after the budget so a hard-broken page can't loop forever. Reaching `running` and
+ * holding it for STABLE_RESET_MS refills the budget (a transient kill months later gets
+ * the full retry set again). */
+const CRASH_RETRY_DELAYS_MS = [2_000, 5_000, 15_000]
+const STABLE_RESET_MS = 5 * 60_000
 
 /** Pages shipped with the container (repo `pages/`) — never removable. */
 export const BUILTIN_PAGE_IDS = new Set(['dsh-web', 'openclaw'])
@@ -57,6 +69,16 @@ interface RuntimeEntry {
   /** full URL announced by the app at boot (includes auth params) */
   launchUrl?: string
   logs: string[]
+  /** last time a progress event was streamed for this entry (throttles log-tail spam). */
+  lastProgAt?: number
+  /** abnormal exits counted since the last stable run (health-guard budget). */
+  crashes: number
+  /** pending scheduled auto-restart after a crash; cleared by stop/start/quit. */
+  restartTimer?: NodeJS.Timeout
+  /** when the running-streak is long enough to refill the crash budget. */
+  stableTimer?: NodeJS.Timeout
+  /** epoch ms of the pending auto-restart (surfaced to the renderer). */
+  nextRestartAt?: number
 }
 
 export interface PagesRoot {
@@ -115,6 +137,8 @@ export interface ContainerManifest {
   kind?: PageKind
   dsh?: DshConfig
   openclaw?: OpenclawConfig
+  /** opt this page into the top-bar 应用 menu + generic AppManager panel */
+  manageAsApp?: boolean
   envVars?: Array<{
     key: string
     label?: LocalizableText
@@ -209,6 +233,9 @@ export function readPageMeta(pagesDir: string, id: string): PageMeta {
     kind,
     builtin: BUILTIN_PAGE_IDS.has(id),
     dshProfile: raw.dsh?.profile || 'web',
+    // Agent runtimes live in the 应用 menu by default; imported pages opt in via
+    // container.json "manageAsApp": true.
+    manageAsApp: raw.manageAsApp ?? (kind === 'dsh' || kind === 'openclaw'),
     envVars
   }
 }
@@ -392,6 +419,7 @@ export class PageRegistry extends EventEmitter {
     const alive = new Set(metas.map((m) => m.id))
     for (const id of [...this.entries.keys()]) {
       if (!alive.has(id)) {
+        this.clearRestartTimers(this.entries.get(id)!)
         this.stop(id)
         this.entries.delete(id)
       }
@@ -399,7 +427,7 @@ export class PageRegistry extends EventEmitter {
     for (const meta of metas) {
       const existing = this.entries.get(meta.id)
       if (existing) existing.meta = meta
-      else this.entries.set(meta.id, { meta, status: 'stopped', logs: [] })
+      else this.entries.set(meta.id, { meta, status: 'stopped', logs: [], crashes: 0 })
     }
     return metas
   }
@@ -428,7 +456,9 @@ export class PageRegistry extends EventEmitter {
       exitCode: e.exitCode,
       lastError: e.lastError,
       url,
-      launchUrl: withThemeParam(e.launchUrl || url, e.meta.kind)
+      launchUrl: withThemeParam(e.launchUrl || url, e.meta.kind),
+      crashes: e.crashes || undefined,
+      nextRestartAt: e.nextRestartAt
     }
   }
 
@@ -436,10 +466,44 @@ export class PageRegistry extends EventEmitter {
     return [...(this.entries.get(id)?.logs ?? [])]
   }
 
-  async start(id: string): Promise<PageState> {
+  async start(id: string, opts?: { fromCrashGuard?: boolean }): Promise<PageState> {
     const e = this.entries.get(id)
     if (!e) throw new Error(msg('page.unknown', { id }))
-    if (e.status === 'running' || e.status === 'starting') return this.toState(e)
+    // Read via a local so the early-return guard doesn't narrow `e.status` for the rest of
+    // the method — the retry path below must re-read it as a full PageStatus after an await.
+    const initialStatus: PageStatus = e.status
+    if (initialStatus === 'running' || initialStatus === 'starting') return this.toState(e)
+    // A manual start owns the page again: cancel any pending retry and refill the budget.
+    // A guard-scheduled start must NOT reset the counter — that would make every crash
+    // look like the first one and turn the backoff ladder into an endless 2s restart loop.
+    if (!opts?.fromCrashGuard) {
+      this.clearRestartTimers(e)
+      e.crashes = 0
+    }
+    e.lastError = undefined
+    // Orphan-reclaim is deliberately NOT on the happy path: the WMI enumeration it relies
+    // on costs seconds on every start. Instead we spawn immediately, and only when the child
+    // dies fast on its own (a stale harness squatting the port, or the gateway's state-dir
+    // lock → exit 78) do we reclaim orphans and retry once. Pure timeouts aren't retried —
+    // those mean "still booting", not "blocked by an orphan".
+    try {
+      return await this.startAttempt(e, id)
+    } catch (err) {
+      const exitedEarly = e.exitCode !== undefined && e.exitCode !== null && e.exitCode !== 0
+      const retriable = exitedEarly && (e.meta.kind === 'dsh' || e.meta.kind === 'openclaw')
+      if (!retriable) throw err
+      await this.reclaimOrphan(e, id)
+      // A cancel (stop) during the reclaim flips status off 'starting'; don't resurrect it.
+      const statusNow: PageStatus = e.status
+      if (statusNow !== 'starting') return this.toState(e)
+      e.logs.push(msg('page.logRetryAfterReclaim'))
+      this.emitProgress(e, 'retry')
+      return this.startAttempt(e, id)
+    }
+  }
+
+  /** One spawn + readiness wait. `start` may call this twice (see the reclaim-on-failure retry). */
+  private async startAttempt(e: RuntimeEntry, id: string): Promise<PageState> {
     if (e.meta.external) throw new Error(msg('page.externalNoStart', { name: e.meta.name }))
 
     const isDsh = e.meta.kind === 'dsh'
@@ -460,14 +524,12 @@ export class PageRegistry extends EventEmitter {
     e.exitCode = undefined
     e.resolvedPort = undefined
     e.launchUrl = undefined
+    this.emitProgress(e, 'spawning')
 
     let proc: ChildProcessWithoutNullStreams
     if (isDsh) {
       // dynamic import avoids a cycle at module load (dsh.ts imports store only)
       const { dshSpawnCommand } = await import('./dsh')
-      // A second live harness on the same --profile splits terminal-session and plugin-store
-      // ownership (sessions report "already owned by an active write handle"). Reclaim orphans first.
-      await this.reclaimOrphanDsh(e.meta.dshProfile || 'web', id)
       const spec = await dshSpawnCommand(e.meta.dshProfile || 'web', port)
       try {
         proc = spawn(spec.cmd, spec.args, {
@@ -482,9 +544,6 @@ export class PageRegistry extends EventEmitter {
       }
     } else if (isOpenclaw) {
       const { openclawSpawnSpec } = await import('./openclaw')
-      // A prior gateway we no longer track (dev reload/orphan) holds the state-dir ownership
-      // lock → a fresh `gateway run` exits 78. Reclaim it first so start always succeeds.
-      await this.reclaimOrphanOpenclaw(id)
       const spec = openclawSpawnSpec(port)
       try {
         proc = spawn(spec.cmd, spec.args, {
@@ -523,10 +582,12 @@ export class PageRegistry extends EventEmitter {
     e.proc = proc
     e.pid = proc.pid
     e.startedAt = Date.now()
+    proc.on('spawn', () => this.emitProgress(e, 'process'))
     proc.stdout.on('data', (d) => this.appendLog(e, d))
     proc.stderr.on('data', (d) => this.appendLog(e, d))
     proc.on('error', (err) => this.fail(e, err.message))
     proc.on('close', (code) => {
+      const wasRunning = e.status === 'running'
       if (e.status === 'starting' || e.status === 'running') {
         this.setStatus(e, code === 0 || this.quitting ? 'stopped' : 'error')
         e.exitCode = code
@@ -535,24 +596,47 @@ export class PageRegistry extends EventEmitter {
           e.logs.push(`[container] ${e.lastError}`)
         }
       }
+      // Health guard: only a process that had *reached running* and then died on its
+      // own counts as a crash — startup failures are config problems the user retries.
+      if (
+        wasRunning &&
+        code !== 0 &&
+        !this.quitting &&
+        e.meta.kind !== 'terminal' &&
+        getSettings().crashAutoRestart !== false
+      ) {
+        e.crashes++
+        this.scheduleCrashRestart(e, code)
+      }
       e.proc = undefined
       e.pid = undefined
       this.emitChanged()
     })
 
     try {
+      this.emitProgress(e, 'port')
       const { port, url } = await this.waitReady(e, proc, isDsh, isOpenclaw, isTerminal)
       e.resolvedPort = port
       let launchUrl = url
       if (isOpenclaw) {
         // Self-pair the webview past the "gateway needs a token" screen by fetching a
         // one-time owner-bootstrap Control UI URL from the now-running gateway.
+        this.emitProgress(e, 'url')
         const { resolveOpenclawLaunchUrl } = await import('./openclaw')
         launchUrl = (await resolveOpenclawLaunchUrl()) || url
       }
       e.launchUrl = launchUrl
       e.logs.push(msg('page.logReady', { port }))
       this.setStatus(e, 'running')
+      // Refill the crash budget once the page has stayed up; re-arm per run so a page
+      // that survives its first minutes isn't throttled by weeks-old crashes.
+      clearTimeout(e.stableTimer)
+      e.stableTimer = setTimeout(() => {
+        e.stableTimer = undefined
+        if (e.status === 'running') e.crashes = 0
+      }, STABLE_RESET_MS)
+      e.stableTimer.unref?.()
+      this.emitProgress(e, 'ready')
       this.emitChanged()
       return this.toState(e)
     } catch (err) {
@@ -560,6 +644,27 @@ export class PageRegistry extends EventEmitter {
       if (e.proc) this.stop(id)
       throw new Error(e.lastError)
     }
+  }
+
+  /** Dispatch orphan reclaim by kind, so `start` doesn't import both code paths. */
+  private async reclaimOrphan(e: RuntimeEntry, selfId: string): Promise<void> {
+    if (e.meta.kind === 'dsh') await this.reclaimOrphanDsh(e.meta.dshProfile || 'web', selfId)
+    else if (e.meta.kind === 'openclaw') await this.reclaimOrphanOpenclaw(selfId)
+  }
+
+  /** Stream a startup phase + log tail to the renderer's boot overlay. */
+  private emitProgress(e: RuntimeEntry, phase: PageProgress['phase']): void {
+    if (phase === 'log') {
+      // Throttle the pure-log-tail refresh; phase transitions always pass through.
+      const now = Date.now()
+      if (e.lastProgAt && now - e.lastProgAt < 250) return
+      e.lastProgAt = now
+    }
+    this.emit('progress', {
+      pageId: e.meta.id,
+      phase,
+      logs: e.logs.slice(-12)
+    } satisfies PageProgress)
   }
 
   /** plain pages: poll the effective port; dsh: also parse the app's own ready line for the bound URL;
@@ -574,7 +679,28 @@ export class PageRegistry extends EventEmitter {
     if (isTerminal) return Promise.resolve({ port: 0 })
     const timeoutMs = isOpenclaw ? OPENCLAW_READY_TIMEOUT_MS : START_TIMEOUT_MS
     const wantPort = e.meta.containerPort || e.meta.port
-    if (!isDsh) return waitPortReady(wantPort, timeoutMs).then((port) => ({ port }))
+    if (!isDsh) {
+      // Fail the moment the child exits non-zero (a gateway lock / EADDRINUSE) instead of
+      // polling the dead port to the deadline — this is what makes reclaim-on-failure fast.
+      return new Promise<{ port: number }>((resolve, reject) => {
+        const onClose = (code: number | null): void => {
+          // A non-zero exit always fails. For a foreground openclaw gateway, *any* exit
+          // (incl. a clean/cancelled one) means it will never bind — fail fast either way.
+          if (code || isOpenclaw) reject(new Error(msg('page.processExited', { code: code ?? '' })))
+        }
+        proc.once('close', onClose)
+        waitPortReady(wantPort, timeoutMs).then(
+          (port) => {
+            proc.off('close', onClose)
+            resolve({ port })
+          },
+          (err: Error) => {
+            proc.off('close', onClose)
+            reject(err)
+          }
+        )
+      })
+    }
     const deadline = Date.now() + timeoutMs
     return new Promise((resolve, reject) => {
       /**
@@ -584,6 +710,12 @@ export class PageRegistry extends EventEmitter {
        */
       let announced: { port: number; url: string } | null = null
       const failWith = (err: Error): void => reject(err)
+      const onExit = (code: number | null): void => {
+        if (code) {
+          cleanup()
+          failWith(new Error(msg('page.processExited', { code })))
+        }
+      }
       const onChunk = (chunk: unknown): void => {
         for (const line of String(chunk).split(/\r?\n/)) {
           const found = parseLaunchLine(line)
@@ -613,8 +745,10 @@ export class PageRegistry extends EventEmitter {
       const cleanup = (): void => {
         clearInterval(timer)
         proc.stdout.off('data', onChunk)
+        proc.off('close', onExit)
       }
       proc.stdout.on('data', onChunk)
+      proc.once('close', onExit)
       // fallback: the declared port may come up without a parsable announcement
       waitPortReady(wantPort, START_TIMEOUT_MS).then(
         (port) =>
@@ -629,6 +763,10 @@ export class PageRegistry extends EventEmitter {
 
   stop(id: string): void {
     const e = this.entries.get(id)
+    if (!e) return
+    // An explicit stop owns the page again: drop any scheduled crash-retry so a
+    // stopped page stays stopped even when the guard had a retry queued.
+    this.clearRestartTimers(e)
     if (!e?.proc) return
     const proc = e.proc
     e.logs.push(msg('page.logStopping'))
@@ -791,16 +929,20 @@ export class PageRegistry extends EventEmitter {
       so they are skipped here to avoid a spurious "run in terminal" error. Unknown ids
       (a retired builtin still listed in persisted settings) are skipped silently. */
   async autoStart(ids: string[]): Promise<void> {
-    for (const id of ids) {
-      const entry = this.entries.get(id)
-      if (!entry) continue
-      if (entry.meta.kind === 'terminal') continue
-      try {
-        await this.start(id)
-      } catch (err) {
-        console.warn(`[pages] auto-start ${id} failed:`, (err as Error).message)
-      }
-    }
+    // Concurrent: each page boots its own child, so serializing just stacks their
+    // (already slow) first-boot latencies. start() is self-guarding against a duplicate
+    // in-flight call, and per-page failures are logged rather than aborting the batch.
+    await Promise.all(
+      ids.map(async (id): Promise<void> => {
+        const entry = this.entries.get(id)
+        if (!entry || entry.meta.kind === 'terminal') return
+        try {
+          await this.start(id)
+        } catch (err) {
+          console.warn(`[pages] auto-start ${id} failed:`, (err as Error).message)
+        }
+      })
+    )
   }
 
   shutdownAll(): void {
@@ -813,6 +955,53 @@ export class PageRegistry extends EventEmitter {
     this.emitChanged()
   }
 
+  /** Cancel the guard's pending auto-restart / budget-refill timers for one entry. */
+  private clearRestartTimers(e: RuntimeEntry): void {
+    if (e.restartTimer) clearTimeout(e.restartTimer)
+    if (e.stableTimer) clearTimeout(e.stableTimer)
+    e.restartTimer = undefined
+    e.stableTimer = undefined
+    e.nextRestartAt = undefined
+  }
+
+  /**
+   * One backoff rung of the crash health-guard. `crashes` is already incremented by the
+   * caller; when the budget is spent the entry just stays in 'error' with a lastError
+   * that says so — the user keeps the restart/logs affordances, we stop spawning.
+   */
+  private scheduleCrashRestart(e: RuntimeEntry, code: number | null): void {
+    this.clearRestartTimers(e)
+    const max = CRASH_RETRY_DELAYS_MS.length
+    if (e.crashes > max) {
+      e.crashes = max
+      e.lastError = msg('page.crashGiveUp', { max })
+      e.logs.push(`[container] ${e.lastError}`)
+      console.warn(`[pages] ${e.meta.id}: crash budget spent (${max}), auto-restart stopped`)
+      return
+    }
+    const delay = CRASH_RETRY_DELAYS_MS[e.crashes - 1]
+    const line = msg('page.logCrashRestart', {
+      code: code ?? '',
+      sec: Math.round(delay / 1000),
+      n: e.crashes,
+      max
+    })
+    e.logs.push(`[container] ${line}`)
+    e.nextRestartAt = Date.now() + delay
+    console.warn(`[pages] ${e.meta.id} crashed (code=${code}) — ${line}`)
+    e.restartTimer = setTimeout(() => {
+      e.restartTimer = undefined
+      e.nextRestartAt = undefined
+      if (this.quitting || e.proc) return
+      this.start(e.meta.id, { fromCrashGuard: true }).catch((err) => {
+        // A failed retry already flipped the entry to 'error'; the next close event
+        // schedules the next rung, so nothing extra to do but keep it off the console.
+        console.warn(`[pages] crash-restart ${e.meta.id} failed:`, (err as Error).message)
+      })
+    }, delay)
+    e.restartTimer.unref?.()
+  }
+
   private fail(e: RuntimeEntry, message: string): void {
     e.lastError = message
     e.logs.push(`[container] ${message}`)
@@ -820,11 +1009,19 @@ export class PageRegistry extends EventEmitter {
   }
 
   private appendLog(e: RuntimeEntry, chunk: unknown): void {
-    for (const line of String(chunk).split(/\r?\n/)) {
+    const text = String(chunk)
+    // Mirror the child's raw output to userData/logs/pages/<id>.log — the in-memory
+    // ring buffer is only the last 1000 lines and dies with the main process.
+    logPageLine(e.meta.id, text)
+    let added = false
+    for (const line of text.split(/\r?\n/)) {
       if (!line.trim()) continue
       e.logs.push(line)
+      added = true
       if (e.logs.length > LOG_LIMIT) e.logs.shift()
     }
+    // Surface live output while booting so the overlay shows progress, not a frozen spinner.
+    if (added && e.status === 'starting') this.emitProgress(e, 'log')
   }
 
   /** Ask every listener to re-read state. Out-of-band callers (e.g. a language change, which

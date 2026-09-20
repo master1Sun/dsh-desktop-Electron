@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, View, Hide, CopyDocument } from '@element-plus/icons-vue'
+import { Refresh, View, Hide, CopyDocument, MagicStick } from '@element-plus/icons-vue'
 import { usePagesStore } from '../stores/pages'
+import EmptyState from './EmptyState.vue'
 import { t } from '../i18n'
+import type { OpenclawInitTokenResult } from '@shared/types'
 
 interface OpenclawStatusInfo {
   installed: boolean
@@ -25,6 +27,29 @@ const loading = ref(false)
 const token = ref<TokenInfo | null>(null)
 const tokenLoading = ref(false)
 const tokenRevealed = ref(false)
+const initBusy = ref(false)
+
+/**
+ * One-click gateway token bootstrap. The container mints (or with `rotate`, re-mints) a durable
+ * token into openclaw.json and restarts a running gateway so the embedded Control UI can
+ * authenticate. After it returns we re-read the token so the row populates immediately.
+ */
+async function initToken(rotate = false): Promise<void> {
+  initBusy.value = true
+  try {
+    const r = await window.container.openclawInitToken(rotate)
+    if (!r.ok) throw new Error(r.error || t('openclawMgr.msgInitFail'))
+    const res = r.data as OpenclawInitTokenResult
+    await loadToken()
+    if (res.restarted) ElMessage.success(t('openclawMgr.msgInitedRestart'))
+    else if (res.created) ElMessage.success(t('openclawMgr.msgInited'))
+    else ElMessage.info(t('openclawMgr.msgExists'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    initBusy.value = false
+  }
+}
 
 const maskedToken = computed(() => {
   const t = token.value?.token || ''
@@ -82,13 +107,16 @@ async function openHomeTerminal(): Promise<void> {
 
 <template>
   <div v-loading="loading && !status" class="openclaw-manager">
-    <div v-if="status && !status.installed" class="empty">
-      <p>{{ status.error || t('openclawMgr.emptyError') }}</p>
-      <code>npm run setup:openclaw</code>
+    <EmptyState
+      v-if="status && !status.installed"
+      :description="status.error || t('openclawMgr.emptyError')"
+      hint="npm run setup:openclaw"
+      :tone="status.error ? 'error' : 'muted'"
+    >
       <el-button size="small" text @click="load">
         {{ t('openclawMgr.recheck') }}
       </el-button>
-    </div>
+    </EmptyState>
 
     <template v-else-if="status">
       <div class="head">
@@ -131,9 +159,28 @@ async function openHomeTerminal(): Promise<void> {
         >
           <el-icon><Refresh /></el-icon>
         </el-button>
+        <el-button
+          size="small"
+          text
+          type="warning"
+          :loading="initBusy"
+          :title="t('openclawMgr.regenerate')"
+          @click="initToken(true)"
+        >
+          {{ t('openclawMgr.regenerate') }}
+        </el-button>
       </div>
       <div v-else class="sub token-hint">
         {{ t('openclawMgr.tokenNotGenerated') }}
+        <el-button
+          size="small"
+          type="primary"
+          :loading="initBusy"
+          @click="initToken(false)"
+        >
+          <el-icon><MagicStick /></el-icon>
+          {{ t('openclawMgr.initBtn') }}
+        </el-button>
         <el-button size="small" text :loading="tokenLoading" @click="loadToken">
           {{ t('openclawMgr.retry') }}
         </el-button>
@@ -160,23 +207,6 @@ async function openHomeTerminal(): Promise<void> {
 <style scoped>
 .openclaw-manager {
   min-height: 120px;
-}
-
-.empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 26px 10px;
-  color: var(--text-dim);
-  font-size: 13px;
-  text-align: center;
-}
-.empty code {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 2px 8px;
 }
 
 .head {

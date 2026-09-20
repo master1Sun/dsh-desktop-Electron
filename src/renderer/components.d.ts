@@ -11,7 +11,9 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AppManager: typeof import('./src/components/AppManager.vue')['default']
     CliTerminalView: typeof import('./src/components/CliTerminalView.vue')['default']
+    CommandPalette: typeof import('./src/components/CommandPalette.vue')['default']
     DshManager: typeof import('./src/components/DshManager.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElButton: typeof import('element-plus/es')['ElButton']
@@ -22,6 +24,7 @@ declare module 'vue' {
     ElInput: typeof import('element-plus/es')['ElInput']
     ElOption: typeof import('element-plus/es')['ElOption']
     ElOptionGroup: typeof import('element-plus/es')['ElOptionGroup']
+    ElProgress: typeof import('element-plus/es')['ElProgress']
     ElRadioButton: typeof import('element-plus/es')['ElRadioButton']
     ElRadioGroup: typeof import('element-plus/es')['ElRadioGroup']
     ElSelect: typeof import('element-plus/es')['ElSelect']
@@ -32,14 +35,16 @@ declare module 'vue' {
     ElTabs: typeof import('element-plus/es')['ElTabs']
     ElTag: typeof import('element-plus/es')['ElTag']
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
+    EmptyState: typeof import('./src/components/EmptyState.vue')['default']
     ExternalSitesManager: typeof import('./src/components/ExternalSitesManager.vue')['default']
     MenuBar: typeof import('./src/components/MenuBar.vue')['default']
     MenuPanelContent: typeof import('./src/components/MenuPanelContent.vue')['default']
     OpenclawManager: typeof import('./src/components/OpenclawManager.vue')['default']
     PageManager: typeof import('./src/components/PageManager.vue')['default']
+    PageSwitcher: typeof import('./src/components/PageSwitcher.vue')['default']
     SettingsPanel: typeof import('./src/components/SettingsPanel.vue')['default']
     TerminalDrawer: typeof import('./src/components/TerminalDrawer.vue')['default']
-    UpdateBadge: typeof import('./src/components/UpdateBadge.vue')['default']
+    WindowControls: typeof import('./src/components/WindowControls.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

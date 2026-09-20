@@ -1,9 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import { IPC, type UpdateCheckResult } from '../shared/types'
+import { IPC, type InstallProgress, type PageProgress, type UpdateCheckResult, type UpdateProgress } from '../shared/types'
 
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
+  nodeListVersions: () => ipcRenderer.invoke(IPC.ListNodeVersions),
+  nodeUpdate: (version: string) => ipcRenderer.invoke(IPC.UpdateNodeRuntime, version),
+  nodeRestoreBundled: () => ipcRenderer.invoke(IPC.RestoreBundledNode),
+  onNodeUpdateProgress: (cb: (p: UpdateProgress) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, p: UpdateProgress): void => cb(p)
+    ipcRenderer.on(IPC.OnNodeUpdateProgress, listener)
+    return () => ipcRenderer.removeListener(IPC.OnNodeUpdateProgress, listener)
+  },
   listPages: () => ipcRenderer.invoke(IPC.ListPages),
   startPage: (id: string) => ipcRenderer.invoke(IPC.StartPage, id),
   stopPage: (id: string) => ipcRenderer.invoke(IPC.StopPage, id),
@@ -23,6 +31,28 @@ const api = {
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
   checkUpdates: (force?: boolean) => ipcRenderer.invoke(IPC.CheckUpdates, force),
   performUpdate: (target: UpdateCheckResult) => ipcRenderer.invoke(IPC.PerformUpdate, target),
+  openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
+  onUpdateResults: (cb: (results: UpdateCheckResult[]) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, results: UpdateCheckResult[]): void =>
+      cb(results)
+    ipcRenderer.on(IPC.OnUpdateResults, listener)
+    return () => ipcRenderer.removeListener(IPC.OnUpdateResults, listener)
+  },
+  onUpdateProgress: (cb: (p: UpdateProgress) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, p: UpdateProgress): void => cb(p)
+    ipcRenderer.on(IPC.OnUpdateProgress, listener)
+    return () => ipcRenderer.removeListener(IPC.OnUpdateProgress, listener)
+  },
+  onPageProgress: (cb: (p: PageProgress) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, p: PageProgress): void => cb(p)
+    ipcRenderer.on(IPC.OnPageProgress, listener)
+    return () => ipcRenderer.removeListener(IPC.OnPageProgress, listener)
+  },
+  onInstallProgress: (cb: (p: InstallProgress) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, p: InstallProgress): void => cb(p)
+    ipcRenderer.on(IPC.OnInstallProgress, listener)
+    return () => ipcRenderer.removeListener(IPC.OnInstallProgress, listener)
+  },
   relaunchApp: () => ipcRenderer.invoke(IPC.RelaunchApp),
   dshStatus: (profile?: string) => ipcRenderer.invoke(IPC.DshStatus, profile),
   dshListPlugins: (profile?: string) => ipcRenderer.invoke(IPC.DshListPlugins, profile),
@@ -39,6 +69,7 @@ const api = {
   dshToken: (profile?: string) => ipcRenderer.invoke(IPC.DshToken, profile),
   openclawStatus: () => ipcRenderer.invoke(IPC.OpenclawStatus),
   openclawToken: () => ipcRenderer.invoke(IPC.OpenclawToken),
+  openclawInitToken: (rotate?: boolean) => ipcRenderer.invoke(IPC.OpenclawInitToken, rotate),
   openclawCreatePage: (port?: number) => ipcRenderer.invoke(IPC.OpenclawCreatePage, port),
   pageRunSpec: (id: string) => ipcRenderer.invoke(IPC.PageRunSpec, id),
   openTerminalPage: (id: string) => ipcRenderer.invoke(IPC.OpenTerminalPage, id),

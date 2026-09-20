@@ -22,7 +22,9 @@ const DEFAULTS: ContainerSettings = {
   dshHome: '',
   openclawHome: '',
   pageEnvs: {},
-  pagePorts: {}
+  pagePorts: {},
+  // a page that crashes after having run is relaunched automatically; off surfaces the error only
+  crashAutoRestart: true
 }
 
 let store: Store<ContainerSettings> | null = null
@@ -149,8 +151,8 @@ export function resolveDshHome(): string {
     (getSettings().dshHome || '').trim() ||
     (getSettings().pageEnvs?.['dsh-web']?.DSH_HOME || '').trim()
   if (!override) {
-    // Follow the install dir by default, but never orphan an already-provisioned ~/.dsh.
-    return preferExisting(join(resolveEnvRoot(), 'dsh'), join(homedir(), '.dsh'))
+    // dsh CLI's own native home: the container manages the same profiles as the terminal.
+    return join(homedir(), '.dsh')
   }
   return expandHome(override)
 }
@@ -174,8 +176,8 @@ export function resolveOpenclawHome(): string {
     (getSettings().openclawHome || '').trim() ||
     (getSettings().pageEnvs?.['openclaw']?.OPENCLAW_HOME || '').trim()
   if (!override) {
-    // Follow the install dir by default, but keep an already-provisioned ~/.openclaw.
-    return preferExisting(join(resolveEnvRoot(), 'openclaw'), join(homedir(), '.openclaw'))
+    // openclaw CLI's own native home: the container manages the same config as the terminal.
+    return join(homedir(), '.openclaw')
   }
   return expandHome(override)
 }

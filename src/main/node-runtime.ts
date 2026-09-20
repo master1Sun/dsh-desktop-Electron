@@ -2,20 +2,48 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { app } from 'electron'
-import { NODE_VERSION_REQUIRED } from '../shared/types'
 
 export interface NodeRuntimeInfo {
   path: string
   version: string | null
   dir: string
+  /** runtime satisfies dsh/openclaw engines ranges (not just "equals the shipped one") */
   ok: boolean
+  /** true when the effective runtime is a user-updated one in userData, not from the installer */
+  override: boolean
 }
 
 let cached: NodeRuntimeInfo | null = null
 
+export function invalidateNodeRuntimeCache(): void {
+  cached = null
+}
+
+/** userData home of a user-updated runtime; node-updater installs here and the scan below
+    prefers it, so the installer-shipped runtime is shadowed without touching (or locking) it. */
+export function overrideNodeDir(): string {
+  return join(app.getPath('userData'), 'node')
+}
+
+/**
+ * Satisfies the engines ranges every hosted runtime declares
+ * (openclaw: >=24.16.0 <25 || >=26.1.0; dsh: unbounded) — a version outside them
+ * would break page spawns, so the updater only offers / accepts these.
+ */
+export function nodeVersionUsable(v: string | null): boolean {
+  if (!v) return false
+  const m = /v?(\d+)\.(\d+)\.(\d+)/.exec(v)
+  if (!m) return false
+  const maj = Number(m[1])
+  const min = Number(m[2])
+  return (maj === 24 && min >= 16) || maj > 25
+}
+
 function candidateDirs(): string[] {
   const dirs: string[] = []
   if (process.env.DSH_NODE_DIR) dirs.push(process.env.DSH_NODE_DIR)
+  // user-updated runtime (帮助 ▸ 内置 Node 更新) shadows the installer-shipped one
+  dirs.push(overrideNodeDir())
   // packaged: extraResources copies resources/node -> <resourcesPath>/node
   dirs.push(join(process.resourcesPath || '', 'node'))
   // dev / unpacked smoke test: project resources/node
@@ -81,7 +109,7 @@ export async function getNodeRuntimeInfo(refresh = false): Promise<NodeRuntimeIn
   try {
     path = getNodeExePath()
   } catch {
-    cached = { path: '', version: null, dir: '', ok: false }
+    cached = { path: '', version: null, dir: '', ok: false, override: false }
     return cached
   }
   const version = await readNodeVersion(path)
@@ -89,7 +117,10 @@ export async function getNodeRuntimeInfo(refresh = false): Promise<NodeRuntimeIn
     path,
     version,
     dir: join(path, '..'),
-    ok: version === NODE_VERSION_REQUIRED
+    // "ok" means hosted runtimes accept it — an updated version is just as valid as
+    // the shipped one, so don't grade every non-NODE_VERSION_REQUIRED runtime red.
+    ok: nodeVersionUsable(version),
+    override: join(path, '..') === overrideNodeDir()
   }
   return cached
 }

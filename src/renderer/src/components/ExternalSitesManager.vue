@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Edit, Position, Refresh } from '@element-plus/icons-vue'
 import type { ExternalSite } from '../../../shared/types'
 import { useSettingsStore } from '../stores/settings'
+import EmptyState from './EmptyState.vue'
 import { t } from '../i18n'
 
 const emit = defineEmits<{ preview: [url: string] }>()
@@ -39,7 +40,12 @@ function openEdit(site: ExternalSite): void {
 }
 
 async function save(list: ExternalSite[]): Promise<void> {
-  await settingsStore.patch({ externalSites: list }).catch((err) => {
+  // settingsStore.state is a Vue reactive Proxy; ipcRenderer.invoke structured-clones
+  // its arguments and throws "An object could not be cloned" on the nested site
+  // Proxies. Deep-copy to plain data at this IPC boundary so every add/edit/delete
+  // (which all route through here) survives the clone.
+  const plain = JSON.parse(JSON.stringify(list)) as ExternalSite[]
+  await settingsStore.patch({ externalSites: plain }).catch((err) => {
     ElMessage.error((err as Error).message)
     throw err
   })
@@ -90,43 +96,6 @@ async function remove(site: ExternalSite): Promise<void> {
 function preview(site: ExternalSite): void {
   emit('preview', site.url)
 }
-
-/** Seed a saved address straight from the last-typed external URLs history. */
-async function adopt(url: string): Promise<void> {
-  const norm = normalizeUrl(url)
-  if (!norm) return
-  if (settingsStore.settings.externalSites.some((s) => s.url === norm)) {
-    ElMessage.info(t('extMgr.msgDuplicate'))
-    return
-  }
-  const name = new URL(norm).host
-  await save([...settingsStore.settings.externalSites, { id: genId(), name, url: norm }])
-  ElMessage.success(t('extMgr.msgSaved', { name }))
-}
-
-async function removeRecent(url: string): Promise<void> {
-  await settingsStore
-    .patch({ lastExternalUrls: settingsStore.settings.lastExternalUrls.filter((u) => u !== url) })
-    .catch((err) => ElMessage.error((err as Error).message))
-}
-
-async function clearRecent(): Promise<void> {
-  if (!settingsStore.settings.lastExternalUrls.length) return
-  try {
-    await ElMessageBox.confirm(t('extMgr.msgClearRecentConfirm'), t('extMgr.msgClearRecentTitle'), {
-      type: 'warning',
-      confirmButtonText: t('extMgr.recentClear'),
-      cancelButtonText: t('extMgr.cancel')
-    })
-  } catch {
-    return
-  }
-  await settingsStore.patch({ lastExternalUrls: [] }).catch((err) => {
-    ElMessage.error((err as Error).message)
-    throw err
-  })
-  ElMessage.success(t('extMgr.msgCleared'))
-}
 </script>
 
 <template>
@@ -140,9 +109,7 @@ async function clearRecent(): Promise<void> {
       </el-button>
     </div>
 
-    <div v-if="!settingsStore.settings.externalSites.length" class="empty">
-      {{ t('extMgr.empty') }}
-    </div>
+    <EmptyState v-if="!settingsStore.settings.externalSites.length" :description="t('extMgr.empty')" />
 
     <div v-else class="list">
       <div v-for="site in settingsStore.settings.externalSites" :key="site.id" class="row">
@@ -167,30 +134,6 @@ async function clearRecent(): Promise<void> {
             </el-button>
           </el-tooltip>
         </div>
-      </div>
-    </div>
-
-    <div v-if="settingsStore.settings.lastExternalUrls.length" class="recent">
-      <div class="recent-head">
-        <span>{{ t('extMgr.recentHead') }}</span>
-        <el-button size="small" text type="danger" @click="clearRecent">
-          {{ t('extMgr.recentClear') }}
-        </el-button>
-      </div>
-      <div class="recent-list">
-        <el-tag
-          v-for="u in settingsStore.settings.lastExternalUrls"
-          :key="u"
-          class="recent-tag"
-          size="small"
-          effect="plain"
-          round
-          closable
-          @click="adopt(u)"
-          @close="removeRecent(u)"
-        >
-          {{ u }}
-        </el-tag>
       </div>
     </div>
 
@@ -229,12 +172,6 @@ async function clearRecent(): Promise<void> {
 .title {
   font-weight: 650;
   font-size: 13px;
-}
-.empty {
-  color: var(--text-dim);
-  font-size: 12.5px;
-  line-height: 1.7;
-  padding: 10px 2px;
 }
 .list {
   display: flex;
@@ -279,34 +216,5 @@ async function clearRecent(): Promise<void> {
 }
 .row:hover .actions {
   opacity: 1;
-}
-.recent {
-  margin-top: 14px;
-  border-top: 1px dashed var(--border);
-  padding-top: 10px;
-}
-.recent-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-bottom: 6px;
-}
-.recent-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.recent-tag {
-  cursor: pointer;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.recent-tag:hover {
-  color: var(--accent-strong);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 </style>

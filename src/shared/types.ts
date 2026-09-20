@@ -68,6 +68,12 @@ export interface PageMeta {
   dshProfile?: string
   /** directory env vars this page wants the user to configure (rendered dynamically in Settings) */
   envVars?: EnvVarSpec[]
+  /**
+   * Show this page in the top-bar 应用 menu with the generic AppManager panel (start/stop,
+   * port, declared envVars, update state). container.json may declare it explicitly;
+   * built-in agent kinds (dsh / openclaw) default to true so they always appear there.
+   */
+  manageAsApp?: boolean
 }
 
 export interface PageState extends PageMeta {
@@ -79,6 +85,10 @@ export interface PageState extends PageMeta {
   url?: string
   /** url carrying any runtime auth/launch params (dsh web tokens); preferred by the webview */
   launchUrl?: string
+  /** abnormal exits observed in the current crash-restart window (health guard counter) */
+  crashes?: number
+  /** epoch ms of the pending auto-restart when the health guard is retrying a crashed page */
+  nextRestartAt?: number
 }
 
 export interface RunningPageInfo {
@@ -95,6 +105,15 @@ export interface ExternalSite {
   id: string
   name: string
   url: string
+}
+
+/* Generic per-app panel key: `app:<pageId>` opens the top-bar AppManager panel for that
+   page. Lives in the shared contract because `open`/`open-panel` payloads carry either a
+   PanelKind or one of these strings. `<script setup>` SFCs cannot export runtime values,  so helpers belong here rather than in MenuBar.vue. */
+export const APP_PANEL_PREFIX = 'app:'
+export const appPanelKey = (id: string): string => APP_PANEL_PREFIX + id
+export function parseAppPanel(panel: string | null | undefined): string | null {
+  return panel && panel.startsWith(APP_PANEL_PREFIX) ? panel.slice(APP_PANEL_PREFIX.length) : null
 }
 
 /** Resolved "环境目录" info surfaced to the Settings panel. */
@@ -135,6 +154,8 @@ export interface ContainerSettings {
   pageEnvs: Record<string, Record<string, string>>
   /** per-page port overrides: pageId -> port; wins over container.json so imported projects need no editing */
   pagePorts: Record<string, number>
+  /** restart a page whose process crashes after having been up; off = surface the error only */
+  crashAutoRestart: boolean
 }
 
 export interface UpdateCheckResult {
@@ -166,6 +187,82 @@ export interface UpdateOutcome {
   ok: boolean
   updated: boolean
   error?: string
+  message?: string
+}
+
+/**
+ * Streaming progress for a container self-update download (the packaged OTA path pulls a
+ * large app.asar off the `release` git branch). Emitted over IPC while the update runs so
+ * the Updates panel can show a live progress bar instead of a bare spinner.
+ *
+ * - `fetch`: the network phase — `git fetch` of the release tip. `percent` mirrors git's own
+ *   "Receiving objects" percentage when it can be parsed, otherwise the bar is indeterminate.
+ * - `extract`: writing the app.asar blob to a `.part` file. `received`/`total` are byte
+ *   counts; `resumed` is true when an interrupted earlier attempt's partial file was kept and
+ *   the write continued from its size (断点续传) rather than restarting from zero.
+ * - `done`: the file is complete and staged as pending — the renderer clears the row.
+ */
+export interface UpdateProgress {
+  name: string
+  phase: 'fetch' | 'extract' | 'done'
+  /** bytes written so far (extract) */
+  received?: number
+  /** total bytes of the artifact (extract), or undefined when indeterminate (fetch) */
+  total?: number
+  /** 0..100, when computable */
+  percent?: number
+  /** true when an existing partial download was resumed rather than restarted */
+  resumed?: boolean
+  /** already-localized human line (built in the main process) */
+  message?: string
+}
+
+/**
+ * Streaming startup progress for a single page, emitted while `PageRegistry.start`
+ * is still awaiting readiness. The renderer's boot overlay renders these instead of a
+ * bare spinner: `phase` drives a localized status line, `logs` is a tail of the child's
+ * own output so a slow first boot visibly *does something*. The phase enum is sent (not a
+ * translated string) so the overlay follows the UI language without a round-trip.
+ *
+ * - spawning: about to launch the child process
+ * - process:  the child process is up; now waiting for it to bind
+ * - port:     polling the HTTP port / parsing the ready line
+ * - url:      resolving the token-bearing launch URL (openclaw dashboard)
+ * - retry:    a fast child exit triggered orphan-reclaim; starting a second attempt
+ * - log:      no phase transition, just a refreshed log tail
+ * - ready:    page is up (the overlay is torn down on the accompanying state change)
+ */
+export interface PageProgress {
+  pageId: string
+  phase: 'spawning' | 'process' | 'port' | 'url' | 'retry' | 'log' | 'ready'
+  logs: string[]
+}
+
+/**
+ * Streaming progress for an in-flight page import (git clone or local-folder copy),
+ * emitted back to the requesting window while `installFromGit` / `installFromLocalDir`
+ * run so the Pages panel can show a live bar instead of a bare spinner.
+ *
+ * The phase enum (not a translated string) is sent so the bar follows the UI language
+ * without a main<->renderer round-trip; `percent` is 0..100 when computable and omitted
+ * while the step is inherently indeterminate (git negotiating, project validation).
+ *
+ * - preparing:  git connecting / local dir being scanned to size the copy
+ * - receiving:  bytes moving (clone percentage, or copied-vs-total for the local copy)
+ * - validating: readPageMeta runs — the imported tree is checked for a runnable entry
+ * - finalizing: seeding container.json / adopting a git origin
+ * - done:       the import finished (the renderer still clears on the resolving promise)
+ */
+export interface InstallProgress {
+  op: 'git' | 'dir'
+  phase: 'preparing' | 'receiving' | 'validating' | 'finalizing' | 'done'
+  /** 0..100 when computable; undefined = indeterminate */
+  percent?: number
+  /** copied bytes so far (dir op) */
+  received?: number
+  /** total bytes to copy (dir op), or undefined while sizing */
+  total?: number
+  /** raw upstream progress line (git), shown as a detail caption */
   message?: string
 }
 
@@ -207,6 +304,27 @@ export type DshTokenResult =
   | { kind: 'stopped'; pageId: string }
   | { kind: 'no-page'; profile: string }
 
+/**
+ * Outcome of the openclaw one-click token bootstrap. `created` is false when a token already
+ * existed and was returned untouched (idempotent re-read); `restarted` reports whether a running
+ * gateway was relaunched so it picks up the (new) credential — a stopped page is left stopped.
+ */
+export interface OpenclawInitTokenResult {
+  token: string
+  created: boolean
+  restarted: boolean
+}
+
+/** One selectable bundled-Node upgrade target, from the nodejs.org dist index. */
+export interface NodeVersionInfo {
+  /** exact tag, e.g. "v24.21.0" */
+  version: string
+  /** release date (ISO) */
+  date: string
+  /** LTS codename when the line is LTS, false otherwise */
+  lts: string | false
+}
+
 export const IPC = {
   GetNodeInfo: 'container:get-node-info',
   ListPages: 'container:list-pages',
@@ -225,6 +343,24 @@ export const IPC = {
   EnvRoot: 'container:env-root',
   CheckUpdates: 'container:check-updates',
   PerformUpdate: 'container:perform-update',
+  /** list Node versions eligible to replace the bundled runtime (NodeVersionInfo[]) */
+  ListNodeVersions: 'container:list-node-versions',
+  /** download + install one Node runtime over the bundled one; streams OnNodeUpdateProgress */
+  UpdateNodeRuntime: 'container:update-node-runtime',
+  /** drop the updated runtime and fall back to the installer-shipped bundled one */
+  RestoreBundledNode: 'container:restore-bundled-node',
+  /** stream: live progress of an in-flight bundled-Node update (UpdateProgress) */
+  OnNodeUpdateProgress: 'container:node-update-progress',
+  /** broadcast: live progress of an in-flight update download (UpdateProgress) */
+  OnUpdateProgress: 'container:update-progress',
+  /** broadcast: per-page startup progress while a page is 'starting' (PageProgress) */
+  OnPageProgress: 'container:page-progress',
+  /** stream: import progress (git clone / local copy) back to the requesting window (InstallProgress) */
+  OnInstallProgress: 'container:install-progress',
+  /** broadcast: silent background update-check results (UpdateCheckResult[]) — badge-only, never a popup */
+  OnUpdateResults: 'container:update-results',
+  /** open userData/logs in the OS file manager (field debugging: packaged apps have no stderr) */
+  OpenLogsDir: 'container:open-logs-dir',
   /** relaunch the app after the container updated its own source from git */
   RelaunchApp: 'container:relaunch-app',
   ShowWindow: 'container:show-window',
@@ -242,6 +378,8 @@ export const IPC = {
   OpenclawStatus: 'openclaw:status',
   OpenclawCreatePage: 'openclaw:create-page',
   OpenclawToken: 'openclaw:token',
+  /** one-click: generate & persist a gateway token (rotate when the arg is true) */
+  OpenclawInitToken: 'openclaw:init-token',
   ToggleDevTools: 'container:toggle-devtools',
   GetNativeTheme: 'container:get-native-theme',
   OnNativeTheme: 'container:native-theme',

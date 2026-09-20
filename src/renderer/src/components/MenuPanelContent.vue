@@ -1,15 +1,22 @@
 <script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import PageManager from './PageManager.vue'
 import DshManager from './DshManager.vue'
 import OpenclawManager from './OpenclawManager.vue'
 import ExternalSitesManager from './ExternalSitesManager.vue'
 import SettingsPanel from './SettingsPanel.vue'
+import AppManager from './AppManager.vue'
+import { usePagesStore } from '../stores/pages'
 import { useUpdatesStore } from '../stores/updates'
+import type { IpcResult, NodeVersionInfo, UpdateProgress } from '@shared/types'
+import { parseAppPanel } from '@shared/types'
 import { t } from '../i18n'
 
 const props = defineProps<{
-  panel: 'view' | 'pages' | 'external' | 'dsh' | 'openclaw' | 'updates' | 'about'
-  runtime: { version: string | null; ok: boolean; path: string }
+  /** PanelKind or an `app:<id>` key (generic agent-app manager). */
+  panel: string
+  runtime: { version: string | null; ok: boolean; path: string; override?: boolean }
   runningCount: number
   totalCount: number
 }>()
@@ -19,10 +26,77 @@ const emit = defineEmits<{
   'check-updates': []
   'preview-site': [url: string]
   'apply-theme': [mode: 'auto' | 'light' | 'dark']
+  'open-page': [id: string]
+  'open-terminal': [id: string]
   close: []
 }>()
 
 const updates = useUpdatesStore()
+const pagesStore = usePagesStore()
+
+/* ---- bundled-Node runtime upgrade (关于与更新) ----
+   Dropdown over the official dist index (main-process fetched); installing swaps
+   in a userData override, so running pages keep the old exe until they restart. */
+const nodeVersions = ref<NodeVersionInfo[]>([])
+const nodeSel = ref('')
+/** Distinct from `!nodeVersions.length`: the select's spinner + an explicit error caption,
+    so a failed/empty fetch never masquerades as an endless loading state. */
+const nodeLoading = ref(false)
+const nodeError = ref('')
+
+async function loadNodeVersions(): Promise<void> {
+  if (nodeLoading.value) return
+  nodeLoading.value = true
+  nodeError.value = ''
+  try {
+    // Optional-call: older test mocks / non-Windows builds may not expose this at all.
+    const res = (await window.container.nodeListVersions?.()) as IpcResult | null
+    if (res?.ok) {
+      nodeVersions.value = (res.data as NodeVersionInfo[]) || []
+      if (!nodeVersions.value.length) nodeError.value = t('panel.nodeVerEmpty')
+    } else {
+      // The main process fetches the index over raw node https (bypassing the system proxy),
+      // so a proxy/offline/cert issue surfaces here — show it instead of an empty spinner.
+      nodeError.value = res?.error || t('panel.nodeVerEmpty')
+    }
+  } catch (err) {
+    nodeError.value = (err as Error).message
+  } finally {
+    nodeLoading.value = false
+  }
+}
+
+const nodeVersionLabel = (v: NodeVersionInfo): string =>
+  v.lts ? `${v.version} · LTS ${typeof v.lts === 'string' ? v.lts : ''}`.trim() : v.version
+
+async function doNodeUpdate(): Promise<void> {
+  if (!nodeSel.value || updates.nodeBusy) return
+  try {
+    await updates.updateNode(nodeSel.value)
+    await pagesStore.refresh().catch(() => undefined)
+    ElMessage.success(t('panel.nodeUpdated', { v: nodeSel.value }))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
+async function doNodeRestore(): Promise<void> {
+  try {
+    await updates.restoreNode()
+    await pagesStore.refresh().catch(() => undefined)
+    ElMessage.success(t('panel.nodeRestored'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
+onMounted(() => {
+  if (props.panel !== 'help') return
+  void loadNodeVersions()
+})
+
+/** `app:<id>` → the page id for the generic AppManager, else null. */
+const appId = computed(() => parseAppPanel(props.panel))
 
 const statusLabel = (r: { ok: boolean; hasUpdate?: boolean; error?: string }): string =>
   r.ok
@@ -36,7 +110,13 @@ const statusType = (r: { ok: boolean; hasUpdate?: boolean }): string =>
 
 /** Short provenance tag for built-in rows so they read apart from git repos. */
 const sourceTag = (r: { name: string; source?: string; action?: string }): string | null =>
-  r.source === 'builtin' ? (r.action === 'none' ? t('panel.tagBuiltin') : r.name.includes('DSH') ? 'DSH' : 'OpenClaw') : null
+  r.source === 'builtin'
+    ? r.action === 'none'
+      ? t('panel.tagBuiltin')
+      : r.name.includes('DSH')
+        ? 'DSH'
+        : 'OpenClaw'
+    : null
 
 /** The middle column shows a branch for git rows, the registry latest for version rows. */
 const refLabel = (r: { source?: string; branch?: string; latestVersion?: string }): string =>
@@ -53,11 +133,31 @@ const subLabel = (r: {
   r.source && r.source !== 'git' && r.action !== 'none'
     ? `${r.currentVersion || '?'} → ${r.latestVersion || '?'}`
     : r.dir
+
+/** The container self-update streams a large app.asar: surface live download progress. */
+const progressOf = (row: { name: string }): UpdateProgress | undefined =>
+  updates.updating === row.name ? updates.progress[row.name] : undefined
+const progressPercent = (p: UpdateProgress): number =>
+  p.percent ?? (p.total && p.received ? Math.floor((p.received / p.total) * 100) : 0)
+/** Indeterminate only while fetching release objects before the artifact size is known. */
+const progressIndeterminate = (p: UpdateProgress): boolean =>
+  p.phase === 'fetch' && p.percent === undefined
 </script>
 
 <template>
   <div class="panel-content">
-    <SettingsPanel v-if="props.panel === 'view'" @apply-theme="emit('apply-theme', $event)" />
+    <SettingsPanel
+      v-if="props.panel === 'settings'"
+      @apply-theme="emit('apply-theme', $event)"
+      @preview-site="emit('preview-site', $event)"
+    />
+
+    <AppManager
+      v-else-if="appId"
+      :page-id="appId"
+      @open-page="emit('open-page', $event)"
+      @open-terminal="emit('open-terminal', $event)"
+    />
 
     <section v-else-if="props.panel === 'pages'" class="sec">
       <PageManager @close="emit('close')" />
@@ -75,7 +175,84 @@ const subLabel = (r: {
       <OpenclawManager />
     </section>
 
-    <section v-else-if="props.panel === 'updates'" class="sec">
+    <!-- Help: 关于 + 更新 merged into one panel (desktop convention). -->
+    <section v-else-if="props.panel === 'help'" class="sec help">
+      <div class="kv">
+        <span>{{ t('panel.aboutNode') }}</span>
+        <strong :class="props.runtime.ok ? 'ok-text' : 'err-text'">
+          {{ props.runtime.version || t('panel.notDetected') }}
+        </strong>
+        <el-tag v-if="props.runtime.override" size="small" effect="plain" round type="warning">
+          {{ t('panel.nodeTagUpdated') }}
+        </el-tag>
+        <span class="node-update-ctl">
+          <el-select
+            v-model="nodeSel"
+            size="small"
+            :placeholder="t('panel.nodeVersionPick')"
+            :loading="nodeLoading"
+            :disabled="updates.nodeBusy"
+            style="width: 190px"
+          >
+            <el-option
+              v-for="v in nodeVersions"
+              :key="v.version"
+              :label="nodeVersionLabel(v)"
+              :value="v.version"
+              :disabled="v.version === props.runtime.version"
+            />
+          </el-select>
+          <el-button
+            size="small"
+            type="primary"
+            :disabled="!nodeSel || nodeSel === props.runtime.version"
+            :loading="updates.nodeBusy"
+            @click="doNodeUpdate"
+          >
+            {{ t('panel.nodeUpdateBtn') }}
+          </el-button>
+          <el-button
+            v-if="props.runtime.override"
+            size="small"
+            text
+            :disabled="updates.nodeBusy"
+            @click="doNodeRestore"
+          >
+            {{ t('panel.nodeRestoreBtn') }}
+          </el-button>
+        </span>
+      </div>
+      <div v-if="nodeError" class="node-load-err">
+        <span class="cell-sub err-text">{{ nodeError }}</span>
+        <el-button size="small" text :loading="nodeLoading" @click="loadNodeVersions">
+          {{ t('panel.retry') }}
+        </el-button>
+      </div>
+      <div v-if="updates.nodeProgress" class="upd-progress node-prog">
+        <el-progress
+          class="node-prog-bar"
+          :percentage="updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)"
+          :stroke-width="6"
+          :indeterminate="
+            updates.nodeProgress.phase === 'extract' ||
+            (updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)) === 0
+          "
+          striped
+          :striped-flow="updates.nodeProgress.phase === 'extract'"
+        />
+        <span class="cell-sub">{{ updates.nodeProgress.message }}</span>
+      </div>
+      <div class="kv">
+        <span>{{ t('panel.aboutRuntimePath') }}</span>
+        <code>{{ props.runtime.path || '-' }}</code>
+      </div>
+      <div class="kv">
+        <span>Pages</span>
+        <strong>{{
+          t('panel.aboutPagesRunning', { running: props.runningCount, total: props.totalCount })
+        }}</strong>
+      </div>
+      <div class="line" />
       <div class="head">
         <span>{{ t('panel.updatesTitle') }}</span>
         <el-button size="small" :loading="updates.checking" @click="emit('check-updates')">
@@ -104,6 +281,17 @@ const subLabel = (r: {
               >{{ sourceTag(row) }}</el-tag
             >
             <div class="cell-sub">{{ subLabel(row) }}</div>
+            <div v-if="progressOf(row)" class="upd-progress">
+              <el-progress
+                :percentage="progressPercent(progressOf(row)!)"
+                :stroke-width="6"
+                :show-text="false"
+                :indeterminate="progressIndeterminate(progressOf(row)!)"
+                striped
+                :striped-flow="progressIndeterminate(progressOf(row)!)"
+              />
+              <span class="cell-sub">{{ progressOf(row)?.message }}</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column :label="t('panel.colBranch')" width="120">
@@ -135,25 +323,6 @@ const subLabel = (r: {
         </el-table-column>
       </el-table>
       <div class="tip">{{ t('panel.tipUpdates') }}</div>
-    </section>
-
-    <section v-else class="sec about">
-      <div class="kv">
-        <span>{{ t('panel.aboutNode') }}</span>
-        <strong :class="props.runtime.ok ? 'ok-text' : 'err-text'">
-          {{ props.runtime.version || t('panel.notDetected') }}
-        </strong>
-      </div>
-      <div class="kv">
-        <span>{{ t('panel.aboutRuntimePath') }}</span>
-        <code>{{ props.runtime.path || '-' }}</code>
-      </div>
-      <div class="kv">
-        <span>Pages</span>
-        <strong>{{
-          t('panel.aboutPagesRunning', { running: props.runningCount, total: props.totalCount })
-        }}</strong>
-      </div>
       <div class="line" />
       <p>{{ t('panel.aboutDevMode') }}</p>
       <p>{{ t('panel.aboutMinimizeTip') }}</p>
@@ -199,6 +368,14 @@ const subLabel = (r: {
   white-space: nowrap;
 }
 
+.upd-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  min-width: 160px;
+}
+
 .about p {
   font-size: 12.5px;
   color: var(--text-dim);
@@ -234,6 +411,27 @@ const subLabel = (r: {
   color: var(--text-dim);
   flex: none;
   width: 78px;
+}
+
+/* Bundled-Node upgrade controls ride the right end of the 内置 Node row. */
+.kv .node-update-ctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  margin-left: auto;
+  color: inherit;
+}
+
+.node-prog {
+  margin: 0 0 8px;
+}
+
+/* Percentage text sits inline right of the 6px bar; keep it on one quiet line. */
+.node-prog .node-prog-bar :deep(.el-progress__text) {
+  font-size: 12px !important;
+  color: var(--text-dim);
+  min-width: 40px;
 }
 
 .ok-text {

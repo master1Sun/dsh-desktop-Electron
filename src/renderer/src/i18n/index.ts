@@ -31,14 +31,19 @@ const zh: Dict = {
   },
   menu: {
     view: '视图',
+    system: '系统',
     pages: '页面',
     apps: '应用',
     about: '关于',
     updates: '更新',
     selectPage: '选择页面',
     reloadCurrent: '刷新当前页',
+    goBack: '后退',
+    goForward: '前进',
     debugDevtools: '调试当前页 (DevTools)',
     switcherEmpty: '暂无页面，打开「页面」面板安装',
+    autoRestartPending: '异常退出，正在自动重启',
+    crashCount: '已崩溃 {n} 次',
     running: '运行中',
     starting: '启动中',
     failed: '启动失败',
@@ -54,8 +59,31 @@ const zh: Dict = {
     themeToggle: '主题：{mode}（点击切换 白天/黑夜）',
     detach: '部分功能（弹窗、剪贴板、原生对话框等）在内嵌视图里受限，用系统浏览器打开当前页面',
     restartTerminal: '重启终端会话',
-    externalAddress: '外部地址…',
-    closeEsc: '关闭 (Esc)'
+    externalAddress: '外部地址管理',
+    closeEsc: '关闭 (Esc)',
+    restartApp: '重启桌面端',
+    restartAppConfirm: '确定要重启桌面控制台吗？重启期间所有运行中的页面会被关闭并重新启动。',
+    settings: '设置',
+    help: '帮助',
+    pagesManage: '管理页面…',
+    appSettings: '设置…',
+    appDsh: 'DSH 管理器',
+    appOpenclaw: 'OpenClaw 管理器',
+    helpAboutUpdates: '关于与更新',
+    tagExternal: '外部',
+    openLogsDir: '打开日志目录'
+  },
+  appmgr: {
+    notFound: '该应用不存在或已被移除',
+    secControl: '控制',
+    secConfig: '配置',
+    secUpdate: '更新',
+    openBtn: '打开',
+    autoStart: '开机自动启动',
+    portLabel: '端口',
+    portHint: '留空 = 用项目声明的端口；保存后下次启动生效',
+    browse: '浏览…',
+    updateNoRow: '尚未检测到该应用的更新信息'
   },
   settings: {
     interfaceTitle: '界面与默认视图',
@@ -81,11 +109,16 @@ const zh: Dict = {
     minimizeOff: '关闭主窗口即退出容器',
     minimizeTip:
       '开启后点 ✕ 不退出程序，托盘菜单可恢复窗口或彻底退出（退出会停止所有 node 进程）。',
+    crashAutoRestart: '崩溃自动重启',
+    crashAutoRestartTip:
+      '页面启动后异常退出时自动重试（2s/5s/15s 退避）；稳定运行 5 分钟后清零。关闭后崩溃仅标红、不自动重启。',
+    openLogs: '打开日志目录',
+    openLogsHint: '主进程与各页面的运行日志会落盘到该目录，便于打包后排查问题。',
     envDir: '环境目录',
     envRoot: '环境根目录',
     envRootFollow: '跟随安装目录',
     envRootTip:
-      '留空时环境目录跟随安装目录（当前 {root}）；填写后所有运行时的配置目录都改到该目录下（{envRoot}/dsh、{envRoot}/openclaw 等）。改动后重启相关页面生效。',
+      '留空时环境目录跟随安装目录（当前 {root}）；填写后 container.json 里声明 {envRoot} 默认路径的运行时目录会改到该根目录下。dsh / openclaw 默认使用各自的 ~/.dsh、~/.openclaw，不受此项影响。改动后重启相关页面生效。',
     envRootLoaded: '加载中…',
     envSectionEmpty:
       '当前没有可配置的环境目录。导入一个 node 项目后，它的安装目录会自动出现在这里成为可配置项；也可在 container.json 里声明更多 envVars（如 {"key": "MYAPP_HOME", "label": "数据目录", "defaultPath": "~/.myapp"}）追加自定义目录。',
@@ -118,6 +151,14 @@ const zh: Dict = {
       'git 项目一键 git pull --ff-only（有未提交改动自动跳过）；npm 项目比对 registry 最新版；DSH / OpenClaw 可直接升级（OpenClaw 重装后重启该页生效）。',
     aboutNode: '内置 Node',
     aboutRuntimePath: '运行时路径',
+    nodeVersionPick: '选择版本',
+    nodeVerEmpty: '暂无可用版本（离线或镜像不可达）',
+    retry: '重试',
+    nodeUpdateBtn: '更新',
+    nodeRestoreBtn: '恢复内置',
+    nodeTagUpdated: '已更新',
+    nodeUpdated: '内置 Node 已更新为 {v}，新启动的页面即会使用',
+    nodeRestored: '已恢复为安装包内置的 Node',
     aboutPages: 'Pages',
     aboutDevMode:
       '开发者模式：F12 打开容器界面 DevTools；主界面工具条上的同名义按钮调试当前内嵌 page。',
@@ -143,6 +184,21 @@ const zh: Dict = {
     notRunningStarting: '{name} 未运行，正在启动…',
     webviewLoading: '加载中…'
   },
+  boot: {
+    firstBootHint: '首次启动需下载并初始化依赖，可能需要 1-2 分钟，请稍候…',
+    viewLogs: '查看日志',
+    hideLogs: '收起日志',
+    elapsed: '已等待 {n}s',
+    cancelStart: '取消启动',
+    phase: {
+      spawning: '正在拉起进程…',
+      process: '进程已启动，等待就绪…',
+      port: '等待服务端口就绪…',
+      url: '等待访问地址…',
+      retry: '检测到残留进程，清理后重试…',
+      log: '正在初始化…'
+    }
+  },
   badge: {
     updatesAvailable: '{n} 个更新可用',
     upToDate: '已是最新',
@@ -154,7 +210,7 @@ const zh: Dict = {
     tabGit: '从 Git 安装',
     tabDir: '从本地目录安装',
     hintGit:
-      '支持 https / git@ 仓库地址（deepseek-harness、codex、openclaw 等任意带 node http 服务的项目，纯 CLI 项目可在 container.json 里写 "kind": "terminal" + startCommand）。克隆到 pages/<repo名>，需项目根目录含 container.json 或可推断的启动入口。',
+      '支持 https / git@ 仓库地址：任意带 node http 服务的项目会作为页面内嵌展示，纯 CLI 项目（package.json 含 bin 且无 web 框架依赖）会被自动识别为终端应用，并生成 container.json。克隆到 pages/<repo名>；若项目自带 container.json 则以自带配置为准，可手动写 kind / startCommand 覆盖自动判断。',
     labelRepo: '仓库地址',
     labelCustomDir: '自定义目录名（可选）',
     placeholderDirName: '默认取仓库名',
@@ -167,6 +223,13 @@ const zh: Dict = {
     labelTargetDir: '目标目录名（可选）',
     placeholderTargetDir: '默认取源目录名',
     btnCopy: '复制并安装',
+    installPhase: {
+      preparing: '准备中…',
+      receiving: '下载 / 复制中…',
+      validating: '校验项目配置…',
+      finalizing: '完成导入…',
+      done: '完成'
+    },
     installed: '已安装（{n}）',
     colName: '名称',
     colPort: '端口/地址',
@@ -230,7 +293,7 @@ const zh: Dict = {
       'dsh 的插件安装/卸载/更新都通过 pnpm 执行，请先执行 npm install -g pnpm 后点击「刷新」。',
     profileLabel: 'profile',
     profilePlaceholder: 'web',
-    switchRefresh: '切换 / 刷新',
+    switchRefresh: '应用',
     profileTemplatesHint: 'dsh 自带模板：web / acp / headless / sdk；首次使用由 dsh 自动初始化',
     verTag: 'profile: {profile}',
     updateAll: 'npm 全部更新',
@@ -283,7 +346,12 @@ const zh: Dict = {
     dshRootName: 'dsh 根目录',
     pluginsEmpty: 'profile 中暂无插件',
     updatableTip: '点击更新到新版本',
-    verBadge: 'v{version}'
+    verBadge: 'v{version}',
+    opInstalling: '正在安装 {spec}…',
+    opUpdating: '正在更新 {name}…',
+    opUninstalling: '正在卸载 {name}…',
+    opUpdatingAll: '正在批量更新…',
+    opElapsed: '已 {n}s'
   },
   openclawMgr: {
     emptyError: '未找到 openclaw CLI',
@@ -301,6 +369,12 @@ const zh: Dict = {
     reread: '重新读取',
     tokenNotGenerated: 'Gateway 令牌：尚未生成',
     retry: '重试',
+    initBtn: '一键初始化并生成令牌',
+    regenerate: '重新生成令牌',
+    msgInited: '已生成 Gateway 令牌并写入配置',
+    msgInitedRestart: '已生成 Gateway 令牌，正在重启 gateway 以生效',
+    msgExists: '已存在 Gateway 令牌，无需重复生成',
+    msgInitFail: '初始化令牌失败',
     alertTitle: '首次启动会自动就绪，无需手动配置鉴权',
     alertDesc:
       '容器会在 ~/.openclaw/openclaw.json 缺失时写入最小 {gateway:{mode:"local"}}；网关无 token 时自动生成运行时 token 并配对本地设备，Control UI 根路径即可打开。频道 / 模型仍需在「终端」里跑 openclaw onboard 自行配置。容器只负责启停 gateway 与内嵌打开页面。',
@@ -316,8 +390,6 @@ const zh: Dict = {
     previewTip: '在内嵌视图预览',
     editTip: '重命名 / 改地址',
     deleteTip: '删除',
-    recentHead: '最近使用（点击保存为固定地址）',
-    recentClear: '清空',
     dialogTitleAdd: '新增外部地址',
     dialogTitleEdit: '编辑外部地址',
     labelName: '名称',
@@ -333,11 +405,7 @@ const zh: Dict = {
     msgDeleted: '已删除',
     msgRemoveConfirm: '将从列表移除「{name}」，不影响已运行的进程。',
     msgRemoveTitle: '删除外部地址',
-    msgRemoveConfirmBtn: '删除',
-    msgSaved: '已保存 {name}',
-    msgClearRecentConfirm: '将清空「最近使用」列表，不影响已保存的固定地址。',
-    msgClearRecentTitle: '清理最近使用',
-    msgCleared: '已清空最近使用'
+    msgRemoveConfirmBtn: '删除'
   },
   updates: {
     incomplete: '{name} 更新未完成',
@@ -351,9 +419,43 @@ const zh: Dict = {
     restart: '重启当前终端',
     minimize: '最小化为右侧图标',
     closeAll: '关闭全部终端（结束进程）',
+    closeAllTitle: '关闭全部终端',
+    closeAllConfirm: '这将结束所有终端会话及其正在运行的进程，是否继续？',
+    closeAllConfirmBtn: '全部关闭',
     emptyHint: '点各面板的「终端」按钮在此打开内嵌 shell',
     collapsed: '终端（点击展开，可拖动）',
     rootTitle: '容器根目录'
+  },
+  palette: {
+    title: '命令面板',
+    placeholder: '搜索页面、操作与设置…',
+    noMatch: '没有匹配的命令',
+    none: '暂无可用命令',
+    nav: '导航',
+    run: '执行',
+    close: '关闭',
+    groupPages: '页面',
+    groupActions: '操作',
+    groupPanels: '面板',
+    cmdOpenPage: '打开：{name}',
+    cmdStartPage: '启动：{name}',
+    cmdStopPage: '停止：{name}',
+    cmdTerminalPage: '在终端打开：{name}',
+    cmdExternalSite: '打开外部站点：{name}',
+    actReload: '刷新当前页',
+    actTheme: '切换主题（深/浅）',
+    actDetach: '在系统浏览器中打开当前页',
+    actDevtools: '打开开发者工具',
+    actCheckUpdates: '检查更新',
+    cmdAppSettings: '应用设置：{name}',
+    panelPages: '页面管理',
+    panelExternal: '外部站点',
+    panelDsh: 'DSH 管理器',
+    panelOpenclaw: 'OpenClaw 管理器',
+    panelSettings: '设置',
+    panelHelp: '帮助（关于与更新）',
+    hintPort: ':{port}',
+    hintRunning: '运行中'
   },
   cliView: {
     noConfig: '无法获取运行配置',
@@ -412,14 +514,19 @@ const en: Dict = {
   },
   menu: {
     view: 'View',
+    system: 'System',
     pages: 'Pages',
     apps: 'Apps',
     about: 'About',
     updates: 'Updates',
     selectPage: 'Select page',
     reloadCurrent: 'Refresh current page',
+    goBack: 'Back',
+    goForward: 'Forward',
     debugDevtools: 'Open DevTools for current page',
     switcherEmpty: 'No pages yet — open the Pages panel to install',
+    autoRestartPending: 'Crashed, auto-restart pending',
+    crashCount: 'Crashed {n}x',
     running: 'Running',
     starting: 'Starting',
     failed: 'Failed to start',
@@ -436,8 +543,32 @@ const en: Dict = {
     detach:
       'Some features (popups, clipboard, native dialogs…) are limited in the embedded view; open the current page in the system browser',
     restartTerminal: 'Restart terminal session',
-    externalAddress: 'External address…',
-    closeEsc: 'Close (Esc)'
+    externalAddress: 'External address manager',
+    closeEsc: 'Close (Esc)',
+    restartApp: 'Restart desktop',
+    restartAppConfirm:
+      'Restart the desktop console? All running pages will be closed and started again.',
+    settings: 'Settings',
+    help: 'Help',
+    pagesManage: 'Manage pages…',
+    appSettings: 'Settings…',
+    appDsh: 'DSH manager',
+    appOpenclaw: 'OpenClaw manager',
+    helpAboutUpdates: 'About & updates',
+    tagExternal: 'external',
+    openLogsDir: 'Open log folder'
+  },
+  appmgr: {
+    notFound: 'This app no longer exists or was removed',
+    secControl: 'Controls',
+    secConfig: 'Configuration',
+    secUpdate: 'Updates',
+    openBtn: 'Open',
+    autoStart: 'Auto-start at launch',
+    portLabel: 'Port',
+    portHint: 'Empty = the port declared by the project; saving takes effect on its next start',
+    browse: 'Browse…',
+    updateNoRow: 'No update information detected for this app yet'
   },
   settings: {
     interfaceTitle: 'Interface & default view',
@@ -463,11 +594,16 @@ const en: Dict = {
     minimizeOff: 'Closing the main window exits the container',
     minimizeTip:
       'With this on, ✕ does not quit — the tray menu can restore the window or fully exit (which stops all node processes).',
+    crashAutoRestart: 'Auto-restart on crash',
+    crashAutoRestartTip:
+      'Retries a page that exits abnormally after it has started (2s/5s/15s backoff); the counter clears after 5 min stable. When off, crashes only flag red and never auto-restart.',
+    openLogs: 'Open log folder',
+    openLogsHint: 'Main-process and per-page output is written here, to debug a packaged build.',
     envDir: 'Environment directory',
     envRoot: 'Environment root',
     envRootFollow: 'Follow install directory',
     envRootTip:
-      'Empty follows the install directory (currently {root}); filling it relocates every runtime’s config dir under it ({envRoot}/dsh, {envRoot}/openclaw, etc.). Restart the relevant pages to apply.',
+      'Empty follows the install directory (currently {root}); filling it relocates the runtime dirs whose container.json defaultPath declares {envRoot}. dsh / openclaw use their own ~/.dsh and ~/.openclaw by default and are unaffected. Restart the relevant pages to apply.',
     envRootLoaded: 'Loading…',
     envSectionEmpty:
       'No configurable env dirs yet. After importing a node project, its directory auto-appears here; you can also add more envVars in container.json (e.g. {"key": "MYAPP_HOME", "label": "Data dir", "defaultPath": "~/.myapp"}).',
@@ -500,6 +636,14 @@ const en: Dict = {
       'git projects: one-click git pull --ff-only (auto-skips if there are uncommitted changes); npm projects: compare against the registry latest; DSH / OpenClaw can upgrade directly (OpenClaw needs a page restart after reinstall).',
     aboutNode: 'Built-in Node',
     aboutRuntimePath: 'Runtime path',
+    nodeVersionPick: 'Choose version',
+    nodeVerEmpty: 'No versions available (offline or mirror unreachable)',
+    retry: 'Retry',
+    nodeUpdateBtn: 'Update',
+    nodeRestoreBtn: 'Revert to bundled',
+    nodeTagUpdated: 'Updated',
+    nodeUpdated: 'Bundled Node updated to {v}; newly started pages will use it',
+    nodeRestored: 'Reverted to the installer-shipped Node',
     aboutPages: 'Pages',
     aboutDevMode:
       'Dev mode: F12 opens the container DevTools; the identically-named toolbar button debugs the current embedded page.',
@@ -527,6 +671,22 @@ const en: Dict = {
     notRunningStarting: '{name} is not running; starting…',
     webviewLoading: 'Loading…'
   },
+  boot: {
+    firstBootHint:
+      'The first launch downloads and initializes dependencies and may take 1–2 minutes; please wait…',
+    viewLogs: 'View logs',
+    hideLogs: 'Hide logs',
+    elapsed: 'Waiting {n}s',
+    cancelStart: 'Cancel start',
+    phase: {
+      spawning: 'Launching process…',
+      process: 'Process started, waiting to be ready…',
+      port: 'Waiting for the service port…',
+      url: 'Waiting for the access URL…',
+      retry: 'Reclaiming stale processes and retrying…',
+      log: 'Initializing…'
+    }
+  },
   badge: {
     updatesAvailable: '{n} updates available',
     upToDate: 'Up to date',
@@ -538,7 +698,7 @@ const en: Dict = {
     tabGit: 'Install from Git',
     tabDir: 'Install from local folder',
     hintGit:
-      'Supports https / git@ repo URLs (any node http-serving project such as deepseek-harness, codex, openclaw; pure-CLI projects can set "kind": "terminal" + startCommand in container.json). Cloned into pages/<repo-name>; the project root must contain container.json or an inferable entry point.',
+      'Supports https / git@ repo URLs: any node HTTP-serving project is embedded as a page, while a pure CLI project (a package.json carrying a bin with no web-framework dependency) is auto-detected as a terminal app and gets a generated container.json. Cloned into pages/<repo-name>; if the project ships its own container.json that wins, so you can override the auto-detection via kind / startCommand.',
     labelRepo: 'Repository URL',
     labelCustomDir: 'Custom folder name (optional)',
     placeholderDirName: 'Defaults to repo name',
@@ -552,6 +712,13 @@ const en: Dict = {
     labelTargetDir: 'Target folder name (optional)',
     placeholderTargetDir: 'Defaults to source folder name',
     btnCopy: 'Copy & install',
+    installPhase: {
+      preparing: 'Preparing…',
+      receiving: 'Downloading / copying…',
+      validating: 'Validating project…',
+      finalizing: 'Finalizing…',
+      done: 'Done'
+    },
     installed: 'Installed ({n})',
     colName: 'Name',
     colPort: 'Port / Address',
@@ -616,7 +783,7 @@ const en: Dict = {
       'dsh installs / uninstalls / updates plugins via pnpm. Run npm install -g pnpm first, then click Refresh.',
     profileLabel: 'profile',
     profilePlaceholder: 'web',
-    switchRefresh: 'Switch / Refresh',
+    switchRefresh: 'Apply',
     profileTemplatesHint:
       'dsh ships templates: web / acp / headless / sdk; first use is auto-initialized by dsh',
     verTag: 'profile: {profile}',
@@ -671,7 +838,12 @@ const en: Dict = {
     dshRootName: 'dsh root',
     pluginsEmpty: 'No plugins in this profile',
     updatableTip: 'Click to update to the new version',
-    verBadge: 'v{version}'
+    verBadge: 'v{version}',
+    opInstalling: 'Installing {spec}…',
+    opUpdating: 'Updating {name}…',
+    opUninstalling: 'Uninstalling {name}…',
+    opUpdatingAll: 'Batch-updating…',
+    opElapsed: '{n}s elapsed'
   },
   openclawMgr: {
     emptyError: 'openclaw CLI not found',
@@ -694,7 +866,13 @@ const en: Dict = {
       'When ~/.openclaw/openclaw.json is missing the container writes a minimal {gateway:{mode:"local"}}; with no token the gateway auto-generates a runtime token and pairs the local device, so the Control UI root opens directly. Channels / models still need openclaw onboard in the terminal. The container only starts/stops the gateway and embeds the page.',
     openclawTerminal: 'Open terminal in OpenClaw Home',
     msgTokenCopied: 'Token copied to clipboard',
-    msgCopyFail: 'Copy failed; please select it manually'
+    msgCopyFail: 'Copy failed; please select it manually',
+    initBtn: 'Initialize & generate a token',
+    regenerate: 'Regenerate token',
+    msgInited: 'Gateway token generated and written to config',
+    msgInitedRestart: 'Gateway token generated; restarting the gateway to apply',
+    msgExists: 'A gateway token already exists — nothing to generate',
+    msgInitFail: 'Failed to initialize the gateway token'
   },
   extMgr: {
     title: 'External addresses ({n})',
@@ -704,8 +882,6 @@ const en: Dict = {
     previewTip: 'Preview in embedded view',
     editTip: 'Rename / change URL',
     deleteTip: 'Delete',
-    recentHead: 'Recent (click to save as a fixed address)',
-    recentClear: 'Clear all',
     dialogTitleAdd: 'Add external address',
     dialogTitleEdit: 'Edit external address',
     labelName: 'Name',
@@ -721,11 +897,7 @@ const en: Dict = {
     msgDeleted: 'Deleted',
     msgRemoveConfirm: 'Will remove "{name}" from the list; running processes are unaffected.',
     msgRemoveTitle: 'Delete external address',
-    msgRemoveConfirmBtn: 'Delete',
-    msgSaved: 'Saved {name}',
-    msgClearRecentConfirm: 'This clears the "Recent" list; saved fixed addresses are unaffected.',
-    msgClearRecentTitle: 'Clear recent',
-    msgCleared: 'Recent cleared'
+    msgRemoveConfirmBtn: 'Delete'
   },
   updates: {
     incomplete: 'Update of {name} did not complete',
@@ -740,9 +912,43 @@ const en: Dict = {
     restart: 'Restart the current terminal',
     minimize: 'Minimize to the right-edge icon',
     closeAll: 'Close all terminals (kill processes)',
+    closeAllTitle: 'Close all terminals',
+    closeAllConfirm: 'This ends every terminal session and kills its running processes. Continue?',
+    closeAllConfirmBtn: 'Close all',
     emptyHint: 'Click a panel’s "Terminal" button to open an embedded shell here',
     collapsed: 'Terminal (click to expand, draggable)',
     rootTitle: 'Container root'
+  },
+  palette: {
+    title: 'Command palette',
+    placeholder: 'Search pages, actions and settings…',
+    noMatch: 'No matching command',
+    none: 'No commands available',
+    nav: 'navigate',
+    run: 'run',
+    close: 'close',
+    groupPages: 'Pages',
+    groupActions: 'Actions',
+    groupPanels: 'Panels',
+    cmdOpenPage: 'Open: {name}',
+    cmdStartPage: 'Start: {name}',
+    cmdStopPage: 'Stop: {name}',
+    cmdTerminalPage: 'Open in terminal: {name}',
+    cmdExternalSite: 'Open external site: {name}',
+    actReload: 'Reload current page',
+    actTheme: 'Toggle theme (dark/light)',
+    actDetach: 'Open current page in system browser',
+    actDevtools: 'Open DevTools',
+    actCheckUpdates: 'Check for updates',
+    cmdAppSettings: 'App settings: {name}',
+    panelPages: 'Page manager',
+    panelExternal: 'External sites',
+    panelDsh: 'DSH manager',
+    panelOpenclaw: 'OpenClaw manager',
+    panelSettings: 'Settings',
+    panelHelp: 'Help (about & updates)',
+    hintPort: ':{port}',
+    hintRunning: 'running'
   },
   cliView: {
     noConfig: 'Could not load the run configuration',

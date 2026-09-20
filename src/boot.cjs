@@ -12,10 +12,10 @@ const path = require('node:path')
 function appDataDir() {
   const home = process.env.USERPROFILE || process.env.HOME || ''
   return process.platform === 'win32'
-    ? path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Desktop Container')
+    ? path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), '桌面控制台')
     : process.platform === 'darwin'
-      ? path.join(home, 'Library', 'Application Support', 'Desktop Container')
-      : path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'Desktop Container')
+      ? path.join(home, 'Library', 'Application Support', '桌面控制台')
+      : path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), '桌面控制台')
 }
 
 const APP_DIR = __dirname // <installDir>/resources when packaged (boot.cjs + app.asar live side by side)

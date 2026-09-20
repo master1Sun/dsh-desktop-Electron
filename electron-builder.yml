@@ -1,5 +1,5 @@
 appId: com.dsh.desktop-container
-productName: Desktop Container
+productName: 桌面控制台
 directories:
   buildResources: build
 files:

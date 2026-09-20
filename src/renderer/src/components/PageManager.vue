@@ -33,7 +33,21 @@ async function runRow(row: PageState): Promise<void> {
 
 const gitForm = reactive({ url: '', name: '', port: '' })
 const dirForm = reactive({ path: '', name: '', port: '' })
-const installing = ref<'git' | 'dir' | null>(null)
+// The in-flight import lives in the store, not here, so closing/reopening the Pages panel
+// while a clone or copy runs still shows the progress bar (component state would reset).
+const installing = computed(() => pagesStore.installing)
+
+/* Live import progress (git clone / local copy) streamed from the main process. The bar is
+   indeterminate while a step has no computable percentage (connecting, validating). */
+const installPct = computed(() => pagesStore.installProgress?.percent ?? 0)
+const installIndeterminate = computed(
+  () => !pagesStore.installProgress || pagesStore.installProgress.percent == null
+)
+const installPhaseText = computed(() => {
+  const p = pagesStore.installProgress
+  return p ? t(`pageMgr.installPhase.${p.phase}`) : t('pageMgr.installPhase.preparing')
+})
+const installDetail = computed(() => pagesStore.installProgress?.message || '')
 
 /** Empty means "keep whatever the project declares"; anything else must be a real port. */
 function parsePort(raw: string): number | undefined {
@@ -50,11 +64,10 @@ async function installGit(): Promise<void> {
     ElMessage.warning(t('pageMgr.msgEnterRepo'))
     return
   }
-  // A local folder pasted into the URL field: import it as a copy. Only the container
-  // repo itself gets adopted for git updates — a blind origin would mislead the pull.
-  if (looksLikeLocalPath(url)) {
-    installing.value = 'dir'
-    try {
+  try {
+    // A local folder pasted into the URL field: import it as a copy. Only the container
+    // repo itself gets adopted for git updates — a blind origin would mislead the pull.
+    if (looksLikeLocalPath(url)) {
       const isContainerRepo = /[/\\]dsh-desktop-Electron(\/|$)/i.test(url)
       const id = await pagesStore.installDir(
         url,
@@ -63,27 +76,19 @@ async function installGit(): Promise<void> {
         isContainerRepo ? CONTAINER_REPO_URL : undefined
       )
       ElMessage.success(t('pageMgr.msgCopiedDir', { id }))
-      gitForm.url = ''
-      gitForm.name = ''
-      gitForm.port = ''
-    } catch (err) {
-      ElMessage.error((err as Error).message)
-    } finally {
-      installing.value = null
+    } else {
+      const id = await pagesStore.installGit(
+        url,
+        gitForm.name.trim() || undefined,
+        parsePort(gitForm.port)
+      )
+      ElMessage.success(t('pageMgr.msgInstalledGit', { id }))
     }
-    return
-  }
-  installing.value = 'git'
-  try {
-    const id = await pagesStore.installGit(url, gitForm.name.trim() || undefined, parsePort(gitForm.port))
-    ElMessage.success(t('pageMgr.msgInstalledGit', { id }))
     gitForm.url = ''
     gitForm.name = ''
     gitForm.port = ''
   } catch (err) {
     ElMessage.error((err as Error).message)
-  } finally {
-    installing.value = null
   }
 }
 
@@ -92,7 +97,6 @@ async function installDir(): Promise<void> {
     ElMessage.warning(t('pageMgr.msgEnterLocalPath'))
     return
   }
-  installing.value = 'dir'
   try {
     const id = await pagesStore.installDir(
       dirForm.path.trim(),
@@ -105,8 +109,6 @@ async function installDir(): Promise<void> {
     dirForm.port = ''
   } catch (err) {
     ElMessage.error((err as Error).message)
-  } finally {
-    installing.value = null
   }
 }
 
@@ -277,6 +279,20 @@ function formatTime(ms: number): string {
           <el-button type="primary" :loading="installing === 'git'" @click="installGit">
             {{ t('pageMgr.btnClone') }}
           </el-button>
+          <div v-if="installing" class="install-progress">
+            <el-progress
+              :percentage="installPct"
+              :indeterminate="installIndeterminate"
+              :duration="1.4"
+              striped
+              :show-text="!installIndeterminate"
+              :stroke-width="12"
+            />
+            <div class="ip-line">
+              <span>{{ installPhaseText }}</span>
+              <span v-if="installDetail" class="ip-raw">{{ installDetail }}</span>
+            </div>
+          </div>
         </el-form>
       </el-tab-pane>
 
@@ -313,6 +329,20 @@ function formatTime(ms: number): string {
           <el-button type="primary" :loading="installing === 'dir'" @click="installDir">
             {{ t('pageMgr.btnCopy') }}
           </el-button>
+          <div v-if="installing" class="install-progress">
+            <el-progress
+              :percentage="installPct"
+              :indeterminate="installIndeterminate"
+              :duration="1.4"
+              striped
+              :show-text="!installIndeterminate"
+              :stroke-width="12"
+            />
+            <div class="ip-line">
+              <span>{{ installPhaseText }}</span>
+              <span v-if="installDetail" class="ip-raw">{{ installDetail }}</span>
+            </div>
+          </div>
         </el-form>
       </el-tab-pane>
     </el-tabs>
@@ -533,6 +563,25 @@ function formatTime(ms: number): string {
 }
 .pick-dir:hover {
   color: var(--accent-strong);
+}
+.install-progress {
+  margin-top: 12px;
+  max-width: 480px;
+}
+.install-progress .ip-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.install-progress .ip-raw {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+  font-family: var(--mono, ui-monospace, monospace);
 }
 /* The panel card is ~860px wide and `label-position="top"` lets the fields stretch the whole
    way across, which reads as a broken layout. Cap the install fields to a normal form width.

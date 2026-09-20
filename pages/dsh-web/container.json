@@ -16,10 +16,10 @@
         "zh": "DSH 配置目录",
         "en": "DSH config directory"
       },
-      "defaultPath": "{envRoot}/dsh",
+      "defaultPath": "~/.dsh",
       "description": {
-        "zh": "留空即跟随环境目录（默认在安装目录下的 env/dsh）",
-        "en": "Leave empty to follow the environment directory (env/dsh under the install dir by default)"
+        "zh": "留空即使用 dsh CLI 的默认目录 ~/.dsh，与终端里的 dsh 共用同一套 profile",
+        "en": "Leave empty to use dsh's default ~/.dsh — the same profile store the CLI uses"
       }
     }
   ]

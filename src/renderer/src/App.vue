@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import MenuBar, { type PanelKind } from './components/MenuBar.vue'
+import { appPanelKey } from '@shared/types'
 import MenuPanelContent from './components/MenuPanelContent.vue'
+import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import TerminalDrawer from './components/TerminalDrawer.vue'
 import CliTerminalView from './components/CliTerminalView.vue'
 import HomeView from './views/HomeView.vue'
@@ -20,7 +22,148 @@ const hasBridge = typeof window !== 'undefined' && !!window.container
 const updatesStore = useUpdatesStore()
 
 /** Panels float over the workbench instead of replacing it, so an embedded page never unmounts. */
-const activePanel = ref<PanelKind | null>(null)
+const activePanel = ref<string | null>(null)
+
+/* ---- Ctrl+K command palette ---- */
+const paletteOpen = ref(false)
+
+/** Stop a running page from the palette; failures surface as a toast. */
+function stopPage(id: string): void {
+  pagesStore.stop(id).catch((err) => ElMessage.error((err as Error).message))
+}
+
+const PANEL_COMMANDS: { kind: PanelKind; label: string }[] = [
+  { kind: 'pages', label: t('palette.panelPages') },
+  { kind: 'external', label: t('palette.panelExternal') },
+  { kind: 'dsh', label: t('palette.panelDsh') },
+  { kind: 'openclaw', label: t('palette.panelOpenclaw') },
+  { kind: 'settings', label: t('palette.panelSettings') },
+  { kind: 'help', label: t('palette.panelHelp') }
+]
+
+/**
+ * Assembled reactively so page status/ports shown in the palette are always current.
+ * Each command delegates to the same handlers the menu bar uses — no duplicated logic.
+ */
+const commands = computed<Command[]>(() => {
+  const list: Command[] = []
+  for (const p of pagesStore.pages) {
+    if (p.external) {
+      list.push({
+        id: `open-ext-${p.id}`,
+        title: t('palette.cmdExternalSite', { name: p.name }),
+        group: t('palette.groupPages'),
+        keywords: p.externalUrl,
+        run: () => openPage(p.id)
+      })
+      continue
+    }
+    if (p.kind === 'terminal') {
+      list.push({
+        id: `term-${p.id}`,
+        title: t('palette.cmdTerminalPage', { name: p.name }),
+        group: t('palette.groupPages'),
+        run: () => openPage(p.id)
+      })
+      continue
+    }
+    if (p.status === 'running') {
+      list.push({
+        id: `open-${p.id}`,
+        title: t('palette.cmdOpenPage', { name: p.name }),
+        hint: t('palette.hintPort', { port: p.containerPort || p.port }),
+        group: t('palette.groupPages'),
+        keywords: `${p.name} ${p.port}`,
+        run: () => openPage(p.id)
+      })
+      list.push({
+        id: `stop-${p.id}`,
+        title: t('palette.cmdStopPage', { name: p.name }),
+        group: t('palette.groupPages'),
+        run: () => stopPage(p.id)
+      })
+    } else {
+      list.push({
+        id: `start-${p.id}`,
+        title: t('palette.cmdStartPage', { name: p.name }),
+        hint: p.status === 'error' ? t('menu.failed') : undefined,
+        group: t('palette.groupPages'),
+        run: () => void startPage(p.id)
+      })
+    }
+  }
+  for (const s of settingsStore.settings.externalSites) {
+    list.push({
+      id: `site-${s.id}`,
+      title: t('palette.cmdExternalSite', { name: s.name }),
+      hint: s.url,
+      group: t('palette.groupPages'),
+      keywords: s.url,
+      run: () => previewExternalUrl(s.url, s.id)
+    })
+  }
+  list.push(
+    {
+      id: 'act-reload',
+      title: t('palette.actReload'),
+      group: t('palette.groupActions'),
+      run: () => reload()
+    },
+    {
+      id: 'act-theme',
+      title: t('palette.actTheme'),
+      group: t('palette.groupActions'),
+      run: () => quickThemeToggle()
+    },
+    {
+      id: 'act-detach',
+      title: t('palette.actDetach'),
+      group: t('palette.groupActions'),
+      run: () => detachCurrentPage()
+    },
+    {
+      id: 'act-devtools',
+      title: t('palette.actDevtools'),
+      group: t('palette.groupActions'),
+      keywords: 'F12',
+      run: () => void toggleDevTools()
+    },
+    {
+      id: 'act-updates',
+      title: t('palette.actCheckUpdates'),
+      group: t('palette.groupActions'),
+      run: () => updatesStore.check(true)
+    },
+    {
+      id: 'act-logs',
+      title: t('menu.openLogsDir'),
+      group: t('palette.groupActions'),
+      keywords: 'log logs folder',
+      run: openLogsDir
+    }
+  )
+  // Generic agent-app settings entries — only for apps without a dedicated panel.
+  for (const p of pagesStore.pages) {
+    if (p.manageAsApp && p.kind !== 'dsh' && p.kind !== 'openclaw') {
+      list.push({
+        id: `appcfg-${p.id}`,
+        title: t('palette.cmdAppSettings', { name: p.name }),
+        group: t('palette.groupPanels'),
+        keywords: p.name,
+        run: () => (activePanel.value = appPanelKey(p.id))
+      })
+    }
+  }
+  for (const panel of PANEL_COMMANDS) {
+    list.push({
+      id: `panel-${panel.kind}`,
+      title: panel.label,
+      group: t('palette.groupPanels'),
+      run: () => (activePanel.value = panel.kind)
+    })
+  }
+  return list
+})
 
 /* ---- selected page + view toolbar live in the chrome so HomeView is content-only ---- */
 const activePageId = ref<string | null>(null)
@@ -28,6 +171,10 @@ const webviewSrc = ref('')
 const webviewLoading = ref(false)
 const homeRef = ref<InstanceType<typeof HomeView> | null>(null)
 const cliTermRef = ref<{ restart: () => void } | null>(null)
+/** Webview history availability, pushed up by HomeView, drives the top-bar back/forward buttons. */
+const webNav = ref({ back: false, forward: false })
+/** Whether the webview currently shows a loaded external address (keeps its nav in-view). */
+const externalView = ref(false)
 
 const pageUrl = (p: PageState): string => p.launchUrl || p.url || ''
 
@@ -46,7 +193,10 @@ const webviewActive = computed(() => Boolean(webviewSrc.value) && !activeTermina
 
 /* Switcher trigger label in the top bar — reflects the page currently shown in the webview. */
 const currentTitle = computed(
-  () => pagesStore.pages.find((p) => p.id === activePageId.value)?.name || t('app.selectPage')
+  () =>
+    pagesStore.pages.find((p) => p.id === activePageId.value)?.name ||
+    settingsStore.settings.externalSites.find((s) => s.id === activePageId.value)?.name ||
+    t('app.selectPage')
 )
 
 /** Page being started for the configured default view — drives the 启动中 overlay. */
@@ -57,6 +207,51 @@ const startingText = computed(() => {
   const p = pagesStore.pages.find((x) => x.id === pendingPageId.value)
   return t('app.starting', { name: p?.name || t('menu.pages') })
 })
+
+/* ---- boot overlay: live phase + log tail + elapsed, with a cancel escape hatch ---- */
+const bootElapsed = ref(0)
+let bootTimer: ReturnType<typeof setInterval> | null = null
+/** Pages the user cancelled while booting — their late start() rejection must not toast. */
+const cancelledIds = new Set<string>()
+
+const pendingProgress = computed(() =>
+  pendingPageId.value ? pagesStore.progress[pendingPageId.value] : undefined
+)
+const bootPhaseText = computed(() => {
+  const p = pendingProgress.value
+  if (!p || p.phase === 'ready') return ''
+  return t(`boot.phase.${p.phase}`)
+})
+const bootLogs = computed(() => pendingProgress.value?.logs ?? [])
+const bootElapsedText = computed(() =>
+  t('boot.elapsed', { n: Math.floor(bootElapsed.value / 1000) })
+)
+/** Past this the overlay stops implying "any second now" and sets a first-boot expectation. */
+const bootSlow = computed(() => bootElapsed.value > 15000)
+
+function stopBootTimer(): void {
+  if (bootTimer) {
+    clearInterval(bootTimer)
+    bootTimer = null
+  }
+}
+watch(pendingPageId, (id) => {
+  stopBootTimer()
+  if (!id) return
+  bootElapsed.value = 0
+  bootTimer = setInterval(() => (bootElapsed.value += 500), 500)
+})
+
+/** Abort a booting default/switched page: kill the child and tear the overlay down at once. */
+function cancelStart(): void {
+  const id = pendingPageId.value
+  if (!id) return
+  cancelledIds.add(id)
+  pendingPageId.value = null
+  webviewLoading.value = false
+  stopBootTimer()
+  pagesStore.cancel(id).catch(() => undefined)
+}
 
 /**
  * Show the configured default page on entry, starting it on demand.
@@ -84,7 +279,9 @@ async function restoreDefaultView(): Promise<boolean> {
   } catch (err) {
     pendingPageId.value = null
     webviewLoading.value = false
-    ElMessage.error(t('app.startFail', { name: page.name, err: (err as Error).message }))
+    if (!cancelledIds.delete(page.id)) {
+      ElMessage.error(t('app.startFail', { name: page.name, err: (err as Error).message }))
+    }
     return false
   }
   const fresh = pagesStore.pages.find((p) => p.id === page.id)
@@ -113,6 +310,7 @@ async function startPage(id: string): Promise<void> {
 
 function showInWebview(page: PageState): void {
   activePageId.value = page.id
+  externalView.value = false
   if (page.kind === 'terminal') {
     webviewSrc.value = ''
   } else {
@@ -125,10 +323,8 @@ function showInWebview(page: PageState): void {
       webviewSrc.value = url
     }
   }
-  const dv = settingsStore.settings.defaultView
-  if (!(dv.kind === 'page' && dv.pageId === page.id)) {
-    settingsStore.patch({ defaultView: { kind: 'page', pageId: page.id } }).catch(() => undefined)
-  }
+  // Switching a page deliberately does NOT touch the persisted 默认打开页面 setting —
+  // that is only changed from 设置, and every launch loads exactly what is configured there.
 }
 
 /** Leave the CLI terminal / market view and return to the workbench (default market screen). */
@@ -142,32 +338,48 @@ function backToWorkbench(): void {
 /** Pick a page for the content area: CLI pages take it over with the terminal, web pages start on demand. */
 async function openPage(id: string): Promise<void> {
   const page = pagesStore.pages.find((p) => p.id === id)
-  if (!page) return
+  if (!page) {
+    // Saved external sites live in settings, not the page registry: switching to one
+    // from the page switcher just points the webview at its URL (highlighted via `id`).
+    const site = settingsStore.settings.externalSites.find((s) => s.id === id)
+    if (site) previewExternalUrl(site.url, id)
+    return
+  }
   if (page.external) {
-    await window.container.openExternal(page.externalUrl || '').catch(() => undefined)
+    previewExternalUrl(page.externalUrl || '', id)
     return
   }
   // Terminal-kind pages run their own command in the full-surface terminal — no port to wait for.
   if (page.kind !== 'terminal' && page.status !== 'running') {
-    ElMessage.info(t('app.notRunningStarting', { name: page.name }))
+    // Route through the boot overlay (phase text + cancel), same as the default-view path,
+    // so a slow first boot on a manual switch still visibly does something rather than hang.
+    if (pendingPageId.value === id) return
+    pendingPageId.value = id
+    webviewLoading.value = true
     try {
       await pagesStore.start(id)
     } catch (err) {
-      ElMessage.error((err as Error).message)
+      pendingPageId.value = null
+      webviewLoading.value = false
+      if (!cancelledIds.delete(id)) ElMessage.error((err as Error).message)
       return
     }
-  }
-  showInWebview(pagesStore.pages.find((p) => p.id === id) || page)
-}
-
-/** Show a saved/typed external URL in the webview (or hand it to the OS browser per settings). */
-function previewExternalUrl(url: string): void {
-  if (!url) return
-  if (settingsStore.settings.openExternalIn === 'system-browser') {
-    window.container.openExternal(url).catch(() => undefined)
+    const fresh = pagesStore.pages.find((p) => p.id === id)
+    if (fresh?.status === 'running') {
+      pendingPageId.value = null
+      showInWebview(fresh)
+    }
     return
   }
-  activePageId.value = null
+  showInWebview(page)
+}
+
+/** Show a saved/typed external URL in the webview. `siteId` keeps the switcher row highlighted. */
+function previewExternalUrl(url: string, siteId?: string): void {
+  if (!url) return
+  // The 外部地址打开方式 setting was removed — external addresses always display embedded.
+  externalView.value = true
+  activePageId.value = siteId ?? null
   // Same URL already shown: <webview> src is unchanged, so no navigation fires and
   // did-stop-loading / dom-ready would never clear the overlay — just reveal current view.
   if (webviewSrc.value === url) {
@@ -176,7 +388,7 @@ function previewExternalUrl(url: string): void {
   }
   webviewLoading.value = true
   webviewSrc.value = url
-  settingsStore.patch({ defaultView: { kind: 'external', url } }).catch(() => undefined)
+  // Displaying an external address is transient too — it never rewrites the default view.
 }
 
 function previewSiteById(id: string): void {
@@ -202,6 +414,36 @@ async function inspectWebview(): Promise<void> {
     native file dialogs) are limited inside <webview>. */
 function detachCurrentPage(): void {
   if (webviewSrc.value) window.container.openExternal(webviewSrc.value).catch(() => undefined)
+}
+
+/** Keep the top-bar back/forward buttons in sync with the webview's history stack. */
+function onNavState(state: { back: boolean; forward: boolean }): void {
+  webNav.value = state
+}
+function webviewGoBack(): void {
+  homeRef.value?.goBack()
+}
+function webviewGoForward(): void {
+  homeRef.value?.goForward()
+}
+
+/** Restart the whole desktop container after an explicit confirmation. */
+async function restartContainer(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(t('menu.restartAppConfirm'), t('menu.restartApp'), {
+      type: 'warning',
+      confirmButtonText: t('menu.restartApp'),
+      cancelButtonText: t('common.cancel')
+    })
+  } catch {
+    return // user dismissed the prompt
+  }
+  window.container.relaunchApp().catch(() => undefined)
+}
+
+/** Reveal the main-process log folder (Help menu / palette action). */
+function openLogsDir(): void {
+  window.container.openLogsDir().catch(() => undefined)
 }
 
 const systemPrefersDark = ref(false)
@@ -268,7 +510,10 @@ function onKeydown(ev: KeyboardEvent): void {
   if (ev.key === 'F12') {
     ev.preventDefault()
     void toggleDevTools()
-  } else if (ev.key === 'Escape' && activePanel.value) {
+  } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') {
+    ev.preventDefault()
+    paletteOpen.value = !paletteOpen.value
+  } else if (ev.key === 'Escape' && activePanel.value && !paletteOpen.value) {
     activePanel.value = null
   }
 }
@@ -324,14 +569,15 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  stopBootTimer()
   disposeNativeTheme?.()
   disposeMaximized?.()
   disposeOpenTerminal?.()
 })
 
 watch(activePanel, (panel) => {
-  if (panel === 'pages' || panel === 'view') pagesStore.refresh().catch(() => undefined)
-  if (panel === 'updates' && !updatesStore.results.length) {
+  if (panel === 'pages' || panel === 'settings') pagesStore.refresh().catch(() => undefined)
+  if (panel === 'help' && !updatesStore.results.length) {
     updatesStore.check().catch(() => undefined)
   }
 })
@@ -368,11 +614,13 @@ watch(
     if (status === 'error' || status === 'stopped') {
       pendingPageId.value = null
       webviewLoading.value = false
-      ElMessage.error(
-      t('app.pageStartFail', {
-        name: pagesStore.pages.find((x) => x.id === id)?.name || t('menu.pages')
-      })
-    )
+      if (!cancelledIds.delete(id)) {
+        ElMessage.error(
+          t('app.pageStartFail', {
+            name: pagesStore.pages.find((x) => x.id === id)?.name || t('menu.pages')
+          })
+        )
+      }
     }
   }
 )
@@ -386,127 +634,144 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
 <template>
   <el-config-provider :locale="currentEpLocale">
     <div class="shell">
-    <MenuBar
-      :current="activePanel"
-      :running-count="runningCount"
-      :total-count="pagesStore.pages.length"
-      :outdated-count="updatesStore.outdated.length"
-      :is-dark="isDark"
-      :theme-mode="themeMode"
-      :pages="pagesStore.pages"
-      :active-page-id="activePageId"
-      :busy-pages="pagesStore.busy"
-      :switcher-title="currentTitle"
-      :is-maximized="isMaximized"
-      :can-operate="canOperate"
-      :terminal-mode="Boolean(activeTerminalPage)"
-      :external-sites="settingsStore.settings.externalSites"
-      @open="activePanel = $event"
-      @open-panel="(p: PanelKind) => (activePanel = p)"
-      @toggle-theme="quickThemeToggle"
-      @select-page="openPage"
-      @start-page="startPage"
-      @open-terminal="(id: string) => openPage(id)"
-      @preview-site="previewSiteById"
-      @manage="activePanel = 'pages'"
-      @reload="reload"
-      @detach="detachCurrentPage"
-      @inspect="inspectWebview"
-      @restart-terminal="cliTermRef?.restart()"
-    >
-      <template #view>
-        <MenuPanelContent
-          v-if="activePanel === 'view'"
-          panel="view"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pagesStore.pages.length"
-          @apply-theme="applyTheme"
-          @preview-site="previewExternalUrl"
-        />
-      </template>
-      <template #pages>
-        <MenuPanelContent
-          v-if="activePanel === 'pages'"
-          panel="pages"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pagesStore.pages.length"
-          @close="activePanel = null"
-        />
-      </template>
-      <template #external>
-        <MenuPanelContent
-          v-if="activePanel === 'external'"
-          panel="external"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pagesStore.pages.length"
-          @preview-site="previewExternalUrl"
-        />
-      </template>
-      <template #dsh>
-        <MenuPanelContent
-          v-if="activePanel === 'dsh'"
-          panel="dsh"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pagesStore.pages.length"
-        />
-      </template>
-      <template #openclaw>
-        <MenuPanelContent
-          v-if="activePanel === 'openclaw'"
-          panel="openclaw"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pagesStore.pages.length"
-        />
-      </template>
-      <template #updates>
-        <MenuPanelContent
-          v-if="activePanel === 'updates'"
-          panel="updates"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pagesStore.pages.length"
-          @check-updates="updatesStore.check(true)"
-        />
-      </template>
-      <template #about>
-        <MenuPanelContent
-          v-if="activePanel === 'about'"
-          panel="about"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pagesStore.pages.length"
-        />
-      </template>
-    </MenuBar>
+      <MenuBar
+        :current="activePanel"
+        :running-count="runningCount"
+        :total-count="pagesStore.pages.length"
+        :outdated-count="updatesStore.outdated.length"
+        :is-dark="isDark"
+        :theme-mode="themeMode"
+        :pages="pagesStore.pages"
+        :active-page-id="activePageId"
+        :busy-pages="pagesStore.busy"
+        :switcher-title="currentTitle"
+        :is-maximized="isMaximized"
+        :can-operate="canOperate"
+        :can-go-back="webNav.back"
+        :can-go-forward="webNav.forward"
+        :show-nav="externalView && canOperate"
+        :terminal-mode="Boolean(activeTerminalPage)"
+        :external-sites="settingsStore.settings.externalSites"
+        @open="activePanel = $event"
+        @open-panel="(p: string) => (activePanel = p)"
+        @toggle-theme="quickThemeToggle"
+        @select-page="openPage"
+        @start-page="startPage"
+        @open-terminal="(id: string) => openPage(id)"
+        @preview-site="previewSiteById"
+        @reload="reload"
+        @go-back="webviewGoBack"
+        @go-forward="webviewGoForward"
+        @detach="detachCurrentPage"
+        @inspect="inspectWebview"
+        @restart-terminal="cliTermRef?.restart()"
+        @restart-app="restartContainer"
+        @open-logs="openLogsDir"
+      >
+        <template #settings>
+          <MenuPanelContent
+            v-if="activePanel === 'settings'"
+            panel="settings"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pagesStore.pages.length"
+            @apply-theme="applyTheme"
+            @preview-site="previewExternalUrl"
+          />
+        </template>
+        <template #pages>
+          <MenuPanelContent
+            v-if="activePanel === 'pages'"
+            panel="pages"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pagesStore.pages.length"
+            @close="activePanel = null"
+          />
+        </template>
+        <template #external>
+          <MenuPanelContent
+            v-if="activePanel === 'external'"
+            panel="external"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pagesStore.pages.length"
+            @preview-site="previewExternalUrl"
+          />
+        </template>
+        <template #dsh>
+          <MenuPanelContent
+            v-if="activePanel === 'dsh'"
+            panel="dsh"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pagesStore.pages.length"
+          />
+        </template>
+        <template #openclaw>
+          <MenuPanelContent
+            v-if="activePanel === 'openclaw'"
+            panel="openclaw"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pagesStore.pages.length"
+          />
+        </template>
+        <template #app="{ pageId }">
+          <MenuPanelContent
+            v-if="pageId && activePanel === appPanelKey(pageId)"
+            :panel="appPanelKey(pageId)"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pagesStore.pages.length"
+            @open-page="openPage"
+            @open-terminal="openPage"
+          />
+        </template>
+        <template #help>
+          <MenuPanelContent
+            v-if="activePanel === 'help'"
+            panel="help"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pagesStore.pages.length"
+            @check-updates="updatesStore.check(true)"
+          />
+        </template>
+      </MenuBar>
 
-    <main class="content">
-      <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
-      <CliTerminalView
-        v-if="activeTerminalPage"
-        ref="cliTermRef"
-        :page="activeTerminalPage"
-        @exit="backToWorkbench"
-      />
-      <HomeView
-        ref="homeRef"
-        :url="webviewSrc"
-        :loading="webviewLoading"
-        :starting-text="startingText"
-        :market-active="!webviewActive && !activeTerminalPage"
-        @guest-stop-loading="webviewLoading = false"
-        @install-pages="activePanel = 'pages'"
-      />
-    </main>
+      <main class="content">
+        <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
+        <CliTerminalView
+          v-if="activeTerminalPage"
+          ref="cliTermRef"
+          :page="activeTerminalPage"
+          @exit="backToWorkbench"
+        />
+        <HomeView
+          ref="homeRef"
+          :url="webviewSrc"
+          :loading="webviewLoading"
+          :starting-text="startingText"
+          :phase-text="bootPhaseText"
+          :logs="bootLogs"
+          :slow="bootSlow"
+          :elapsed-text="bootElapsedText"
+          :market-active="!webviewActive && !activeTerminalPage"
+          :external-view="externalView"
+          @nav-state="onNavState"
+          @guest-stop-loading="webviewLoading = false"
+          @install-pages="activePanel = 'pages'"
+          @cancel-start="cancelStart"
+        />
+      </main>
 
-    <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
+      <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
          v-show, not v-if: unmounting drops the global onPtyData subscription, which
          would silently kill output for every embedded shell terminal tab. -->
-    <TerminalDrawer v-if="hasBridge" v-show="store.open" />
+      <TerminalDrawer v-if="hasBridge" v-show="store.open" />
+
+      <CommandPalette v-model="paletteOpen" :commands="commands" />
     </div>
   </el-config-provider>
 </template>

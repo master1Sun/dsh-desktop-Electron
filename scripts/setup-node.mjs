@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync, createWriteStream, realpathSync } from 'node:fs'
+import { mkdirSync, existsSync, createWriteStream, realpathSync, rmSync } from 'node:fs'
 import { get as httpsGet } from 'https'
 import { get as httpGet } from 'http'
 import { join, dirname } from 'path'
@@ -6,7 +6,7 @@ import { pipeline } from 'stream/promises'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'node:url'
 
-const NODE_VERSION = process.env.DSH_NODE_VERSION || '22.23.2'
+const NODE_VERSION = process.env.DSH_NODE_VERSION || '24.21.0'
 const MIRRORS = [
   `https://registry.npmmirror.com/-/binary/node/v${NODE_VERSION}/node-v${NODE_VERSION}-win-x64.zip`,
   `https://cdn.npmmirror.com/binaries/node/v${NODE_VERSION}/node-v${NODE_VERSION}-win-x64.zip`,
@@ -45,10 +45,17 @@ function download(url, target) {
 
 async function main() {
   const nodeExe = join(destDir, 'node.exe')
+  const expected = `v${NODE_VERSION}`
   if (existsSync(nodeExe)) {
     const out = execFileSync(nodeExe, ['--version']).toString().trim()
-    console.log(`[setup-node] already present: ${out}`)
-    return
+    if (out === expected) {
+      console.log(`[setup-node] already present: ${out}`)
+      return
+    }
+    // Version mismatch: clear the stale runtime so the fresh download is not
+    // mixed with old files (extraction below skips entries that already exist).
+    console.log(`[setup-node] upgrading bundled Node ${out} -> ${expected}; clearing ${destDir}`)
+    rmSync(destDir, { recursive: true, force: true })
   }
   mkdirSync(destDir, { recursive: true })
   let lastError = null

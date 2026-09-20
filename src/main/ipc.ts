@@ -5,9 +5,14 @@ import {
   type DefaultView,
   type DshTokenResult,
   type DshUpdateChannel,
-  type UpdateCheckResult
+  type OpenclawInitTokenResult,
+  type PageProgress,
+  type InstallProgress,
+  type UpdateCheckResult,
+  type UpdateProgress
 } from '../shared/types'
 import { getNodeRuntimeInfo } from './node-runtime'
+import { listNodeVersions, updateNodeRuntime, restoreBundledNode } from './node-updater'
 import { PageRegistry, expandStartCommand, buildPageEnv, resolveDshToken } from './pages'
 import {
   getSettings,
@@ -24,6 +29,7 @@ import {
 } from './store'
 import { installFromGit, installFromLocalDir, removePage } from './installer'
 import { checkUpdates, performUpdate, clearUpdateCache } from './update-service'
+import { logsDir } from './logger'
 import { PtyManager } from './pty'
 import {
   getDshStatus,
@@ -35,8 +41,18 @@ import {
   checkDshPluginUpdates,
   createDshPage
 } from './dsh'
-import { getOpenclawStatus, createOpenclawPage, getOpenclawGatewayToken } from './openclaw'
+import {
+  getOpenclawStatus,
+  createOpenclawPage,
+  getOpenclawGatewayToken,
+  initializeOpenclawToken
+} from './openclaw'
 import { m, notifyLocaleChanged } from './i18n'
+
+/** Periodic silent update-check timer; module-level so a dev-HMR re-register resets it instead of stacking. */
+let surveyTimer: NodeJS.Timeout | null = null
+/** How often the background survey re-probes every update source. Cheap on the LAN, network-bound otherwise. */
+const UPDATE_SURVEY_MS = 30 * 60_000
 
 export function registerIpc(registry: PageRegistry): void {
   const ok = <T>(data?: T): IpcResult<T> => ({ ok: true, data })
@@ -64,6 +80,14 @@ export function registerIpc(registry: PageRegistry): void {
           pid: p.pid
         }))
       )
+    }
+  })
+
+  // Startup progress (phase + live log tail) for the boot overlay; separate from the coarse
+  // 'changed' signal so a slow first boot can animate without a full page-list refetch.
+  registry.on('progress', (p: PageProgress) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnPageProgress, p)
     }
   })
 
@@ -120,6 +144,37 @@ export function registerIpc(registry: PageRegistry): void {
     }
   })
 
+  // Bundled-Node runtime upgrade (关于与更新): list eligible versions, download+install
+  // one as the userData override, or drop the override to fall back to the shipped one.
+  ipcMain.handle(IPC.ListNodeVersions, async (): Promise<IpcResult> => {
+    try {
+      return ok(await listNodeVersions())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.UpdateNodeRuntime, async (e, version: string): Promise<IpcResult> => {
+    try {
+      // Stream progress back to the requesting window only (mirrors PerformUpdate).
+      const sender = e.sender
+      const onProgress = (p: UpdateProgress): void => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnNodeUpdateProgress, p)
+      }
+      return ok(await updateNodeRuntime(version, onProgress))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.RestoreBundledNode, async (): Promise<IpcResult> => {
+    try {
+      return ok(await restoreBundledNode())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
   ipcMain.handle(IPC.ListPages, async (): Promise<IpcResult> => {
     registry.reconcile()
     return ok(registry.list())
@@ -151,8 +206,13 @@ export function registerIpc(registry: PageRegistry): void {
   ipcMain.handle(
     IPC.InstallPageFromGit,
     async (_e, repoUrl: string, name?: string, port?: number): Promise<IpcResult> => {
+      // Stream import progress back to the requesting window (see InstallProgress).
+      const sender = _e.sender
+      const onProgress = (p: InstallProgress): void => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p)
+      }
       try {
-        const dirName = await installFromGit(resolvePagesDir(), repoUrl, name, port)
+        const dirName = await installFromGit(resolvePagesDir(), repoUrl, name, port, undefined, onProgress)
         registry.reconcile()
         clearUpdateCache()
         return ok(dirName)
@@ -171,8 +231,19 @@ export function registerIpc(registry: PageRegistry): void {
       port?: number,
       originUrl?: string
     ): Promise<IpcResult> => {
+      const sender = _e.sender
+      const onProgress = (p: InstallProgress): void => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p)
+      }
       try {
-        const dirName = await installFromLocalDir(resolvePagesDir(), srcDir, name, port, originUrl)
+        const dirName = await installFromLocalDir(
+          resolvePagesDir(),
+          srcDir,
+          name,
+          port,
+          originUrl,
+          onProgress
+        )
         registry.reconcile()
         clearUpdateCache()
         return ok(dirName)
@@ -239,6 +310,17 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(IPC.GetSettings, (): IpcResult => ok(getSettings()))
 
+  // Field debugging: a packaged app has no console. Everything the main process logs
+  // (and every page child's output) is mirrored under userData/logs — open it externally.
+  ipcMain.handle(IPC.OpenLogsDir, async (): Promise<IpcResult> => {
+    try {
+      const err = await shell.openPath(logsDir())
+      return err ? fail(new Error(err)) : ok(logsDir())
+    } catch (e) {
+      return fail(e)
+    }
+  })
+
   ipcMain.handle(
     IPC.UpdateSettings,
     (
@@ -255,6 +337,7 @@ export function registerIpc(registry: PageRegistry): void {
         openclawHome?: string
         pageEnvs?: Record<string, Record<string, string>>
         pagePorts?: Record<string, number>
+        crashAutoRestart?: boolean
       }
     ): IpcResult => {
       try {
@@ -294,9 +377,34 @@ export function registerIpc(registry: PageRegistry): void {
     }
   })
 
+  /*
+   * Silent background update survey: refresh the cached results on a timer and push them
+   * to every window. The renderer only folds them into the badge/table — a background hit
+   * must never pop a dialog or navigate the user anywhere (提醒收敛). The first pass runs
+   * a beat after boot so it doesn't compete with page auto-start for the network.
+   */
+  if (surveyTimer) clearInterval(surveyTimer)
+  const runSurvey = (): void => {
+    checkUpdates(registry.list(), true)
+      .then((results) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send(IPC.OnUpdateResults, results)
+        }
+      })
+      .catch(() => undefined) // a survey failure keeps the last known badge state
+  }
+  setTimeout(runSurvey, 45_000).unref?.()
+  surveyTimer = setInterval(runSurvey, UPDATE_SURVEY_MS)
+  surveyTimer.unref?.()
+
   ipcMain.handle(IPC.PerformUpdate, async (_e, target: UpdateCheckResult): Promise<IpcResult> => {
     try {
-      const res = await performUpdate(target)
+      // Stream download progress back to the requesting window (see UpdateProgress).
+      const sender = _e.sender
+      const onProgress = (p: UpdateProgress): void => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p)
+      }
+      const res = await performUpdate(target, onProgress)
       clearUpdateCache()
       return ok(res)
     } catch (err) {
@@ -573,6 +681,29 @@ export function registerIpc(registry: PageRegistry): void {
   ipcMain.handle(IPC.OpenclawToken, (): IpcResult => {
     try {
       return ok(getOpenclawGatewayToken())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  /**
+   * One-click openclaw token bootstrap: mint (or with `rotate`, re-mint) a durable gateway token
+   * into openclaw.json. Writing the config is enough for the panel to reveal it immediately; when
+   * the gateway page is already running we restart it fire-and-forget so it enforces the new
+   * credential, without blocking this call on openclaw's slow (~2min) first-boot readiness.
+   */
+  ipcMain.handle(IPC.OpenclawInitToken, (_e, rotate?: boolean): IpcResult<OpenclawInitTokenResult> => {
+    try {
+      const { token, created } = initializeOpenclawToken(Boolean(rotate))
+      let restarted = false
+      const page = registry.get('openclaw')
+      if (page && page.status === 'running') {
+        restarted = true
+        registry.restart('openclaw').catch((err) => {
+          console.warn('[openclaw] token restart failed (ignored):', (err as Error).message)
+        })
+      }
+      return ok({ token, created, restarted })
     } catch (err) {
       return fail(err)
     }

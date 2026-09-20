@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { app } from 'electron'
 import {
   getSettings,
@@ -154,7 +155,7 @@ function openclawEnvVars(): NonNullable<ContainerManifest['envVars']> {
         zh: msgIn('zh', 'openclaw.homeLabel'),
         en: msgIn('en', 'openclaw.homeLabel')
       },
-      defaultPath: '{envRoot}/openclaw',
+      defaultPath: '~/.openclaw',
       description: {
         zh: msgIn('zh', 'openclaw.homeDesc'),
         en: msgIn('en', 'openclaw.homeDesc')
@@ -187,10 +188,17 @@ export function createOpenclawPage(port = OPENCLAW_DEFAULT_PORT): string {
 export function ensureDefaultOpenclawPage(): void {
   const metaFile = join(resolvePagesDir(), 'openclaw', 'container.json')
   if (existsSync(metaFile)) {
-    // Backfill: metas written before envVars existed hide the openclaw 环境目录 input.
+    // Backfill: metas written before envVars existed hide the openclaw 环境目录 input;
+    // metas with the old {envRoot} default also need refreshing (home now defaults to ~/.openclaw).
     try {
       const raw = JSON.parse(readFileSync(metaFile, 'utf-8')) as Record<string, unknown>
-      if (!Array.isArray(raw.envVars) || !raw.envVars.length) {
+      const vars = Array.isArray(raw.envVars)
+        ? (raw.envVars as Array<Record<string, unknown>>)
+        : []
+      const stale =
+        !vars.length ||
+        vars.some((v) => v?.key === 'OPENCLAW_HOME' && v?.defaultPath === '{envRoot}/openclaw')
+      if (stale) {
         writeFileSync(metaFile, JSON.stringify({ ...raw, envVars: openclawEnvVars() }, null, 2))
       }
     } catch {
@@ -340,6 +348,18 @@ export async function resolveOpenclawLaunchUrl(): Promise<string | null> {
 }
 
 /**
+ * Path to the gateway config the container manages. Mirrors openclaw's own precedence
+ * (`OPENCLAW_CONFIG_PATH` env → `<home>/openclaw.json`) so a token we write lands exactly
+ * where `getOpenclawGatewayToken` (and the running gateway) will read it back.
+ */
+function openclawConfigPath(): string {
+  return (
+    (process.env.OPENCLAW_CONFIG_PATH || '').trim() ||
+    join(resolveOpenclawHome(), 'openclaw.json')
+  )
+}
+
+/**
  * Reveal the gateway's shared auth token so the UI can show/copy it (the Control UI's
  * one-time bootstrap link expires in ~10min, so a durable token is handy as a fallback).
  * Mirrors openclaw's own precedence (`gateway.auth.token` config-first → `OPENCLAW_GATEWAY_TOKEN`
@@ -349,8 +369,7 @@ export async function resolveOpenclawLaunchUrl(): Promise<string | null> {
  */
 export function getOpenclawGatewayToken(): { token: string; source: 'config' | 'env' } | null {
   const envToken = (process.env.OPENCLAW_GATEWAY_TOKEN || '').trim()
-  const cfgPath =
-    (process.env.OPENCLAW_CONFIG_PATH || '').trim() || join(resolveOpenclawHome(), 'openclaw.json')
+  const cfgPath = openclawConfigPath()
   let configToken = ''
   try {
     if (existsSync(cfgPath)) {
@@ -367,6 +386,58 @@ export function getOpenclawGatewayToken(): { token: string; source: 'config' | '
   if (configToken) return { token: configToken, source: 'config' }
   if (envToken) return { token: envToken, source: 'env' }
   return null
+}
+
+/**
+ * One-click token bootstrap. openclaw ships no CLI to *mint* a gateway token
+ * (`gateway auth-token` only reveals an existing one, and a fresh local-mode gateway leaves
+ * `gateway.auth` empty), so the panel could never show a durable credential and the Control
+ * UI had nothing to authenticate the embedded page with. This generates a strong shared token
+ * and merges it into openclaw.json under `gateway.auth.token` — never clobbering unrelated
+ * keys (mode, port, channels, models). Writing the config is enough for `getOpenclawGatewayToken`
+ * to reveal it immediately; a caller restarts a *running* gateway so it enforces the new value.
+ *
+ * Idempotent: with a token already present and `rotate` false it returns the existing one
+ * untouched. `rotate` mints a fresh token and overwrites the old.
+ */
+export function initializeOpenclawToken(
+  rotate = false
+): { token: string; created: boolean } {
+  const cfgPath = openclawConfigPath()
+  let cfg: Record<string, unknown> = {}
+  if (existsSync(cfgPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        cfg = parsed as Record<string, unknown>
+      }
+    } catch (err) {
+      // Never overwrite a config we can't understand (e.g. JSON5/comments) — surface it instead.
+      throw new Error(m('openclaw.configUnreadable', { path: cfgPath, err: (err as Error).message }))
+    }
+  }
+  const gateway = (cfg.gateway && typeof cfg.gateway === 'object'
+    ? cfg.gateway
+    : {}) as Record<string, unknown>
+  const auth = (gateway.auth && typeof gateway.auth === 'object'
+    ? gateway.auth
+    : {}) as Record<string, unknown>
+  const existing = typeof auth.token === 'string' ? auth.token.trim() : ''
+  if (existing && !rotate) return { token: existing, created: false }
+  const token = randomBytes(32).toString('base64url')
+  auth.token = token
+  gateway.auth = auth
+  // A gateway with no config at all still needs local mode to boot; leave an existing
+  // mode/port untouched (they are already on `gateway` when present).
+  if (!('mode' in gateway)) gateway.mode = 'local'
+  cfg.gateway = gateway
+  try {
+    mkdirSync(dirname(cfgPath), { recursive: true })
+    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n')
+  } catch (err) {
+    throw new Error(m('openclaw.tokenWriteFail', { err: (err as Error).message }))
+  }
+  return { token, created: true }
 }
 
 /**

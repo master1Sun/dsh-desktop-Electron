@@ -5,7 +5,6 @@ import { usePagesStore } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import type { DefaultView } from '../stores/settings'
 import type { EnvRootInfo } from '../../../shared/types'
-import ExternalSitesManager from './ExternalSitesManager.vue'
 import { t } from '../i18n'
 
 const emit = defineEmits<{
@@ -32,7 +31,15 @@ interface EnvSection {
 
 const envSections = computed<EnvSection[]>(() =>
   pagesStore.pages
-    .filter((p) => !p.external && p.envVars?.length)
+    // Only pages the generic AppManager really renders must be skipped here (one entry
+    // point per setting). dsh/openclaw default to manageAsApp but live in their own
+    // panels WITHOUT env inputs — exclude them and their 环境目录 disappears entirely.
+    .filter(
+      (p) =>
+        !p.external &&
+        p.envVars?.length &&
+        (!p.manageAsApp || p.kind === 'dsh' || p.kind === 'openclaw')
+    )
     .map((p) => ({
       pageId: p.id,
       pageName: p.name,
@@ -138,19 +145,7 @@ const viewOptions = computed(() => {
       label: `${p.name}${p.external ? t('settings.tagExternal') : p.kind === 'dsh' ? t('settings.tagDsh') : p.kind === 'terminal' ? t('settings.tagTerminal') : p.containerPort || p.port ? ` :${p.containerPort || p.port}` : ''}`
     }))
   ]
-  const groups: { label: string; options: Option[] }[] = settingsStore.settings.lastExternalUrls
-    .length
-    ? [
-        {
-          label: t('settings.recentExternal'),
-          options: settingsStore.settings.lastExternalUrls.map((u) => ({
-            value: `ext:${u}`,
-            label: u
-          }))
-        }
-      ]
-    : []
-  return { plain, groups }
+  return { plain }
 })
 
 async function patch(
@@ -193,32 +188,8 @@ function onLocaleChange(next: 'zh' | 'en'): void {
             :label="opt.label"
             :disabled="opt.disabled"
           />
-          <el-option-group v-for="g in viewOptions.groups" :key="g.label" :label="g.label">
-            <el-option
-              v-for="sub in g.options"
-              :key="sub.value"
-              :value="sub.value"
-              :label="sub.label"
-            />
-          </el-option-group>
         </el-select>
         <div class="tip">{{ t('settings.defaultPageTip') }}</div>
-      </el-form-item>
-
-      <el-form-item :label="t('settings.externalAddress')">
-        <ExternalSitesManager class="ext-inline" @preview="emit('preview-site', $event)" />
-      </el-form-item>
-
-      <el-form-item :label="t('settings.externalOpenMode')">
-        <el-radio-group
-          :model-value="settingsStore.settings.openExternalIn"
-          @update:model-value="patch({ openExternalIn: $event as 'embedded' | 'system-browser' })"
-        >
-          <el-radio-button value="embedded">{{ t('settings.embedded') }}</el-radio-button>
-          <el-radio-button value="system-browser">{{
-            t('settings.systemBrowser')
-          }}</el-radio-button>
-        </el-radio-group>
       </el-form-item>
 
       <el-form-item :label="t('settings.theme')">
@@ -256,6 +227,14 @@ function onLocaleChange(next: 'zh' | 'en'): void {
           "
         />
         <div class="tip">{{ t('settings.minimizeTip') }}</div>
+      </el-form-item>
+
+      <el-form-item :label="t('settings.crashAutoRestart')">
+        <el-switch
+          :model-value="settingsStore.settings.crashAutoRestart"
+          @update:model-value="patch({ crashAutoRestart: $event as boolean })"
+        />
+        <div class="tip">{{ t('settings.crashAutoRestartTip') }}</div>
       </el-form-item>
     </el-form>
 

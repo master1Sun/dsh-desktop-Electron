@@ -38,6 +38,7 @@ vi.mock('electron-store', () => {
 })
 
 import { installFromLocalDir, removePage } from '../src/main/installer'
+import type { InstallProgress } from '../src/shared/types'
 
 describe('installFromLocalDir container.json seeding', () => {
   it('writes a generated manifest with the form port when the project ships none', async () => {
@@ -78,14 +79,79 @@ describe('installFromLocalDir container.json seeding', () => {
     }
   })
 
-  it('generates nothing when the form port is left empty', async () => {
+  it('generates a page manifest even when the form port is left empty', async () => {
     const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
     const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
     try {
       mkdirSync(join(srcBase, 'app-c'))
       writeFileSync(join(srcBase, 'app-c', 'server.js'), '// stub\n')
       const id = await installFromLocalDir(pagesDir, join(srcBase, 'app-c'), 'app-c')
-      expect(existsSync(join(pagesDir, id, 'container.json'))).toBe(false)
+      const raw = JSON.parse(readFileSync(join(pagesDir, id, 'container.json'), 'utf-8'))
+      expect(raw.kind).toBe('page')
+      expect(raw.name).toBe('app-c')
+      expect(raw.port).toBeUndefined() // no port given → left to the project's own listener
+    } finally {
+      rmSync(srcBase, { recursive: true, force: true })
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+
+  it('detects a bin-only CLI as a terminal page with a start command', async () => {
+    const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
+    try {
+      mkdirSync(join(srcBase, 'cli-a'))
+      writeFileSync(
+        join(srcBase, 'cli-a', 'package.json'),
+        JSON.stringify({ name: 'cli-a', bin: { 'cli-a': './cli.js' }, scripts: { start: 'node cli.js' } })
+      )
+      writeFileSync(join(srcBase, 'cli-a', 'cli.js'), '// cli stub\n')
+      // No server.js / index.js: without terminal detection readPageMeta would reject it as an
+      // unrunnable page and roll the import back — surviving here proves the CLI was detected.
+      const id = await installFromLocalDir(pagesDir, join(srcBase, 'cli-a'), 'cli-a')
+      const raw = JSON.parse(readFileSync(join(pagesDir, id, 'container.json'), 'utf-8'))
+      expect(raw.kind).toBe('terminal')
+      expect(raw.startCommand).toBe('npm run start')
+    } finally {
+      rmSync(srcBase, { recursive: true, force: true })
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to the bin file when a CLI has no start script', async () => {
+    const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
+    try {
+      mkdirSync(join(srcBase, 'cli-b'))
+      writeFileSync(
+        join(srcBase, 'cli-b', 'package.json'),
+        JSON.stringify({ name: 'cli-b', bin: './run.js' })
+      )
+      writeFileSync(join(srcBase, 'cli-b', 'run.js'), '// cli stub\n')
+      const id = await installFromLocalDir(pagesDir, join(srcBase, 'cli-b'), 'cli-b')
+      const raw = JSON.parse(readFileSync(join(pagesDir, id, 'container.json'), 'utf-8'))
+      expect(raw.kind).toBe('terminal')
+      expect(raw.startCommand).toBe('node run.js')
+    } finally {
+      rmSync(srcBase, { recursive: true, force: true })
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a bin package that also depends on a server framework as a page', async () => {
+    const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
+    try {
+      mkdirSync(join(srcBase, 'srv-a'))
+      writeFileSync(
+        join(srcBase, 'srv-a', 'package.json'),
+        JSON.stringify({ name: 'srv-a', bin: './server.js', dependencies: { express: '^4' } })
+      )
+      writeFileSync(join(srcBase, 'srv-a', 'server.js'), '// stub\n')
+      const id = await installFromLocalDir(pagesDir, join(srcBase, 'srv-a'), 'srv-a', 4000)
+      const raw = JSON.parse(readFileSync(join(pagesDir, id, 'container.json'), 'utf-8'))
+      expect(raw.kind).toBe('page')
+      expect(raw.port).toBe(4000)
     } finally {
       rmSync(srcBase, { recursive: true, force: true })
       rmSync(pagesDir, { recursive: true, force: true })
@@ -113,6 +179,46 @@ describe('installFromLocalDir container.json seeding', () => {
         'https://github.com/master1Sun/dsh-desktop-Electron.git'
       )
       expect((await git.revparse(['HEAD'])).trim()).toMatch(/^[0-9a-f]{40}$/)
+    } finally {
+      rmSync(srcBase, { recursive: true, force: true })
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+
+  it('streams byte-weighted progress and skips node_modules/.git during a local copy', async () => {
+    const srcBase = mkdtempSync(join(tmpdir(), 'dsh-inst-src-'))
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-pages-'))
+    try {
+      const app = join(srcBase, 'app-e')
+      mkdirSync(join(app, 'src'), { recursive: true })
+      mkdirSync(join(app, 'node_modules', 'dep'), { recursive: true })
+      mkdirSync(join(app, '.git'), { recursive: true })
+      writeFileSync(join(app, 'server.js'), '// entry\n')
+      writeFileSync(join(app, 'src', 'a.ts'), 'export const a = 1\n')
+      writeFileSync(join(app, 'node_modules', 'dep', 'x.js'), 'junk')
+      writeFileSync(join(app, '.git', 'HEAD'), 'ref: refs/heads/main')
+      const events: InstallProgress[] = []
+      const id = await installFromLocalDir(pagesDir, app, 'app-e', 17701, undefined, (p) =>
+        events.push(p)
+      )
+      // The copied tree lands; excluded dirs do not.
+      expect(existsSync(join(pagesDir, id, 'server.js'))).toBe(true)
+      expect(existsSync(join(pagesDir, id, 'src', 'a.ts'))).toBe(true)
+      expect(existsSync(join(pagesDir, id, 'node_modules'))).toBe(false)
+      expect(existsSync(join(pagesDir, id, '.git'))).toBe(false)
+      // Progress contract: dir op, a receiving phase seen, monotonic percentage ending at 100.
+      expect(events.every((e) => e.op === 'dir')).toBe(true)
+      const phases = events.map((e) => e.phase)
+      expect(phases).toContain('receiving')
+      expect(phases[phases.length - 1]).toBe('done')
+      const percents = events
+        .filter((e) => typeof e.percent === 'number')
+        .map((e) => e.percent as number)
+      expect(percents.length).toBeGreaterThan(1)
+      for (let i = 1; i < percents.length; i++) {
+        expect(percents[i]).toBeGreaterThanOrEqual(percents[i - 1])
+      }
+      expect(percents[percents.length - 1]).toBe(100)
     } finally {
       rmSync(srcBase, { recursive: true, force: true })
       rmSync(pagesDir, { recursive: true, force: true })

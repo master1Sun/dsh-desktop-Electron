@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { simpleGit, type SimpleGitOptions } from 'simple-git'
+import { simpleGit, type SimpleGitOptions, type SimpleGitProgressEvent } from 'simple-git'
 import type { UpdateCheckResult, UpdateOutcome } from '../shared/types'
 import { m } from './i18n'
 
@@ -37,17 +37,46 @@ export function recloneUrl(url: string): string {
   return isSshRemote(url) ? url : normalizeRepoUrl(url).replace(/^(https?:\/\/)[^@/\s]+@/i, '$1')
 }
 
+/** A normalized git progress tick: the stage label plus a 0..100 percentage. */
+export interface CloneProgress {
+  stage: string
+  percent: number
+  processed?: number
+  total?: number
+}
+
 /**
  * Clone `url` into `dir`, retrying once with the credential-stripped URL.
  * The caller's own git config (e.g. an insteadOf rewrite to SSH) still applies.
+ * When `onProgress` is given it is wired through simple-git's `progress` option, which
+ * auto-appends `--progress` and parses git's stderr counters — so the caller sees real
+ * download percentages without us re-implementing the parsing.
  */
-export async function cloneWithAuthFallback(dir: string, url: string): Promise<void> {
+export async function cloneWithAuthFallback(
+  dir: string,
+  url: string,
+  onProgress?: (p: CloneProgress) => void
+): Promise<void> {
+  const makeGit = (): ReturnType<typeof simpleGit> =>
+    onProgress
+      ? simpleGit({
+          baseDir: process.cwd(),
+          progress: (ev: SimpleGitProgressEvent): void => {
+            onProgress({
+              stage: String(ev.stage),
+              percent: Number(ev.progress) || 0,
+              processed: ev.processed,
+              total: ev.total
+            })
+          }
+        })
+      : simpleGit({ baseDir: process.cwd() })
   try {
-    await simpleGit({ baseDir: process.cwd() }).clone(url, dir)
+    await makeGit().clone(url, dir)
   } catch (err) {
     const fallback = recloneUrl(url)
     if (fallback === normalizeRepoUrl(url)) throw err
-    await simpleGit({ baseDir: process.cwd() }).clone(fallback, dir)
+    await makeGit().clone(fallback, dir)
   }
 }
 

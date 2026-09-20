@@ -30,6 +30,10 @@ const zh: Dict = {
   'tray.stop': '停止 {name}',
   'tray.start': '启动 {name}',
   'tray.quit': '退出容器（将停止所有 node 进程）',
+  'tray.quitConfirmTitle': '退出容器',
+  'tray.quitConfirm': '退出将停止所有运行中的 node 进程与页面。确定退出吗？',
+  'tray.quitYes': '退出',
+  'tray.quitNo': '取消',
   'tray.tooltip': '桌面控制台 · {n} 个 page 运行中',
   'dialog.title': 'DSH 容器',
   'dialog.chooseDir': '选择要托管的本地项目目录',
@@ -68,6 +72,11 @@ const zh: Dict = {
   'page.logReady': '[container] 已就绪，监听端口 {port}',
   'page.dshProfileNotReady': 'dsh profile 在 {sec}s 内未就绪（端口 {port}）',
   'page.logStopping': '[container] 正在停止…',
+  'page.logRetryAfterReclaim':
+    '[container] 检测到旧进程占用，已清理残留进程，正在重试启动…',
+  'page.logCrashRestart':
+    '[container] 进程异常退出（code={code}），{sec} 秒后自动重启（第 {n}/{max} 次）…',
+  'page.crashGiveUp': '连续 {max} 次异常退出，已停止自动重启；请在「帮助 → 打开日志目录」排查',
 
   'dsh.pnpmMissing': '未找到 pnpm（dsh 的插件管理依赖 pnpm）。请先执行: npm install -g pnpm',
   'dsh.invalidProfile': '非法 profile 名: {profile}',
@@ -96,9 +105,24 @@ const zh: Dict = {
   'openclaw.versionFail': 'openclaw --version 退出码 {code}',
   'openclaw.unavailable': 'openclaw 不可用：{err}',
   'openclaw.homeLabel': 'OPENCLAW 配置目录',
-  'openclaw.homeDesc': '留空即跟随环境目录（默认在安装目录下的 env/openclaw）',
+  'openclaw.homeDesc': '留空即使用 openclaw CLI 的默认目录 ~/.openclaw，与终端共用同一套配置',
   'openclaw.pageDesc':
-    '由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置目录跟随环境目录',
+    '由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置目录默认 ~/.openclaw',
+  'openclaw.configUnreadable': '无法解析 openclaw 配置（{path}），已中止以免覆盖：{err}',
+  'openclaw.tokenWriteFail': '写入 Gateway 令牌失败：{err}',
+
+  'node.notWin': '内置 Node 自动更新目前仅支持 Windows',
+  'node.badVersion': '无效的 Node 版本号：{v}',
+  'node.indexFail': '无法获取 Node 版本列表：{err}',
+  'node.downloading': '正在下载 Node {v} …',
+  'node.downloadingPct': '正在下载 Node {v}… {p}%（{mb} MB）',
+  'node.extracting': '下载完成，正在解压校验…',
+  'node.tooSmall': '下载文件过小（{n} 字节），已放弃',
+  'node.downloadFail': '下载失败（已尝试全部镜像）：{err}',
+  'node.extractFail': '解压失败：{err}',
+  'node.verifyFail': '解压校验失败：未找到 node.exe 或版本不符',
+  'node.locked': '旧运行时文件被占用，请先停止使用内置 Node 的页面/终端后重试：{err}',
+  'node.done': '内置 Node 已更新为 {v}',
 
   'install.importedDesc': '导入时由容器生成',
   'install.repoUrlInvalid': '仓库地址需为 https 或 git@ 形式的 git URL',
@@ -113,6 +137,11 @@ const zh: Dict = {
 
   'git.notRepo': '不是 git 仓库（本地目录安装或已移除）',
   'git.asarDownloaded': '已下载 v{version}，重启应用后生效（启动异常会自动回滚）',
+  'git.asarFetching': '正在从 release 分支下载更新…{percent}',
+  'git.asarExtracting': '正在写入 app.asar：{percent}',
+  'git.asarResuming': '从断点继续写入 app.asar：{percent}',
+  'git.asarSizeUnknown': '无法确定 app.asar 大小，下载已中止',
+  'git.asarSizeMismatch': 'app.asar 大小校验失败（应为 {want} 字节，实得 {got}），请重试',
   'git.noOrigin': '无 origin 远端',
   'git.branchMissing': '远端没有分支 {branch}',
   'git.dirtySkipped': '工作区有未提交改动，已跳过（请手动处理）',
@@ -142,6 +171,10 @@ const en: Dict = {
   'tray.stop': 'Stop {name}',
   'tray.start': 'Start {name}',
   'tray.quit': 'Quit container (stops all node processes)',
+  'tray.quitConfirmTitle': 'Quit container',
+  'tray.quitConfirm': 'Quitting stops all running node processes and pages. Quit anyway?',
+  'tray.quitYes': 'Quit',
+  'tray.quitNo': 'Cancel',
   'tray.tooltip': 'Desktop Console · {n} page(s) running',
   'dialog.title': 'DSH Container',
   'dialog.chooseDir': 'Choose the local project folder to host',
@@ -182,6 +215,12 @@ const en: Dict = {
   'page.logReady': '[container] Ready, listening on port {port}',
   'page.dshProfileNotReady': 'dsh profile was not ready within {sec}s (port {port})',
   'page.logStopping': '[container] Stopping…',
+  'page.logRetryAfterReclaim':
+    '[container] A stale process was holding the resource; reclaimed it and retrying the start…',
+  'page.logCrashRestart':
+    '[container] Process died unexpectedly (code={code}); auto-restarting in {sec}s (attempt {n}/{max})…',
+  'page.crashGiveUp':
+    'Exited abnormally {max} times in a row; auto-restart stopped — open the log folder from Help to investigate',
 
   'dsh.pnpmMissing': 'pnpm not found (dsh manages plugins with pnpm). Run: npm install -g pnpm',
   'dsh.invalidProfile': 'Invalid profile name: {profile}',
@@ -211,9 +250,25 @@ const en: Dict = {
   'openclaw.unavailable': 'openclaw is unavailable: {err}',
   'openclaw.homeLabel': 'OPENCLAW config dir',
   'openclaw.homeDesc':
-    'Empty follows the environment directory (env/openclaw under the install dir by default)',
+    'Empty uses openclaw’s default ~/.openclaw — the same config store the CLI uses',
   'openclaw.pageDesc':
-    'Container-managed openclaw gateway (bundled latest); the main window embeds its Control UI; the config dir follows the environment directory',
+    'Container-managed openclaw gateway (bundled latest); the main window embeds its Control UI; the config dir defaults to ~/.openclaw',
+  'openclaw.configUnreadable':
+    'Could not parse the openclaw config ({path}); aborted to avoid overwriting it: {err}',
+  'openclaw.tokenWriteFail': 'Failed to write the gateway token: {err}',
+
+  'node.notWin': 'Bundled-Node auto-update currently supports Windows only',
+  'node.badVersion': 'Invalid Node version: {v}',
+  'node.indexFail': 'Cannot fetch the Node version list: {err}',
+  'node.downloading': 'Downloading Node {v} …',
+  'node.downloadingPct': 'Downloading Node {v}… {p}% ({mb} MB)',
+  'node.extracting': 'Download complete; extracting and verifying…',
+  'node.tooSmall': 'Downloaded file too small ({n} bytes), aborted',
+  'node.downloadFail': 'Download failed on every mirror: {err}',
+  'node.extractFail': 'Extraction failed: {err}',
+  'node.verifyFail': 'Post-extract check failed: node.exe missing or version mismatch',
+  'node.locked': 'The previous runtime is still in use — stop pages/terminals using the bundled Node and retry: {err}',
+  'node.done': 'Bundled Node updated to {v}',
 
   'install.importedDesc': 'Generated by the container when the project was imported',
   'install.repoUrlInvalid': 'The repository URL must be an https or git@ git URL',
@@ -227,7 +282,14 @@ const en: Dict = {
   'install.illegalPageId': 'Illegal page id',
 
   'git.notRepo': 'Not a git repository (installed from a local folder, or removed)',
-  'git.asarDownloaded': 'v{version} downloaded; restart the app to apply (auto-rolls back if it fails to boot)',
+  'git.asarDownloaded':
+    'v{version} downloaded; restart the app to apply (auto-rolls back if it fails to boot)',
+  'git.asarFetching': 'Downloading update from the release branch…{percent}',
+  'git.asarExtracting': 'Writing app.asar: {percent}',
+  'git.asarResuming': 'Resuming app.asar write from the breakpoint: {percent}',
+  'git.asarSizeUnknown': 'Could not determine the app.asar size; download aborted',
+  'git.asarSizeMismatch':
+    'app.asar size check failed (expected {want} bytes, got {got}); please retry',
   'git.noOrigin': 'No origin remote',
   'git.branchMissing': 'The remote has no branch {branch}',
   'git.dirtySkipped': 'The working tree has uncommitted changes; skipped (handle manually)',

@@ -1,16 +1,26 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { Moon, Refresh, Sunny } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 import whaleIcon from '../assets/whale.png'
+import PageSwitcher from './PageSwitcher.vue'
+import WindowControls from './WindowControls.vue'
+import { appPanelKey, parseAppPanel, type ExternalSite } from '../../../shared/types'
 import type { PageState } from '../stores/pages'
-import type { ExternalSite } from '../../../shared/types'
 import { t } from '../i18n'
 
 export type PanelKind =
-  'view' | 'pages' | 'external' | 'dsh' | 'openclaw' | 'updates' | 'about' | 'apps'
+  | 'system'
+  | 'pages'
+  | 'external'
+  | 'dsh'
+  | 'openclaw'
+  | 'settings'
+  | 'help'
+  | 'apps'
+  | 'view'
 
 const props = defineProps<{
-  current: PanelKind | null
+  current: string | null
   runningCount: number
   totalCount: number
   outdatedCount: number
@@ -23,23 +33,31 @@ const props = defineProps<{
   switcherTitle: string
   isMaximized: boolean
   canOperate: boolean
+  /** Webview history availability for the top-bar back / forward buttons. */
+  canGoBack: boolean
+  canGoForward: boolean
+  /** Whether the top-bar back / forward buttons should be shown (external address only). */
+  showNav: boolean
   terminalMode: boolean
   externalSites: ExternalSite[]
 }>()
 
 const emit = defineEmits<{
-  open: [panel: PanelKind | null]
-  'open-panel': [panel: PanelKind]
+  open: [panel: string | null]
+  'open-panel': [panel: string]
   'toggle-theme': []
   'select-page': [id: string]
   'start-page': [id: string]
   'open-terminal': [id: string]
   'preview-site': [id: string]
-  manage: []
   reload: []
-  inspect: []
+  'go-back': []
+  'go-forward': []
   detach: []
+  inspect: []
+  'open-logs': []
   'restart-terminal': []
+  'restart-app': []
 }>()
 
 const themeLabel = computed(
@@ -51,16 +69,27 @@ const themeLabel = computed(
     })[props.themeMode]
 )
 
+/**
+ * MenuBar owns the group triggers, their dropdown lists, and the centered floating
+ * panel. The page switcher and the window controls live in their own components
+ * (PageSwitcher / WindowControls); "one floating surface at a time" is coordinated
+ * via the `opening` event (switcher → us) and `switcherRef.close()` (us → switcher).
+ */
+
 /** A group entry either previews/starts something (acts immediately) or opens its panel. */
 interface MenuItem {
   id: string
   title: string
   sub?: string
-  kind?: 'status' | 'ok' | 'err' | 'warn'
+  kind?: 'status' | 'ok' | 'err' | 'warn' | 'dim'
+  /** Renders as a colored pill (e.g. the pending-update count) on the row's right end. */
+  count?: string
   disabled?: boolean
+  /** Highlights the row while its panel is the open one. */
+  active?: boolean
   run?: () => void
-  /** Set = the row opens that group's floating panel (used by the 应用 list). */
-  panel?: PanelKind
+  /** Set = the row opens that panel (a PanelKind or an `app:<id>` key). */
+  panel?: string
 }
 
 interface MenuGroup {
@@ -75,154 +104,164 @@ interface MenuGroup {
   sepBefore?: 'runtime'
 }
 
-/** Traffic-light / status labels for tooltips, in the active language. */
-const statusText = (s: string): string =>
-  ({
-    running: t('menu.running'),
-    starting: t('menu.starting'),
-    error: t('menu.failed'),
-    stopped: t('menu.stopped')
-  })[s] || s
-
-/** Terminal-kind pages start their own CLI in the full-surface terminal, not the webview. */
-const pickPage =
-  (p: PageState): (() => void) =>
-  () =>
-    p.kind === 'terminal' ? emit('open-terminal', p.id) : emit('select-page', p.id)
-
-/**
- * A page is only switchable once it actually runs — web/server pages must be started
- * first (the row then offers a ▶ button). Terminal pages have no port to wait for and
- * external pages open in the OS browser, so neither needs a start step.
- */
-function needsStart(p: PageState): boolean {
-  return !p.external && p.kind !== 'terminal' && p.status !== 'running'
-}
-
-function onStartPage(p: PageState): void {
-  if (props.busyPages?.[p.id]) return
-  emit('start-page', p.id)
-}
 
 const groups = computed<MenuGroup[]>(() => {
-  const running = props.pages.filter((p) => p.status === 'running' && !p.external)
   return [
-    // ── 视图/页面内容 ──
     {
       kind: 'view',
       label: t('menu.view'),
       items: [],
+      // App managers (built-in + dynamic `manageAsApp`). View chrome like reload /
+      // detach / theme lives as icon buttons in the right-end chrome instead.
       actions: [
+        { id: 'dsh', title: t('menu.appDsh'), panel: 'dsh' as string },
+        { id: 'openclaw', title: t('menu.appOpenclaw'), panel: 'openclaw' as string },
+        { id: 'external', title: t('menu.externalAddress'), panel: 'external' as string },
+        // Dynamic agent apps (container.json `manageAsApp`) — one settings row each.
+        ...props.pages
+          .filter((p) => p.manageAsApp && p.kind !== 'dsh' && p.kind !== 'openclaw')
+          .map((p) => ({
+            id: `appcfg-${p.id}`,
+            title: `${p.name} · ${t('menu.appSettings')}`,
+            panel: appPanelKey(p.id)
+          }))
+      ]
+    },
+    {
+      // 页面 + 设置 merged into one 系统 entry: the trigger always drops a list with
+      // one row per panel (desktop-menu semantics — the trigger never opens a panel).
+      kind: 'system',
+      label: t('menu.system'),
+      items: [],
+      actions: [
+        { id: 'sys-settings', title: t('menu.settings'), panel: 'settings' as string },
+        { id: 'sys-pages', title: t('menu.pages'), panel: 'pages' as string }
+      ]
+    },
+    {
+      kind: 'help',
+      label: t('menu.help'),
+      items: [],
+      actions: [
+        // The row IS the merged about/updates panel; opening it must not require a
+        // second click on the panel's own 检查更新 button. The pending-update count
+        // lives here (as the row's trailing hint) instead of on the 帮助 trigger badge.
         {
-          id: 'reload',
-          title: t('menu.reloadCurrent'),
-          disabled: !props.canOperate,
-          run: () => emit('reload')
+          id: 'about',
+          title: t('menu.helpAboutUpdates'),
+          panel: 'help' as const,
+          count: props.outdatedCount ? String(props.outdatedCount) : undefined
         },
+        { id: 'logs', title: t('menu.openLogsDir'), run: () => emit('open-logs') },
         {
           id: 'inspect',
           title: t('menu.debugDevtools'),
           disabled: !props.canOperate,
           run: () => emit('inspect')
+        },
+        {
+          id: 'restart-app',
+          title: t('menu.restartApp'),
+          run: () => emit('restart-app')
         }
       ]
-    },
-    {
-      kind: 'pages',
-      label: t('menu.pages'),
-      items: running.map((p) => ({
-        id: p.id,
-        title: p.name,
-        sub: `${p.port}`,
-        kind: 'ok' as const,
-        run: pickPage(p)
-      }))
-    },
-    {
-      kind: 'apps',
-      label: t('menu.apps'),
-      items: [
-        ...props.externalSites.map((s) => ({
-          id: s.id,
-          title: s.name,
-          run: () => emit('preview-site', s.id)
-        })),
-        { id: 'external', title: t('menu.externalAddress'), panel: 'external' as const },
-        { id: 'dsh', title: 'DSH', panel: 'dsh' as const },
-        { id: 'openclaw', title: 'OpenClaw', panel: 'openclaw' as const }
-      ]
-    },
-    // ── 应用 ──
-    { kind: 'about', label: t('menu.about'), items: [] },
-    {
-      kind: 'updates',
-      label: t('menu.updates'),
-      badge: props.outdatedCount ? String(props.outdatedCount) : '',
-      items: [],
-      // sepBefore: 'runtime'
     }
   ]
 })
 
-/* ---- dropdowns (page switcher + group item lists). Only THESE dismiss on click-away;
-       the floating panels carry a ✕ and Esc closes them too. ---- */
-/** Groups whose drop list opens other groups' panels: highlight the parent while any child shows. */
-const childKinds: Partial<Record<PanelKind, PanelKind[]>> = {
-  apps: ['external', 'dsh', 'openclaw']
+/** Floating-panel a11y: the panel is a named dialog; focus can be moved into it. */
+const pagesById = (id: string): PageState | undefined => props.pages.find((p) => p.id === id)
+/** Panels opened from a 视图 row (not a top-level group) still need a header title. */
+const childPanelLabels = computed<Record<string, string>>(() => ({
+  dsh: t('menu.appDsh'),
+  openclaw: t('menu.appOpenclaw'),
+  external: t('menu.externalAddress'),
+  // Reached through the 系统 drop list, so these panels are "children" too.
+  settings: t('menu.settings'),
+  pages: t('menu.pages')
+}))
+const panelLabel = computed(() => {
+  const appId = parseAppPanel(props.current)
+  if (appId) return pagesById(appId)?.name || t('menu.apps')
+  const g = groups.value.find((gr) => gr.kind === props.current)
+  if (g) return g.label
+  return (props.current && childPanelLabels.value[props.current]) || ''
+})
+
+/**
+ * The page switcher also lists saved external sites, so a newly added address is
+ * switchable/displayable from 「选择页面」 like any hosted page (embedded in the webview).
+ */
+const switcherPages = computed<PageState[]>(() => [
+  ...props.pages,
+  ...props.externalSites.map((s) => ({
+    id: s.id,
+    name: s.name,
+    dir: '',
+    port: 0,
+    startCommand: '',
+    external: true,
+    externalUrl: s.url,
+    status: 'running' as const
+  }))
+])
+
+/* ---- group dropdown lists. Only THESE dismiss on click-away; the floating panels
+       carry a ✕ and Esc closes them too. The page switcher owns its own open state. ---- */
+/** Groups whose dropdown opens another panel: highlight the parent while any child shows. */
+const childKinds: Partial<Record<PanelKind, string[]>> = {
+  view: ['external', 'dsh', 'openclaw'],
+  system: ['settings', 'pages'],
+  help: ['help']
 }
 
 function isActive(g: MenuGroup): boolean {
   // Mutually exclusive: an open dropdown list owns the highlight and hides the
   // panel surface (`props.current && !listGroup` in the template), so while
   // `listGroup` is set no other group may light up. Otherwise the open panel —
-  // or the group owning it via `childKinds` — is the single active trigger.
+  // or the group owning it via `childKinds` / the `app:` prefix — is the single
+  // active trigger.
   if (listGroup.value) return listGroup.value === g.kind
   const cur = props.current
-  return cur !== null && (cur === g.kind || (childKinds[g.kind]?.includes(cur) ?? false))
+  if (!cur) return false
+  if (g.kind === 'view' && parseAppPanel(cur)) return true
+  return cur === g.kind || (childKinds[g.kind]?.includes(cur) ?? false)
 }
 
-const openDropdown = ref<'switcher' | 'menu' | null>(null)
+const switcherRef = ref<InstanceType<typeof PageSwitcher> | null>(null)
 /** Which group's list is currently shown (independent of the open panel). */
 const listGroup = ref<PanelKind | null>(null)
 const anchorEl = ref<HTMLElement | null>(null)
-
-function toggleSwitcher(ev: MouseEvent): void {
-  const el = ev.currentTarget as HTMLElement
-  if (openDropdown.value === 'switcher') return closeDropdowns()
-  openDropdown.value = 'switcher'
-  anchorEl.value = el
-  emit('open', null) // one floating surface at a time
-}
+/** Set when a list switch already happened on mousedown, so the follow-up click of the
+    same trigger must not toggle it back closed. Consumed (cleared) by `toggleMenu`. */
+const switchViaMousedown = ref<PanelKind | null>(null)
 
 function toggleMenu(group: MenuGroup, ev: MouseEvent): void {
   const el = ev.currentTarget as HTMLElement
   if (group.items.length || group.actions?.length) {
-    // Plain toggle semantics: a trigger opens its surface on first click and a
-    // re-click closes everything — no swapping between panel and drop list.
+    // The list was just switched to this group on mousedown — keep it open, swallow the
+    // click so it doesn't read as a re-click-to-close.
+    if (switchViaMousedown.value === group.kind) {
+      switchViaMousedown.value = null
+      return
+    }
+    // Desktop-menu semantics: triggers with a list always toggle the drop list;
+    // their panels are reached from a row inside it (never opened by the trigger).
     if (listGroup.value === group.kind) {
       // The list is showing: peel it (a panel underneath resurfaces).
       closeDropdowns()
       return
     }
-    if (props.current === group.kind) {
-      // Its panel is up: re-click closes the panel entirely.
-      closeDropdowns()
-      emit('open', null)
-      return
-    }
     closeDropdowns()
-    if (group.kind !== 'apps') emit('open', group.kind)
-    else {
-      // 'apps' has no panel of its own — the click toggles its quick list.
-      openDropdown.value = 'menu'
-      listGroup.value = group.kind
-      anchorEl.value = el
-    }
+    switcherRef.value?.close() // one floating surface at a time
+    listGroup.value = group.kind
+    anchorEl.value = el
     return
   }
   if (props.current === group.kind) emit('open', null)
   else {
     closeDropdowns()
+    switcherRef.value?.close()
     emit('open', group.kind)
   }
 }
@@ -234,23 +273,39 @@ function runItem(item: MenuItem): void {
 }
 
 function closeDropdowns(): void {
-  openDropdown.value = null
   listGroup.value = null
   anchorEl.value = null
+  // Drop any pending switch so a click that never landed can't linger and swallow the
+  // next toggle-close.
+  switchViaMousedown.value = null
 }
 
 /** Capture phase, so a trigger's own re-click toggles before this sees the mousedown. */
 function onDocumentMousedown(ev: MouseEvent): void {
-  if (!openDropdown.value) return
+  if (!listGroup.value) return
   const target = ev.target as Node
-  if (anchorEl.value?.contains(target)) return
   if ((target as HTMLElement)?.closest?.('.dropdown')) return
+  // Pressing another top-menu trigger: switch the open list to it here, atomically. This
+  // keeps `listGroup` non-null across the mousedown→click gap, so `isActive` never falls
+  // back to `props.current` (which flashed whichever trigger owned the open panel) and the
+  // old list closes in the same tick instead of lingering through the button press.
+  const trig = (target as HTMLElement)?.closest?.('.group-trigger') as HTMLElement | null
+  if (trig) {
+    const kind = trig.dataset.group as PanelKind | undefined
+    if (kind && kind !== listGroup.value) {
+      listGroup.value = kind
+      anchorEl.value = trig
+      switchViaMousedown.value = kind
+    }
+    // Re-pressing the already-open trigger: leave it; the click toggles it closed.
+    return
+  }
   closeDropdowns()
 }
 
 /** Esc peels the topmost surface: drop list first; App.vue closes the panel. */
 function onDocumentKeydown(ev: KeyboardEvent): void {
-  if (ev.key === 'Escape' && openDropdown.value) closeDropdowns()
+  if (ev.key === 'Escape' && listGroup.value) closeDropdowns()
 }
 
 document.addEventListener('mousedown', onDocumentMousedown, true)
@@ -259,16 +314,6 @@ onBeforeUnmount(() => {
   document.removeEventListener('mousedown', onDocumentMousedown, true)
   document.removeEventListener('keydown', onDocumentKeydown)
 })
-
-async function minimize(): Promise<void> {
-  await window.container.minimizeWindow().catch(() => undefined)
-}
-async function maximize(): Promise<void> {
-  await window.container.toggleMaximize().catch(() => undefined)
-}
-async function close(): Promise<void> {
-  await window.container.closeWindow().catch(() => undefined)
-}
 </script>
 
 <template>
@@ -284,54 +329,22 @@ async function close(): Promise<void> {
       </span>
     </div>
 
-    <div class="switcher-wrap">
-      <button
-        class="switcher"
-        :class="{ open: openDropdown === 'switcher' }"
-        @click="toggleSwitcher"
-      >
-        <span class="switcher-title">{{ props.switcherTitle }}</span>
-        <span class="caret">▾</span>
-      </button>
-      <div v-if="openDropdown === 'switcher'" class="dropdown switcher-menu">
-        <div
-          v-for="p in props.pages"
-          :key="p.id"
-          class="drop-item switcher-item"
-          :class="{ active: p.id === props.activePageId }"
-        >
-          <button
-            class="row-name"
-            :disabled="needsStart(p)"
-            :title="needsStart(p) ? t('menu.notRunningHint') : statusText(p.status)"
-            @click="
-              () => {
-                closeDropdowns()
-                pickPage(p)()
-              }
-            "
-          >
-            {{ p.name }}
-          </button>
-          <button
-            v-if="needsStart(p)"
-            class="row-start"
-            :title="
-              props.busyPages?.[p.id] ? t('menu.startingTip') : `${t('menu.start')} ${p.name}`
-            "
-            @click="onStartPage(p)"
-          >
-            <span v-if="props.busyPages?.[p.id]" class="mini-spinner" />
-            <svg v-else width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
-              <path d="M1.6 0.7 L8 4.5 L1.6 8.3 Z" fill="currentColor" />
-            </svg>
-          </button>
-          <!-- Traffic light: running=green, error=red, starting=amber, stopped=grey. -->
-          <i class="status-dot" :class="`dot-${p.status}`" :title="statusText(p.status)" />
-        </div>
-        <div v-if="!props.pages.length" class="drop-empty">{{ t('menu.switcherEmpty') }}</div>
-      </div>
-    </div>
+    <PageSwitcher
+      ref="switcherRef"
+      :pages="switcherPages"
+      :active-page-id="props.activePageId"
+      :busy-pages="props.busyPages"
+      :title="props.switcherTitle"
+      @opening="
+        () => {
+          closeDropdowns()
+          emit('open', null) // one floating surface at a time
+        }
+      "
+      @select-page="(id) => emit('select-page', id)"
+      @start-page="(id) => emit('start-page', id)"
+      @open-terminal="(id) => emit('open-terminal', id)"
+    />
 
     <nav class="groups">
       <template v-for="g in groups" :key="g.kind">
@@ -339,31 +352,43 @@ async function close(): Promise<void> {
         <div class="group-wrap">
           <button
             class="group-trigger"
+            :data-group="g.kind"
             :class="{ active: isActive(g) }"
+            :aria-haspopup="'menu'"
+            :aria-expanded="isActive(g)"
             @click="toggleMenu(g, $event)"
           >
             {{ g.label }}
             <span v-if="g.badge" class="badge">{{ g.badge }}</span>
           </button>
           <div
-            v-if="
-              openDropdown === 'menu' &&
-              listGroup === g.kind &&
-              (g.items.length || g.actions?.length)
-            "
+            v-if="listGroup === g.kind && (g.items.length || g.actions?.length)"
             class="dropdown drop-list"
+            role="menu"
+            :aria-label="g.label"
           >
             <button
               v-for="a in g.actions || []"
               :key="a.id"
               class="drop-item"
+              :class="{ active: a.panel ? a.panel === props.current : false }"
+              role="menuitem"
               :disabled="a.disabled"
               @click="runItem(a)"
             >
-              {{ a.title }}
+              <span>{{ a.title }}</span>
+              <span v-if="a.count" class="badge drop-badge">{{ a.count }}</span>
+              <small v-if="a.sub" :class="a.kind ? `st-${a.kind}` : ''">{{ a.sub }}</small>
             </button>
             <div v-if="g.actions?.length && g.items.length" class="drop-sep" />
-            <button v-for="it in g.items" :key="it.id" class="drop-item" @click="runItem(it)">
+            <button
+              v-for="it in g.items"
+              :key="it.id"
+              class="drop-item"
+              :class="{ active: it.panel ? it.panel === props.current : false }"
+              role="menuitem"
+              @click="runItem(it)"
+            >
               <span>{{ it.title }}</span>
               <small v-if="it.sub" :class="it.kind ? `st-${it.kind}` : ''">{{ it.sub }}</small>
             </button>
@@ -375,106 +400,55 @@ async function close(): Promise<void> {
     <div class="spacer" />
 
     <div v-if="props.terminalMode" class="webview-actions">
-      <button class="act-btn" :title="t('menu.restartTerminal')" @click="emit('restart-terminal')">
+      <button
+        class="act-btn"
+        :title="t('menu.restartTerminal')"
+        :aria-label="t('menu.restartTerminal')"
+        @click="emit('restart-terminal')"
+      >
         <el-icon><Refresh /></el-icon>
       </button>
     </div>
 
-    <div class="window-controls">
-      <button
-        v-if="props.canOperate"
-        class="win-btn"
-        :title="t('menu.reloadCurrent')"
-        @click="emit('reload')"
-      >
-        <el-icon><Refresh /></el-icon>
-      </button>
-      <button
-        class="win-btn theme-toggle"
-        :title="t('menu.themeToggle', { mode: themeLabel })"
-        @click="emit('toggle-theme')"
-      >
-        <el-icon><Sunny v-if="props.isDark" /><Moon v-else /></el-icon>
-      </button>
-      <button
-        v-if="props.canOperate"
-        class="win-btn"
-        :title="t('menu.detach')"
-        @click="emit('detach')"
-      >
-        <svg width="11" height="11" viewBox="0 0 11 11">
-          <path
-            d="M4.5 1.5 H1.5 V9.5 H9.5 V6.5"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-          />
-          <path
-            d="M6 1.5 H9.5 V5 M9.5 1.5 L5 6"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-          />
-        </svg>
-      </button>
-      <button class="win-btn" :title="t('menu.minimize')" @click="minimize">
-        <svg width="10" height="10" viewBox="0 0 10 10">
-          <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.2" />
-        </svg>
-      </button>
-      <button
-        class="win-btn"
-        :title="props.isMaximized ? t('menu.restore') : t('menu.maximize')"
-        @click="maximize"
-      >
-        <svg v-if="!props.isMaximized" width="10" height="10" viewBox="0 0 10 10">
-          <rect
-            x="1.5"
-            y="1.5"
-            width="7"
-            height="7"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-          />
-        </svg>
-        <svg v-else width="10" height="10" viewBox="0 0 10 10">
-          <rect
-            x="1"
-            y="3"
-            width="6"
-            height="6"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-          />
-          <path d="M3 3 V1 H9 V7 H7" fill="none" stroke="currentColor" stroke-width="1.2" />
-        </svg>
-      </button>
-      <button class="win-btn close" :title="t('menu.close')" @click="close">
-        <svg width="10" height="10" viewBox="0 0 10 10">
-          <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" stroke-width="1.2" />
-        </svg>
-      </button>
-    </div>
+    <WindowControls
+      :is-dark="props.isDark"
+      :theme-label="themeLabel"
+      :can-operate="props.canOperate"
+      :can-go-back="props.canGoBack"
+      :can-go-forward="props.canGoForward"
+      :show-nav="props.showNav"
+      :is-maximized="props.isMaximized"
+      @toggle-theme="emit('toggle-theme')"
+      @reload="emit('reload')"
+      @go-back="emit('go-back')"
+      @go-forward="emit('go-forward')"
+      @detach="emit('detach')"
+    />
 
     <!-- Centered floating panels; they close via ✕ / Esc / re-click, never click-away. -->
     <div v-if="props.current && !listGroup" class="panel-anchor">
-      <div class="panel-card">
+      <div class="panel-card" role="dialog" aria-modal="false" :aria-label="panelLabel">
         <div class="panel-head">
-          <span class="panel-title">{{ groups.find((g) => g.kind === props.current)?.label }}</span>
-          <button class="panel-close" :title="t('menu.closeEsc')" @click="emit('open', null)">
+          <span class="panel-title">{{ panelLabel }}</span>
+          <button
+            class="panel-close"
+            :title="t('menu.closeEsc')"
+            :aria-label="t('menu.closeEsc')"
+            @click="emit('open', null)"
+          >
             ✕
           </button>
         </div>
         <div class="panel-body">
-          <slot v-if="props.current === 'view'" name="view" />
+          <template v-if="parseAppPanel(props.current)">
+            <slot name="app" :page-id="parseAppPanel(props.current)" />
+          </template>
           <slot v-else-if="props.current === 'pages'" name="pages" />
           <slot v-else-if="props.current === 'external'" name="external" />
           <slot v-else-if="props.current === 'dsh'" name="dsh" />
           <slot v-else-if="props.current === 'openclaw'" name="openclaw" />
-          <slot v-else-if="props.current === 'updates'" name="updates" />
-          <slot v-else-if="props.current === 'about'" name="about" />
+          <slot v-else-if="props.current === 'settings'" name="settings" />
+          <slot v-else-if="props.current === 'help'" name="help" />
         </div>
       </div>
     </div>
@@ -543,39 +517,12 @@ async function close(): Promise<void> {
   line-height: 17px;
 }
 
-.switcher-wrap,
 .group-wrap {
   position: relative;
 }
 
-.switcher {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  font-size: 12.5px;
-  padding: 3px 10px;
-  cursor: pointer;
-}
-
-.switcher.open,
 .group-trigger.active {
   border-color: var(--accent);
-}
-
-.switcher-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.caret {
-  font-size: 10px;
-  color: var(--text-dim);
 }
 
 .groups {
@@ -615,6 +562,13 @@ async function close(): Promise<void> {
   line-height: 12px;
 }
 
+/* The pending-update count on the 关于与更新 row: keep the pill at the row's right end. */
+.drop-badge {
+  margin-left: auto;
+  padding: 1px 7px;
+  line-height: 14px;
+}
+
 .spacer {
   flex: 1;
 }
@@ -648,35 +602,6 @@ async function close(): Promise<void> {
   color: var(--text-dim);
   opacity: 0.55;
   cursor: not-allowed;
-}
-
-.window-controls {
-  display: flex;
-  align-items: stretch;
-  height: 100%;
-  margin-right: -4px;
-}
-
-.win-btn {
-  width: 38px;
-  height: 100%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.win-btn:hover {
-  background: var(--surface-2);
-}
-
-.win-btn.close:hover {
-  background: var(--err);
-  color: #fff;
 }
 
 .dropdown {
@@ -722,64 +647,6 @@ async function close(): Promise<void> {
   color: var(--accent);
 }
 
-/* Switcher rows: name (switch) + ▶ (start) + traffic light. */
-.switcher-item {
-  gap: 8px;
-}
-
-.row-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  background: none;
-  border: none;
-  color: inherit;
-  font-size: 12.5px;
-  text-align: left;
-  padding: 0;
-  cursor: pointer;
-}
-
-.row-name:disabled {
-  color: var(--text-dim);
-  cursor: not-allowed;
-}
-
-.row-start {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: none;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--surface-2);
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.row-start:hover {
-  border-color: var(--accent);
-}
-
-.mini-spinner {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1.5px solid var(--border);
-  border-top-color: var(--accent);
-  animation: mini-spin 0.7s linear infinite;
-}
-
-@keyframes mini-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .drop-item small {
   color: var(--text-dim);
   font-size: 11px;
@@ -810,31 +677,6 @@ async function close(): Promise<void> {
 }
 .st-status {
   color: var(--accent);
-}
-
-.status-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--text-dim);
-}
-.dot-running {
-  background: var(--ok);
-  box-shadow: 0 0 6px var(--ok);
-}
-.dot-error {
-  background: var(--err);
-  box-shadow: 0 0 6px var(--err);
-}
-.dot-starting {
-  background: var(--warn);
-  animation: dot-blink 1s ease-in-out infinite;
-}
-@keyframes dot-blink {
-  50% {
-    opacity: 0.3;
-  }
 }
 
 .panel-anchor {

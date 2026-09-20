@@ -15,10 +15,10 @@
         "zh": "OPENCLAW 配置目录",
         "en": "OPENCLAW config directory"
       },
-      "defaultPath": "{envRoot}/openclaw",
+      "defaultPath": "~/.openclaw",
       "description": {
-        "zh": "留空即跟随环境目录（默认在安装目录下的 env/openclaw）",
-        "en": "Leave empty to follow the environment directory (env/openclaw under the install dir by default)"
+        "zh": "留空即使用 openclaw CLI 的默认目录 ~/.openclaw，与终端里的 openclaw 共用同一套配置",
+        "en": "Leave empty to use openclaw's default ~/.openclaw — the same config store the CLI uses"
       }
     }
   ]

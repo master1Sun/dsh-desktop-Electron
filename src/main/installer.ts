@@ -1,9 +1,11 @@
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFile, readdir, stat } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import { simpleGit } from 'simple-git'
 import { readPageMeta, BUILTIN_PAGE_IDS, type ContainerManifest } from './pages'
 import { getSettings, isValidPort, updateSettings } from './store'
-import { normalizeRepoUrl, cloneWithAuthFallback } from './git-updates'
+import { normalizeRepoUrl, cloneWithAuthFallback, type CloneProgress } from './git-updates'
+import type { InstallProgress } from '../shared/types'
 import { m, msgIn } from './i18n'
 
 /** A local folder path the user meant instead of a URL (e.g. D:\GitProject\dsh-desktop-Electron). */
@@ -45,23 +47,111 @@ function applyPortOverride(dirName: string, port?: number): void {
   updateSettings({ pagePorts: { ...getSettings().pagePorts, [dirName]: Number(port) } })
 }
 
-/** Imported projects that ship no container.json get a minimal one with the form-entered port,
-    so the config lives with the project. Existing manifests are never rewritten.
+/** Frameworks whose presence means “this project serves HTTP” → embed it as a `page`.
+    A `bin`-only package without any of these is treated as a CLI (`terminal`). */
+const SERVER_DEP_MARKERS = [
+  'express',
+  'koa',
+  'fastify',
+  '@nestjs',
+  'hapi',
+  'restify',
+  'egg',
+  'midway',
+  'next',
+  'nuxt',
+  'astro',
+  'remix',
+  'hono',
+  'polka',
+  'socket.io',
+  'strapi',
+  'adonis',
+  'feathers',
+  'micro',
+  'http-server',
+  'graphql-yoga',
+  'body-parser'
+]
 
-    The description is seeded in *both* languages: the file is the user's own and nothing
-    rewrites it afterwards, so a single-language snapshot would pin this page to whichever
-    language happened to be active at import time. */
+interface NpmPackage {
+  bin?: string | Record<string, string>
+  scripts?: Record<string, string>
+  dependencies?: Record<string, string>
+  devDependencies?: Record<string, string>
+}
+
+function readPkgSafe(dir: string): NpmPackage | null {
+  try {
+    return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8')) as NpmPackage
+  } catch {
+    return null
+  }
+}
+
+/** Any server framework in dependencies/devDependencies marks the project as a web program. */
+function hasServerDependency(pkg: NpmPackage | null): boolean {
+  if (!pkg) return false
+  const all = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
+  return Object.keys(all).some((n) => {
+    const k = n.toLowerCase()
+    return SERVER_DEP_MARKERS.some((mk) => k === mk || k.startsWith(`${mk}/`) || k.includes(mk))
+  })
+}
+
+/** A runnable command for a CLI project in the embedded terminal: prefer a `start` script,
+    else invoke the declared `bin` entry directly. Returns null when neither is present. */
+function cliStartCommand(dir: string, pkg: NpmPackage | null): string | null {
+  if (pkg?.scripts?.start) return 'npm run start'
+  const bin = pkg?.bin
+  let rel: string | null = null
+  if (typeof bin === 'string') rel = bin
+  else if (bin && typeof bin === 'object') rel = Object.values(bin)[0] ?? null
+  if (rel) {
+    const clean = rel.replace(/^\.\//, '')
+    if (existsSync(join(dir, clean))) return `node ${clean}`
+  }
+  return null
+}
+
+/**
+ * An imported project that ships no container.json gets a generated one, so the config lives
+ * with the project and the Pages panel shows a concrete kind instead of a bare guess. We infer
+ * CLI vs web program from package.json:
+ *   - a `bin`-only package with no HTTP-framework dependency is a command-line tool → run it in
+ *     the embedded terminal (kind 'terminal' + a start command; no port to wait for);
+ *   - anything else is treated as an embeddable web program (kind 'page'), carrying the form port.
+ * The manifest is written BEFORE readPageMeta validates the clone, so a CLI (which has no server
+ * entry to infer) is not mistaken for a broken page and rolled back. Existing manifests are
+ * never rewritten, and the description is seeded in *both* languages so the page is not pinned to
+ * whichever language happened to be active at import time.
+ */
 function seedContainerManifest(pagesDir: string, dirName: string, port?: number): void {
-  if (!isValidPort(port)) return
-  const metaFile = join(pagesDir, dirName, 'container.json')
+  const dir = join(pagesDir, dirName)
+  const metaFile = join(dir, 'container.json')
   if (existsSync(metaFile)) return
+  const pkg = readPkgSafe(dir)
   const manifest: ContainerManifest = {
     name: dirName,
-    port: Number(port),
     description: {
       zh: msgIn('zh', 'install.importedDesc'),
       en: msgIn('en', 'install.importedDesc')
     }
+  }
+  if (pkg?.bin && !hasServerDependency(pkg)) {
+    const start = cliStartCommand(dir, pkg)
+    if (start) {
+      manifest.kind = 'terminal'
+      manifest.startCommand = start
+    } else {
+      // A CLI we cannot derive a runnable command for: leave it a plain page so the usual
+      // entry inference (server.js / index.js / start script) still has its chance.
+      manifest.kind = 'page'
+      if (isValidPort(port)) manifest.port = Number(port)
+    }
+  } else {
+    manifest.kind = 'page'
+    if (isValidPort(port)) manifest.port = Number(port)
   }
   writeFileSync(metaFile, JSON.stringify(manifest, null, 2) + '\n', 'utf-8')
 }
@@ -80,8 +170,11 @@ export async function installFromGit(
   repoUrl: string,
   name?: string,
   port?: number,
-  originUrl?: string
+  originUrl?: string,
+  onProgress?: (p: InstallProgress) => void
 ): Promise<string> {
+  const emit = (p: Partial<InstallProgress>): void =>
+    onProgress?.({ op: 'git', phase: 'preparing', ...p } as InstallProgress)
   const url = validateRepoUrl(repoUrl)
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
   if (!dirName) {
@@ -93,7 +186,10 @@ export async function installFromGit(
   if (existsSync(target)) throw new Error(m('dsh.pageExists', { id: dirName }))
   mkdirSync(pagesDir, { recursive: true })
   // Deep clone (not --depth 1): a later divergent history needs real merge bases to update.
-  await cloneWithAuthFallback(target, url)
+  emit({ phase: 'preparing' })
+  await cloneWithAuthFallback(target, url, (g) =>
+    emit({ phase: 'receiving', percent: g.percent, message: gitCaption(g) })
+  )
   if (originUrl && normalizeRepoUrl(originUrl) !== normalizeRepoUrl(url)) {
     try {
       await simpleGit({ baseDir: target }).remote(['set-url', 'origin', originUrl.trim()])
@@ -101,7 +197,11 @@ export async function installFromGit(
       /* keep the cloned URL as origin */
     }
   }
+  emit({ phase: 'validating' })
   applyPortOverride(dirName, port) // before validation: an entered port stands in for a missing declared one
+  // Generate the manifest BEFORE validation so a CLI (no inferable server entry) is recognised
+  // as `terminal` here instead of being rolled back below as an apparently unrunnable page.
+  seedContainerManifest(pagesDir, dirName, port)
   try {
     readPageMeta(pagesDir, dirName)
   } catch (err) {
@@ -110,8 +210,86 @@ export async function installFromGit(
     updateSettings({ pagePorts })
     throw new Error(m('install.clonedNoEntry', { err: (err as Error).message }))
   }
-  seedContainerManifest(pagesDir, dirName, port)
+  emit({ phase: 'finalizing' })
+  emit({ phase: 'done', percent: 100 })
   return dirName
+}
+
+/** A compact one-line caption from a git progress tick ("receiving (560/1234) 45%"). */
+function gitCaption(g: CloneProgress): string {
+  const cnt = g.total ? ` (${g.processed ?? 0}/${g.total})` : ''
+  return `${g.stage}${cnt} ${g.percent}%`
+}
+
+interface CopyEntry {
+  abs: string
+  rel: string
+  dir: boolean
+  size: number
+}
+
+/**
+ * Walk `root` collecting the files/dirs to copy and their total byte size, skipping
+ * `node_modules` and `.git` at any depth — the same exclusions the old `cpSync` filter
+ * applied. Sizes let the copy report a byte-weighted percentage.
+ */
+async function planCopy(root: string): Promise<{ entries: CopyEntry[]; totalBytes: number }> {
+  const entries: CopyEntry[] = []
+  let totalBytes = 0
+  const walk = async (dir: string, relBase: string): Promise<void> => {
+    const items = await readdir(dir, { withFileTypes: true })
+    items.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    for (const it of items) {
+      if (it.name === 'node_modules' || it.name === '.git') continue
+      const abs = join(dir, it.name)
+      const rel = relBase ? `${relBase}/${it.name}` : it.name
+      if (it.isDirectory()) {
+        entries.push({ abs, rel, dir: true, size: 0 })
+        await walk(abs, rel)
+      } else if (it.isFile()) {
+        const s = await stat(abs)
+        entries.push({ abs, rel, dir: false, size: s.size })
+        totalBytes += s.size
+      }
+    }
+  }
+  await walk(root, '')
+  return { entries, totalBytes }
+}
+
+/** Copy `srcDir` into `target` file-by-file, emitting byte-weighted progress (throttled). */
+async function copyDirWithProgress(
+  srcDir: string,
+  target: string,
+  emit: (p: Partial<InstallProgress>) => void
+): Promise<void> {
+  const { entries, totalBytes } = await planCopy(srcDir)
+  mkdirSync(target, { recursive: true })
+  let received = 0
+  let last = 0
+  const report = (force = false): void => {
+    const now = Date.now()
+    if (!force && now - last < 100) return
+    last = now
+    emit({
+      phase: 'receiving',
+      percent: totalBytes ? Math.min(100, Math.floor((received / totalBytes) * 100)) : 100,
+      received,
+      total: totalBytes
+    })
+  }
+  report(true)
+  for (const e of entries) {
+    const dest = join(target, e.rel)
+    if (e.dir) {
+      if (!existsSync(dest)) mkdirSync(dest, { recursive: true })
+      continue
+    }
+    await copyFile(e.abs, dest)
+    received += e.size
+    report()
+  }
+  report(true)
 }
 
 export async function installFromLocalDir(
@@ -119,8 +297,11 @@ export async function installFromLocalDir(
   srcDir: string,
   name?: string,
   port?: number,
-  originUrl?: string
+  originUrl?: string,
+  onProgress?: (p: InstallProgress) => void
 ): Promise<string> {
+  const emit = (p: Partial<InstallProgress>): void =>
+    onProgress?.({ op: 'dir', phase: 'preparing', ...p } as InstallProgress)
   if (!existsSync(srcDir) || !existsSync(join(srcDir, '.')))
     throw new Error(m('install.srcMissing', { dir: srcDir }))
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
@@ -128,12 +309,13 @@ export async function installFromLocalDir(
   if (!dirName) throw new Error(m('install.dirNameFail'))
   const target = join(pagesDir, dirName)
   if (existsSync(target)) throw new Error(m('dsh.pageExists', { id: dirName }))
-  cpSync(srcDir, target, {
-    recursive: true,
-    filter: (src) =>
-      !src.includes(`${join('', 'node_modules')}`) && !/[\\/]\.git([\\/]|$)/.test(src)
-  })
+  emit({ phase: 'preparing' })
+  await copyDirWithProgress(srcDir, target, emit)
+  emit({ phase: 'validating' })
   applyPortOverride(dirName, port) // before validation: an entered port stands in for a missing declared one
+  // Generate the manifest BEFORE validation so a CLI is detected as `terminal` and survives
+  // the entry check below (a rolled-back import removes the whole dir, seeded manifest included).
+  seedContainerManifest(pagesDir, dirName, port)
   try {
     readPageMeta(pagesDir, dirName)
   } catch (err) {
@@ -142,7 +324,7 @@ export async function installFromLocalDir(
     updateSettings({ pagePorts })
     throw err
   }
-  seedContainerManifest(pagesDir, dirName, port)
+  emit({ phase: 'finalizing' })
   const origin = (originUrl || '').trim()
   if (origin) {
     try {
@@ -152,6 +334,7 @@ export async function installFromLocalDir(
       console.warn('[installer] adoptOrigin failed (ignored):', (err as Error).message)
     }
   }
+  emit({ phase: 'done', percent: 100 })
   return dirName
 }
 

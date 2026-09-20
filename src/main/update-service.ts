@@ -2,15 +2,14 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
-import { simpleGit } from 'simple-git'
-import { checkOne, performUpdate as gitPull, normalizeRepoUrl } from './git-updates'
-import { applyAsarUpdate, checkAsarUpdate } from './asar-updates'
+import { checkOne, performUpdate as gitPull } from './git-updates'
+import { applyAsarUpdate, checkAsarUpdate, type ProgressCb } from './asar-updates'
 import { getNodeExePath } from './node-runtime'
 import { getDshStatus, repairPnpmCmd } from './dsh'
 import { openclawVersion } from './openclaw'
-import { resolveInstallDir, resolveProjectDir } from './store'
+import { resolveInstallDir } from './store'
 import { m } from './i18n'
-import { CONTAINER_REPO_URL, type PageMeta, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
+import { type PageMeta, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
 
 const REGISTRY = process.env.npm_config_registry || 'https://registry.npmmirror.com/'
 const DSH_PKG = '@deepseek-ai/dsh'
@@ -144,39 +143,15 @@ async function checkBuiltin(
   }
 }
 
-/** Canonical remote URL of a checkout ('' when there is none). */
-async function originOf(dir: string): Promise<string> {
-  try {
-    const remotes = await simpleGit({ baseDir: dir }).getRemotes(true)
-    return remotes.find((r) => r.name === 'origin')?.refs.fetch || ''
-  } catch {
-    return ''
-  }
-}
-
+/** The unified, cached set of update rows: container self-update, imported pages, dsh, openclaw. */
 async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
   const name = containerName()
   return Promise.all([
-    // Packaged installs update over-the-air (release branch → app.asar swap at boot).
-    // A dev checkout is the user's own working tree — leave it to their editor/CLI.
-    app.isPackaged
-      ? checkAsarUpdate(name, resolveInstallDir())
-      : (async (): Promise<UpdateCheckResult> => {
-          const r = await checkOne(name, resolveProjectDir(), true)
-          if (r.ok) {
-            const origin = await originOf(resolveProjectDir())
-            const sameRepo =
-              normalizeRepoUrl(origin).toLowerCase() ===
-              normalizeRepoUrl(CONTAINER_REPO_URL).toLowerCase()
-            return {
-              ...r,
-              source: 'git' as const,
-              action: 'pull' as const,
-              canAutoUpdate: sameRepo
-            }
-          }
-          return { ...r, source: 'git' as const, canAutoUpdate: false }
-        })(),
+    // Both packaged and dev detect the container's own update the same way: compare the
+    // running version against the `release` branch tip (over-the-air app.asar channel).
+    // A packaged install swaps the asar at boot; a dev checkout downloads/stages it but
+    // boot.cjs is not on its launch path, so applying takes effect only once packaged.
+    checkAsarUpdate(name, resolveInstallDir()),
     ...pages.filter((p) => !p.id.startsWith('__')).map(checkPage),
     checkBuiltin(
       m('upd.dshName'),
@@ -245,7 +220,9 @@ async function runNpm(
     child.on('close', (code) => resolve({ code: code ?? -1, stderr }))
   })
   if (res.code !== 0)
-    throw new Error(`${res.stderr.slice(-500) || m('upd.npmExitCode', { code: res.code })}（${args.join(' ')}）`)
+    throw new Error(
+      `${res.stderr.slice(-500) || m('upd.npmExitCode', { code: res.code })}（${args.join(' ')}）`
+    )
 }
 
 async function updateDshSelf(): Promise<UpdateOutcome> {
@@ -259,8 +236,7 @@ async function updateDshSelf(): Promise<UpdateOutcome> {
     writeFileSync(join(root, '.npmrc'), `registry=${REGISTRY}\n`)
     const node = getNodeExePath()
     const npmCli = bundledNpmCli()
-    if (!existsSync(npmCli))
-      throw new Error(m('upd.npmMissing', { npm: npmCli }))
+    if (!existsSync(npmCli)) throw new Error(m('upd.npmMissing', { npm: npmCli }))
     await runNpm(
       node,
       [
@@ -296,9 +272,7 @@ async function updateDshSelf(): Promise<UpdateOutcome> {
     repairPnpmCmd(root)
   } catch (err) {
     const msg = (err as Error).message || String(err)
-    const hint = /EPERM|EACCES|EROFS|permission/i.test(msg)
-      ? m('upd.dshDirNotWritable')
-      : ''
+    const hint = /EPERM|EACCES|EROFS|permission/i.test(msg) ? m('upd.dshDirNotWritable') : ''
     return { name, ok: false, updated: false, error: msg + hint }
   }
   const after = (await getDshStatus()).version
@@ -323,8 +297,7 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
     writeFileSync(join(root, '.npmrc'), `registry=${REGISTRY}\n`)
     const node = getNodeExePath()
     const npmCli = bundledNpmCli()
-    if (!existsSync(npmCli))
-      throw new Error(m('upd.npmMissing', { npm: npmCli }))
+    if (!existsSync(npmCli)) throw new Error(m('upd.npmMissing', { npm: npmCli }))
     await runNpm(
       node,
       [
@@ -341,9 +314,7 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
     )
   } catch (err) {
     const msg = (err as Error).message || String(err)
-    const hint = /EPERM|EACCES|EROFS|permission/i.test(msg)
-      ? m('upd.openclawDirNotWritable')
-      : ''
+    const hint = /EPERM|EACCES|EROFS|permission/i.test(msg) ? m('upd.openclawDirNotWritable') : ''
     return { name, ok: false, updated: false, error: msg + hint }
   }
   const after = openclawVersion()
@@ -358,12 +329,15 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
   }
 }
 
-export async function performUpdate(target: UpdateCheckResult): Promise<UpdateOutcome> {
+export async function performUpdate(
+  target: UpdateCheckResult,
+  onProgress?: ProgressCb
+): Promise<UpdateOutcome> {
   switch (target.action) {
     case 'pull':
       return gitPull({ name: target.name, dir: target.dir })
     case 'apply-asar':
-      return applyAsarUpdate(target.name)
+      return applyAsarUpdate(target.name, onProgress)
     case 'reprovision':
       return target.packageName === DSH_PKG ? updateDshSelf() : reprovisionOpenclaw()
     case 'manual':

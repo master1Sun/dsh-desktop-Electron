@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -203,6 +204,21 @@ function newTerminal(): void {
   store.start(target, store.activeSession?.title ?? t('terminal.rootTitle')).catch(() => undefined)
 }
 
+/** 关闭全部会话会 kill 所有还在运行的 shell，属于破坏性操作 → 二次确认。 */
+async function closeAll(): Promise<void> {
+  if (!store.sessions.length) return
+  try {
+    await ElMessageBox.confirm(t('terminal.closeAllConfirm'), t('terminal.closeAllTitle'), {
+      type: 'warning',
+      confirmButtonText: t('terminal.closeAllConfirmBtn'),
+      cancelButtonText: t('common.cancel')
+    })
+  } catch {
+    return
+  }
+  store.closeAll()
+}
+
 onBeforeUnmount(() => {
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeUp)
@@ -253,7 +269,7 @@ onBeforeUnmount(() => {
           size="small"
           text
           :title="t('terminal.closeAll')"
-          @click.stop="store.closeAll()"
+          @click.stop="closeAll"
         >
           <el-icon><Close /></el-icon>
         </el-button>

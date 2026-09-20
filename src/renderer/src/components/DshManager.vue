@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Hide, Refresh, View } from '@element-plus/icons-vue'
 import { usePagesStore } from '../stores/pages'
-import type { DshPluginInfo, DshPluginUpdate, DshTokenResult } from '@shared/types'
+import { useDshStore } from '../stores/dsh'
+import EmptyState from './EmptyState.vue'
+import type { DshPluginInfo, DshTokenResult } from '@shared/types'
 import { t } from '../i18n'
 
 const pagesStore = usePagesStore()
+const dsh = useDshStore()
 
 interface DshStatusInfo {
   installed: boolean
@@ -21,13 +24,6 @@ interface DshStatusInfo {
 const status = ref<DshStatusInfo | null>(null)
 const plugins = ref<DshPluginInfo[]>([])
 const loading = ref(false)
-const busy = ref<string | null>(null)
-
-/** per-plugin new-version hint (name → { available, latest, channel }); channel is which update path to take */
-const updates = ref<
-  Record<string, { available: boolean; latest?: string; channel?: 'npm' | 'git' }>
->({})
-const checking = ref(false)
 
 /** the dsh web UI's auth token, read from the running page's launch URL (null while unavailable) */
 const tokenState = ref<DshTokenResult | null>(null)
@@ -54,13 +50,45 @@ const maskedToken = computed(() => {
 
 /** profile being managed; dsh ships web/acp/headless/sdk templates */
 const profile = ref('web')
-const installForm = reactive({ spec: '', gitUrl: '' })
-const updateDialog = reactive({
-  visible: false,
-  name: '',
-  channel: 'npm' as 'npm' | 'git',
-  gitUrl: ''
+const installForm = reactive({ spec: '' })
+
+/* ---- operation progress: elapsed timer + label for install/update/uninstall ----
+   `busy` / `startedAt` live in the dsh store so the strip survives a panel close/reopen; here
+   we only tick a 1s clock and derive the elapsed seconds from the stored start time. */
+const nowTick = ref(Date.now())
+let opTimer: ReturnType<typeof setInterval> | null = null
+function stopTicker(): void {
+  if (opTimer) {
+    clearInterval(opTimer)
+    opTimer = null
+  }
+}
+watch(
+  () => dsh.busy,
+  (val) => {
+    stopTicker()
+    if (!val) return
+    nowTick.value = Date.now()
+    opTimer = setInterval(() => (nowTick.value = Date.now()), 1000)
+  },
+  { immediate: true }
+)
+onBeforeUnmount(stopTicker)
+
+/** Human-readable label for the current long-running operation, or empty. */
+const opLabel = computed(() => {
+  const b = dsh.busy
+  if (!b) return ''
+  if (b.startsWith('install:')) return t('dshMgr.opInstalling', { spec: b.slice(8) })
+  if (b.startsWith('uninstall:')) return t('dshMgr.opUninstalling', { name: b.slice(10) })
+  return ''
 })
+const opElapsed = computed(() =>
+  dsh.busy && dsh.startedAt ? Math.max(0, Math.floor((nowTick.value - dsh.startedAt) / 1000)) : 0
+)
+const opElapsedText = computed(() =>
+  opElapsed.value > 0 ? t('dshMgr.opElapsed', { n: opElapsed.value }) : ''
+)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -72,8 +100,6 @@ async function load(): Promise<void> {
       const p = await window.container.dshListPlugins(profile.value)
       if (p.ok) plugins.value = (p.data as DshPluginInfo[]) || []
       else ElMessage.warning(p.error || t('dshMgr.msgPluginListFail'))
-      // non-blocking: fill in "new version" hints after the table is already visible
-      void checkUpdates()
     }
     // Independent of the CLI install state: the token lives on the running page, not in the package.
     void loadToken()
@@ -111,36 +137,6 @@ async function copyToken(): Promise<void> {
   }
 }
 
-/** fetch per-plugin new-version hints (npm latest vs git HEAD) and index them by name */
-async function checkUpdates(): Promise<void> {
-  if (!status.value?.installed) return
-  checking.value = true
-  try {
-    const res = await window.container.dshCheckUpdates(profile.value)
-    if (res.ok) {
-      const map: Record<string, { available: boolean; latest?: string; channel?: 'npm' | 'git' }> =
-        {}
-      for (const u of (res.data as DshPluginUpdate[]) || []) {
-        map[u.name] = { available: u.updateAvailable, latest: u.latest, channel: u.channel }
-      }
-      updates.value = map
-    }
-  } catch {
-    /* non-fatal: update hints simply stay empty */
-  } finally {
-    checking.value = false
-  }
-}
-
-/** resolved update hint for a plugin row, or a safe "no update" default */
-function updateInfo(name: string): {
-  available: boolean
-  latest?: string
-  channel?: 'npm' | 'git'
-} {
-  return updates.value[name] || { available: false }
-}
-
 onMounted(load)
 
 async function install(): Promise<void> {
@@ -149,18 +145,14 @@ async function install(): Promise<void> {
     ElMessage.warning(t('dshMgr.msgEnterPackage'))
     return
   }
-  busy.value = `install:${spec}`
-  try {
-    const res = await window.container.dshInstallPlugin(spec, profile.value)
-    if (!res.ok) throw new Error(res.error || t('dshMgr.msgInstallFail'))
-    ElMessage.success(t('dshMgr.msgInstalled', { spec }))
-    installForm.spec = ''
-    await load()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    busy.value = null
+  const res = await dsh.installPlugin(spec, profile.value)
+  if (!res.ok) {
+    ElMessage.error(res.error || t('dshMgr.msgInstallFail'))
+    return
   }
+  ElMessage.success(t('dshMgr.msgInstalled', { spec }))
+  installForm.spec = ''
+  await load()
 }
 
 async function uninstall(p: DshPluginInfo): Promise<void> {
@@ -177,81 +169,19 @@ async function uninstall(p: DshPluginInfo): Promise<void> {
   } catch {
     return
   }
-  busy.value = `uninstall:${p.name}`
-  try {
-    const res = await window.container.dshUninstallPlugin(p.name, profile.value)
-    if (!res.ok) throw new Error(res.error || t('dshMgr.msgUninstallFail'))
-    ElMessage.success(t('dshMgr.msgUninstalled', { name: p.name }))
-    await load()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    busy.value = null
+  const res = await dsh.uninstallPlugin(p.name, profile.value)
+  if (!res.ok) {
+    ElMessage.error(res.error || t('dshMgr.msgUninstallFail'))
+    return
   }
-}
-
-/** Extract the repo portion of a git dependency spec (drops the #ref), so the update dialog can prefill it */
-function gitRepoFromSpec(version: string): string {
-  // the lookahead keeps the optional `.git` from letting the non-greedy repo name
-  // stop early (`aegis` would otherwise match as `a` and yield a nonexistent repo)
-  const gh = /^github:([\w.-]+\/[\w.-]+?)(?:\.git)?(?=$|#)/.exec(version)
-  if (gh) return `github:${gh[1]}`
-  const n = /^(?:git\+)?(https?:\/\/[^\s#]+\.git)/.exec(version)
-  if (n) return n[1]
-  return version
-}
-
-function openUpdate(p: DshPluginInfo): void {
-  const info = updateInfo(p.name)
-  updateDialog.visible = true
-  updateDialog.name = p.name
-  // route to the channel the new version was detected on
-  updateDialog.channel = info.channel === 'git' ? 'git' : 'npm'
-  // prefill the git URL (repo + latest tag) so a git update is one click
-  updateDialog.gitUrl =
-    info.channel === 'git'
-      ? `${gitRepoFromSpec(p.version)}${info.latest ? '#' + info.latest : ''}`
-      : ''
-}
-
-async function doUpdate(): Promise<void> {
-  busy.value = `update:${updateDialog.name}`
-  try {
-    const res = await window.container.dshUpdatePlugin(
-      updateDialog.name,
-      updateDialog.channel,
-      updateDialog.channel === 'git' ? updateDialog.gitUrl.trim() : undefined,
-      profile.value
-    )
-    if (!res.ok) throw new Error(res.error || t('dshMgr.msgUpdateFail'))
-    ElMessage.success(String(res.data || t('dshMgr.msgUpdated')))
-    updateDialog.visible = false
-    await load()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    busy.value = null
-  }
-}
-
-async function updateAll(): Promise<void> {
-  busy.value = 'update-all'
-  try {
-    const res = await window.container.dshUpdateAll(profile.value)
-    if (!res.ok) throw new Error(res.error || t('dshMgr.msgUpdateAllFail'))
-    ElMessage.success(t('dshMgr.msgUpdateAllDone'))
-    await load()
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    busy.value = null
-  }
+  ElMessage.success(t('dshMgr.msgUninstalled', { name: p.name }))
+  await load()
 }
 
 async function openTerminal(): Promise<void> {
   if (!status.value?.installed) return
   try {
-    await pagesStore.openTerminal('dsh-root', t('dshMgr.dshRootName'))
+    await pagesStore.openTerminal('dsh-root', `DSH（${profile.value}）`)
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
@@ -263,11 +193,14 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
 
 <template>
   <div class="dsh-manager" v-loading="loading && !status">
-    <div v-if="status && !status.installed" class="empty">
-      <p>{{ status.error || t('dshMgr.emptyError') }}</p>
-      <code>npm install @deepseek-ai/dsh@0.1.6-alpha.2</code>
+    <EmptyState
+      v-if="status && !status.installed"
+      :description="status.error || t('dshMgr.emptyError')"
+      hint="npm install @deepseek-ai/dsh@0.1.6-alpha.2"
+      :tone="status.error ? 'error' : 'muted'"
+    >
       <el-button size="small" text @click="load">{{ t('dshMgr.recheck') }}</el-button>
-    </div>
+    </EmptyState>
 
     <template v-else-if="status">
       <el-alert
@@ -303,11 +236,7 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
           }}</el-tag>
         </div>
         <div class="head-actions">
-          <el-button size="small" text :loading="busy === 'update-all'" @click="updateAll">
-            {{ t('dshMgr.updateAll') }}
-          </el-button>
           <el-button size="small" text @click="load">{{ t('common.refresh') }}</el-button>
-          <span v-if="checking" class="foot-hint">{{ t('dshMgr.checking') }}</span>
         </div>
       </div>
       <div class="sub">{{ t('dshMgr.profileDir', { dir: status.profileDir }) }}</div>
@@ -355,7 +284,7 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
             @keyup.enter="install"
           >
             <template #append>
-              <el-button :loading="busy === `install:${installForm.spec.trim()}`" @click="install">
+              <el-button :loading="dsh.busy === `install:${installForm.spec.trim()}`" @click="install">
                 {{ t('dshMgr.install') }}
               </el-button>
             </template>
@@ -363,25 +292,19 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
         </el-form-item>
       </el-form>
 
+      <!-- Operation progress strip: visible while any long-running CLI op is active -->
+      <div v-if="opLabel" class="op-progress">
+        <span class="op-spinner" />
+        <span class="op-text">{{ opLabel }}</span>
+        <span v-if="opElapsedText" class="op-elapsed">{{ opElapsedText }}</span>
+      </div>
+
       <el-table :data="plugins" size="small" :empty-text="t('dshMgr.pluginsEmpty')">
         <el-table-column :label="t('dshMgr.colPlugin')" min-width="220">
           <template #default="{ row }">
             <div class="cell-name">{{ row.name }}</div>
             <div class="cell-sub">
               <span>{{ row.version }}</span>
-              <el-tag
-                v-if="updateInfo(row.name).available"
-                class="upd-tag"
-                size="small"
-                type="warning"
-                effect="dark"
-                round
-                :title="t('dshMgr.updatableTip')"
-                @click="openUpdate(row)"
-                >{{
-                  t('dshMgr.updatableTag', { latest: updateInfo(row.name).latest ?? '' })
-                }}</el-tag
-              >
             </div>
           </template>
         </el-table-column>
@@ -392,22 +315,14 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
             }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column :label="t('dshMgr.colActions')" width="240" align="right">
+        <el-table-column :label="t('dshMgr.colActions')" width="120" align="right">
           <template #default="{ row }">
             <template v-if="row.source === 'profile'">
               <el-button
                 size="small"
                 text
-                :type="updateInfo(row.name).available ? 'warning' : 'primary'"
-                @click="openUpdate(row)"
-              >
-                {{ t('dshMgr.update') }}
-              </el-button>
-              <el-button
-                size="small"
-                text
                 type="danger"
-                :loading="busy === `uninstall:${row.name}`"
+                :loading="dsh.busy === `uninstall:${row.name}`"
                 @click="uninstall(row)"
               >
                 {{ t('dshMgr.uninstall') }}
@@ -424,33 +339,6 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
         </el-button>
       </div>
     </template>
-
-    <el-dialog v-model="updateDialog.visible" :title="t('dshMgr.updateDialogTitle')" width="460px">
-      <div class="upd-name">{{ updateDialog.name }}</div>
-      <el-radio-group v-model="updateDialog.channel" style="margin: 10px 0">
-        <el-radio-button value="npm">{{ t('dshMgr.fromNpm') }}</el-radio-button>
-        <el-radio-button value="git">{{ t('dshMgr.fromGit') }}</el-radio-button>
-      </el-radio-group>
-      <el-input
-        v-if="updateDialog.channel === 'git'"
-        v-model="updateDialog.gitUrl"
-        :placeholder="t('dshMgr.gitUrlPlaceholder')"
-      />
-      <div v-else class="cell-sub">
-        {{ t('dshMgr.npmUpdateDesc', { name: updateDialog.name }) }}
-      </div>
-      <template #footer>
-        <el-button @click="updateDialog.visible = false">{{
-          t('dshMgr.updateDialogCancel')
-        }}</el-button>
-        <el-button
-          type="primary"
-          :loading="busy === `update:${updateDialog.name}`"
-          @click="doUpdate"
-          >{{ t('dshMgr.updateDialogStart') }}</el-button
-        >
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -516,18 +404,6 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
   gap: 6px;
   flex-wrap: wrap;
 }
-.upd-tag {
-  cursor: pointer;
-  font-weight: 600;
-  /* It is a button in all but name (it opens the update dialog), so it gets the same
-     press response as one — the global .el-button rule cannot reach a tag. */
-  transition:
-    background-color 0.16s ease,
-    transform 0.09s ease;
-}
-.upd-tag:active {
-  transform: scale(0.94);
-}
 .foot-label {
   font-size: 12px;
   color: var(--text-dim);
@@ -543,17 +419,47 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
   font-size: 12px;
   color: var(--text-dim);
 }
-.empty {
-  text-align: center;
-  color: var(--text-dim);
-  padding: 26px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: center;
-}
 .upd-name {
   font-weight: 600;
+}
+
+/* Operation progress strip */
+.op-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.op-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: op-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+.op-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+@keyframes op-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .dsh-footer {
   display: flex;

@@ -12,15 +12,18 @@
 - **git 更新检测**：容器自身 + pages 下各项目统一检测（ls-remote vs 本地 HEAD，5min 缓存），一键 `git pull --ff-only`，脏仓库自动跳过。
 - **DSH 插件管理**：内置 `@deepseek-ai/dsh` CLI，可在设置页对某个 dsh profile 安装 / 卸载 / 更新插件（npm 或 git 通道），并把 profile 注册成一个可启停的页面在主界面内嵌打开。详见下文。
 - **OpenClaw Gateway 托管**：随包自带最新版 `openclaw`（npm 全局安装到 `resources/openclaw/`），把它的 gateway 注册成一个可启停页面，运行后主界面内嵌打开 Control UI；配置目录默认跟随环境目录（安装目录下的 `env/openclaw`）。详见下文。
-- **打开系统终端**：页面标签栏、DSH 面板与「Pages 管理」都有「终端」按钮，点一下即在对应项目目录拉起一个真实控制台，PATH 已前置内置 node（和 pnpm），不再叠加容器自己的弹窗。
+- **打开系统终端**：页面切换器、DSH 面板与「页面」面板都有「终端」按钮，点一下即在对应项目目录拉起一个真实控制台，PATH 已前置内置 node（和 pnpm），不再叠加容器自己的弹窗。
 - **纯 CLI 项目整屏终端**：`kind: "terminal"` 的页面被选中时直接占满主区跑其启动命令，退出即返回，详见「Page 约定」。
 - **内置插件市场工作台**：默认工作台就是渲染层内置的 DSH 插件市场静态页（`MarketView.vue`，顶部为工作台描述）——不注册 page、不占端口、不随启动运行，从「页面」面板安装插件项目。
 - **启动即运行二件套**：新装实例的 `autoStartPages` 默认 `['openclaw','dsh-web']`（`src/main/store.ts` 的 DEFAULTS）。主进程 `PageRegistry.autoStart()` 启动 openclaw gateway 与 dsh-web；`autoStart()` 会跳过 `kind:"terminal"` 的页（由渲染层在 `App.vue` 挂载后交给 `CliTerminalView` 执行）。已装实例沿用自己持久化的设置，不会被覆盖。
 - **内置页面随包分发**：`pages/` 经 extraResources 打进 `resources/pages`，首启由 `ensureBuiltinPages()`（仅 `app.isPackaged`）拷贝 dsh-web 到 userData/pages（openclaw 由 `ensureDefaultOpenclawPage()` 运行时生成），升级安装不丢；升级时还会自动清理已退役的 `pages/codex` 与 `pages/dsh-plugin-market` 目录及其设置残留。
-- **顶部细菜单栏**：`视图 / Pages / DSH / OpenClaw / 更新 / 帮助` 收进一条 ~34px 的菜单，点击弹出浮层面板，不占用布局——内容区始终满高展示页面，内嵌 `<webview>` 不会因打开设置而卸载。详见下文。
-- **页面标签栏（第二行）**：紧接菜单栏下方的一条同高工具栏（`components/PageTabs.vue`），把原先左侧 PAGES 侧栏与主界面内的 stage-bar 全部收进来：页面下拉选择器（状态点 + DSH 徽标 + 端口/pid + 启停/自动启动按钮）、外部地址与最近使用、当前标题/URL、重载 / 调试内嵌页 / 打开终端 / 系统浏览器四个按钮。主界面 `HomeView.vue` 由此变成纯内容容器（webview 或欢迎页）。
+- **顶部细菜单栏（单行）**：`视图 / Pages / 应用 / 关于 / 更新` 收进一条 ~38px 的菜单，点击弹出居中的浮层面板，不占用布局——内容区始终满高展示页面，内嵌 `<webview>` 不会因打开面板而卸载。页面切换器（下拉：状态点 + 端口 + 启停 ▶）与窗口控制按钮（重载 / 主题 / 分离 / 最小化 / 最大化 / 关闭）都在这一条里，分别拆为 `components/PageSwitcher.vue` 与 `components/WindowControls.vue`，`MenuBar.vue` 只保留分组与浮层协调。任意时刻只允许一个浮层 surface（下拉列表 / 面板 / 命令面板互斥）。详见下文。
+- **崩溃自动恢复 + page 健康守护**：node 子进程在「已跑起来后」异常退出（非手动停止、非优雅退出）时，`PageRegistry` 按 2s / 5s / 15s 指数退避自动重启；一旦稳定运行 5 分钟则清零崩溃计数，超过退避上限则放弃并标红。手动 `stop()` 或从未启动成功的页不会被守护循环拉起（避免坏配置死循环）。状态经 `PageState.crashes` / `nextRestartAt` 上报，页面切换器的状态点 tooltip 会显示「已崩溃 N 次 / 正在自动重启」。可在设置页 `crashAutoRestart` 关闭。
+- **定时静默更新检查**：主进程启动后 45s 做一次、之后每 30min 静默 `checkUpdates()`，结果经 `IPC.OnUpdateResults` 广播给各窗口刷新更新角标——只更新计数、不弹窗打扰；用户仍可在「更新」面板手动「立即检查」。
+- **全局命令面板（Ctrl+K / Cmd+K）**：一个可模糊搜索的统一入口，聚合「切页 / 启停 / 打开终端 / 打开外部站点 / 进入各面板 / 重载 / 切主题 / 分离 / 开发者工具 / 检查更新」。方向键导航、Enter 执行、Esc 关闭；每个命令都复用顶栏同款处理函数，不重复逻辑。见 `components/CommandPalette.vue`。
+- **打包后日志落盘**：无新依赖的 file logger（`src/main/logger.ts`）把主进程 console 镜像到 `userData/logs/main.log`（5MB 轮转），各 page 子进程输出写 `userData/logs/pages/<id>.log`；设置页可一键「打开日志目录」，弥补打包后无控制台的可观测性。
 - **主题**：`auto / light / dark` 三态，容器界面跟随选择即时切换（`auto` 监听系统 `prefers-color-scheme`）；顶栏右侧图标一键在亮暗间循环。内嵌 page 的主题由该页面自身决定，不受容器影响。
-- **开发者模式（F12）**：`F12` 开关容器界面自身的 DevTools（分离窗口）；页面标签栏上的同名义按钮则针对当前内嵌页面，便于调试 page 的前端。
+- **开发者模式（F12）**：`F12` 开关容器界面自身的 DevTools（分离窗口）；顶栏上的调试按钮则针对当前内嵌页面，便于调试 page 的前端。
 
 ## 快速开始
 
@@ -63,7 +66,7 @@ node node_modules/@deepseek-ai/dsh/lib/bin.js plugin --profile web add @someorg/
 ```
 
 - **profile 模型**：一个 profile 是 `<DSH Home>/profiles/<name>` 目录，内含 `package.json`（out-of-tree 插件依赖 + `dsh.profile.bundles` 层栈）。dsh 自带 `web / acp / headless / sdk` 模板，首次使用时由 dsh 自身初始化——容器不会伪造这些目录。
-- **DSH Home（容器）**：默认跟随环境目录（`<环境根目录>/dsh`）；若已存在旧的 `~/.dsh` 则继续沿用，避免丢 profile。设置页「环境目录」可切换到独立目录（`~` 会展开）。
+- **DSH Home（容器）**：默认使用 dsh CLI 自己的 `~/.dsh`，与终端里的 dsh 共用同一套 profile。设置页「环境目录 → DSH 配置目录」可切换到任意独立目录（`~` 会展开）。
 - **安装 / 卸载 / 更新**：npm 通道走 `pnpm add|remove|update`；git 通道先 `git ls-remote <url> HEAD` 取远端 sha，再以 `<url>#<sha>` 重装，因此"更新到最新提交"是可复现的。
 - **pnpm 随包托管**：`dsh plugin` 转发给 PATH 上的 `pnpm`。`npm run setup:dsh` 会把 pnpm（latest）与 dsh 装进同一个 prefix（`resources/dsh/`），容器探测该目录并前置进 PATH，因此零宿主前置条件。**Windows 陷阱**：pnpm v12 包内 `pnpm/pn/pnpx/pnx`（无扩展名）只是 Node shebang 占位文件，原生 `pnpm.exe` 由其 preinstall 从可选依赖 `@pnpm/exe.win32-x64` 硬链过来——而 `--ignore-scripts` 跳过了这一步，npm 生成的根 `pnpm.cmd` 直接 exec 占位文件时 CreateProcess 无法解析 → "不是内部或外部命令"。修复分两层：setup-dsh.mjs 与运行时自升级（`repairPnpmCmd`）先重链原生 exe 覆盖占位文件；若主机缺该可选包，则兜底把 `pnpm.cmd` 重写为「node 直跑 `bin/pnpm.mjs`」。系统全局 pnpm 仍作兜底探测（`npm prefix -g`）。
 - **在容器中打开 web UI**：点「把当前 profile 加入我的页面」会在 `pages/dsh-<profile>/container.json` 写入 `{"kind":"dsh","dsh":{"profile":"web","port":5173}}`（只写清单，不复制 profile）。启动后容器解析 dsh 打印的就绪行 `dsh web: http://127.0.0.1:<port>/?token=…`，把这个带 token 的 URL 交给 `<webview>` —— 裸端口会 401。
@@ -76,24 +79,22 @@ openclaw 是多渠道 AI 网关，npm 包 `openclaw`（本项目自带 latest）
 
 - **自带安装**：`npm run setup:openclaw` 用内置 node 跑 `npm install -g openclaw@latest --ignore-scripts`，`npm_config_prefix` 指向 `resources/openclaw`，实际入口是 `resources/openclaw/node_modules/openclaw/openclaw.mjs`，随安装包一起分发（`electron-builder.yml` 的 extraResources）。openclaw 有 postinstall 生命周期脚本，故强制 `--ignore-scripts`。**构建期自动 provision**：`npm run build` 经 `prebuild` 钩子触发本脚本，且幂等——已存在入口即跳过（`--force` 或 `DSH_OPENCLAW_FORCE=1` 强制刷新以拉新版），因此这棵 ~537MB 目录与 `resources/node/` 一样列入 `.gitignore`、不进版本库，只在打包时现取。
 - **运行时要求**：openclaw 声明 `engines >=24.16.0 <25 || >=26.1.0`，dsh 无上限。这是把内置 Node 升到 `v24.21.0` 的直接原因——一个版本同时满足两者。启动时容器始终用**内置 node** 直接跑 `.mjs` 入口，而不是 npm 的 `.cmd` shim（后者会回退到 PATH 上第一个 `node.exe`，可能是更旧的系统 node），因此不依赖 shell、路径含空格也安全。
-- **配置 home**：跟随环境目录（`<环境根目录>/openclaw`，JSON5 的 `openclaw.json`），已有 `~/.openclaw` 时沿用。设置页「环境目录 → OPENCLAW 配置目录」可改；主进程把 `OPENCLAW_STATE_DIR` 注入 spawn 环境。
+- **配置 home**：默认使用 openclaw CLI 自己的 `~/.openclaw`（JSON5 的 `openclaw.json`），与终端里的 openclaw 共用同一套配置。设置页「环境目录 → OPENCLAW 配置目录」可改；主进程把 `OPENCLAW_STATE_DIR` 注入 spawn 环境。
 - **page 形态**：`pages/openclaw/container.json` 写入 `{"kind":"openclaw","openclaw":{"port":18789}}`。启动命令是 `<内置node> openclaw.mjs gateway run --force --port <p>`——`gateway` 是命令组，裸跑只打印帮助、永不监听，必须用前台子命令 `gateway run`；`--force` 清掉端口上的残留进程以便重启即起。就绪后 Control UI 在 `http://127.0.0.1:<port>`，端口轮询沿用非 dsh 路径，但 openclaw 首次启动会自装 provider 插件并跑状态迁移（约 30s+ 才 LISTEN），故其就绪超时放宽到 ~120s（`DSH_OPENCLAW_READY_TIMEOUT_MS`）。
 - **免交互启动**：openclaw 在无配置时会拒绝起网关（提示 `Run openclaw setup or set gateway.mode=local`）。容器在首次启动前，若 `~/.openclaw/openclaw.json` 不存在则写入一份最小 `{gateway:{mode:"local"}}`（绝不覆盖用户已有文件），从而开箱即用。
 - **认证说明**：网关默认开启 auth，但无 token 时会自动生成一个运行时 token 并**配对本地 CLI 设备**，实测 Control UI 根路径 `/` 与 `/health` 直接返回 200，无需手动换 token。频道/模型仍需用户自行 `openclaw onboard` 配置；面板已放了对应提示。
 
 ## 环境目录
 
-所有运行时的配置 / 数据目录都挂在同一个「环境根目录」下：
+内置运行时的配置目录默认各自独立，自定义 page 的数据目录则统一挂在「环境根目录」下：
 
-| 运行时   | 默认目录                |
-| -------- | ----------------------- |
-| dsh      | `<环境根目录>/dsh`      |
-| openclaw | `<环境根目录>/openclaw` |
+| 运行时   | 默认目录       |
+| -------- | -------------- |
+| dsh      | `~/.dsh`       |
+| openclaw | `~/.openclaw`  |
 
-- **默认跟随安装目录**：未显式配置时环境根目录 = `<安装目录>/env`；安装目录不可写（如 `C:\Program Files`）时回退到 `userData/env`。
-- **用户可指定**：设置页「环境目录 → 环境根目录」填任意路径或点「浏览…」选择，保存后所有运行时一起改到该目录下（`~` 会展开）。
-- **旧目录兼容**：升级前已存在 `~/.dsh` / `~/.openclaw` 时容器继续沿用，不会把已有 profile / 配置丢掉。
-- 自定义 page 也能跟随：container.json 的 `envVars.defaultPath` 支持 `{envRoot}` 占位符。
+- **dsh / openclaw**：默认直接用 CLI 自己的 home（与终端共用同一套 profile / 配置）；设置页「环境目录 → DSH / OPENCLAW 配置目录」可单独改到任意路径（`~` 会展开）。
+- **环境根目录**：未显式配置时 = `<安装目录>/env`；安装目录不可写（如 `C:\Program Files`）时回退到 `userData/env`。container.json 的 `envVars.defaultPath` 里的 `{envRoot}` 占位符指向它，因此它只影响声明了 `{envRoot}` 的自定义 page，不影响 dsh / openclaw 的默认 home。
 
 ## 内置终端
 

@@ -1,15 +1,61 @@
 import { app, BrowserWindow, dialog, Menu, nativeImage, Tray, shell } from 'electron'
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
 import { PageRegistry } from './pages'
 import { registerIpc } from './ipc'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './openclaw'
+import { pnpmBinDirs } from './dsh'
 import { getSettings, resolvePagesDir, resolveProjectDir } from './store'
 import { getNodeRuntimeInfo } from './node-runtime'
 import { m, onLocaleChanged, registerLocaleSource } from './i18n'
+import { installFileLogger } from './logger'
 import icon from '../../resources/icon.png?asset'
+
+/**
+ * The packaged `productName` is Chinese (桌面控制台), so Electron's default userData folder is
+ * `%APPDATA%\桌面控制台`. A non-ASCII install path breaks the PowerShell Expand-Archive call in
+ * the bundled-Node updater (the mangled `-Command` string can hang it at 0%) and trips other
+ * native / git tooling the container shells out to. Pin userData — and therefore every install
+ * path (pages, env root, node-update staging) — to an ASCII folder BEFORE any path-dependent
+ * init runs (logger, electron-store, node override). The Chinese name stays everywhere it is
+ * user-visible (window title, shortcuts); existing data is renamed across so settings survive.
+ */
+function ensureAsciiUserData(): void {
+  const asciiLeaf = 'dsh-desktop-container'
+  try {
+    const current = app.getPath('userData')
+    // Non-ASCII = control/extended chars outside printable 7-bit ASCII.
+    if (!/[^\x20-\x7e]/.test(current)) return // already ASCII (e.g. dev) — leave it untouched
+    const target = join(app.getPath('appData'), asciiLeaf)
+    if (/[^\x20-\x7e]/.test(target)) {
+      console.warn('[container] no ASCII userData path available (Chinese username?):', target)
+      return
+    }
+    if (existsSync(target)) {
+      app.setPath('userData', target)
+      return
+    }
+    if (!existsSync(current)) {
+      app.setPath('userData', target) // fresh install — nothing to migrate
+      return
+    }
+    try {
+      renameSync(current, target)
+      app.setPath('userData', target)
+    } catch (err) {
+      console.error('[container] userData migration to ASCII path failed; keeping current:', err)
+    }
+  } catch (err) {
+    console.error('[container] ensureAsciiUserData error:', err)
+  }
+}
+ensureAsciiUserData()
+
+// Mirror every console call into userData/logs BEFORE anything else logs: a packaged
+// app has no stderr, and without this the uncaughtException guard below is write-only.
+installFileLogger()
 
 // Main-process strings (window title, tray, dialogs, IPC errors) follow the persisted locale.
 // Reading it lazily keeps a mid-session language switch reflected without extra plumbing.
@@ -173,8 +219,25 @@ function rebuildTrayMenu(): void {
     {
       label: m('tray.quit'),
       click: () => {
-        isQuitting = true
-        app.quit()
+        // Quitting kills every hosted node process — worth one native confirmation,
+        // and the tray is the only path that does this without closing a window.
+        const running = registry?.running().length ?? 0
+        dialog
+          .showMessageBox({
+            type: 'warning',
+            title: m('tray.quitConfirmTitle'),
+            message: m('tray.quitConfirm'),
+            detail: running ? `Running pages: ${running}` : undefined,
+            buttons: [m('tray.quitYes'), m('tray.quitNo')],
+            defaultId: 1, // Enter lands on Cancel — quitting is the destructive branch
+            cancelId: 1
+          })
+          .then(({ response }) => {
+            if (response !== 0) return
+            isQuitting = true
+            app.quit()
+          })
+          .catch(() => undefined)
       }
     }
   ]
@@ -227,6 +290,19 @@ if (!gotLock) {
     markBootOk()
     app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
+    // Embedded <webview> guests: keep window.open / target=_blank inside the SAME view
+    // (navigate in place) instead of popping a new window or handing off to the system
+    // browser. This main-process handler is authoritative and takes precedence over the
+    // renderer `new-window` event, so nothing can slip out to an external window.
+    app.on('web-contents-created', (_e, contents) => {
+      if (contents.getType() === 'webview') {
+        contents.setWindowOpenHandler(({ url }) => {
+          contents.loadURL(url).catch(() => undefined)
+          return { action: 'deny' }
+        })
+      }
+    })
+
     await verifyNodeRuntime()
 
     ensureDefaultOpenclawPage()
@@ -244,6 +320,10 @@ if (!gotLock) {
         .autoStart(settings.autoStartPages)
         .catch((err) => console.warn('[container] auto-start failed', err))
     }
+
+    // Warm the pnpm-location probe (a cold `npm prefix -g` costs seconds) off the critical
+    // path of the *first* dsh start; it's cached process-wide via pnpmBinDirs().
+    void pnpmBinDirs().catch(() => undefined)
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
