@@ -15,7 +15,7 @@ const skipBuild = process.argv.includes('--skip-build')
 
 function run(cmd, args, opts = {}) {
   console.log(`[publish] $ ${cmd} ${args.join(' ')}`)
-  return execFileSync(cmd, args, { cwd: root, stdio: 'inherit', shell: false, ...opts })
+  return execFileSync(cmd, args, { cwd: root, stdio: 'inherit', shell: true, ...opts })
 }
 
 function git(args, cwd = root) {
@@ -69,7 +69,18 @@ try {
     JSON.stringify({ name: pkg.name, version: pkg.version, main: './out/main/index.js' }, null, 2)
   )
   const asarOut = join(stage, 'app.asar')
-  rmSync(stage, { recursive: true, force: true }) // fresh dir: only app.asar + version.txt are staged
+  // Wipe the staging dir. On Windows a previous run's app.asar may be locked by an
+  // IDE indexer — rename it to a temp name first (rename is atomic on the same volume),
+  // then remove the old dir without waiting for the lock to clear.
+  try {
+    rmSync(stage, { recursive: true, force: true })
+  } catch {
+    try {
+      const tmpName = join(stage, `app.asar.${Date.now()}.tmp`)
+      require('node:fs').renameSync(join(stage, 'app.asar'), tmpName)
+    } catch {}
+    try { rmSync(stage, { recursive: true, force: true }) } catch {}
+  }
   mkdirSync(stage, { recursive: true })
   await createPackage(packSrc, asarOut)
   console.log(`[publish] packed app.asar (${Math.round(statSync(asarOut).size / 1024 / 1024)} MB)`)

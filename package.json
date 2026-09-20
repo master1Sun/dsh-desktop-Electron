@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop-electron",
   "productName": "Desktop Container",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "桌面端 Node 容器：内置 Node v24.21.0，pages 插件项目托管与页面视图、配置持久化、git 更新检测",
   "main": "./src/boot.cjs",
   "author": "sunjuntao",
