@@ -156,7 +156,7 @@ export interface UpdateCheckResult {
   /** whether the app can run the update itself (vs. only surfacing a hint) */
   canAutoUpdate?: boolean
   /** how performUpdate should act on this row */
-  action?: 'pull' | 'reprovision' | 'manual'
+  action?: 'pull' | 'reprovision' | 'manual' | 'none'
   /** npm package name backing an npm/builtin row */
   packageName?: string
 }

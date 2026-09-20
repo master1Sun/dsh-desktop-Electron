@@ -35,8 +35,8 @@ const statusType = (r: { ok: boolean; hasUpdate?: boolean }): string =>
   !r.ok ? 'info' : r.hasUpdate ? 'warning' : 'success'
 
 /** Short provenance tag for built-in rows so they read apart from git repos. */
-const sourceTag = (r: { name: string; source?: string }): string | null =>
-  r.source === 'builtin' ? (r.name.includes('DSH') ? 'DSH' : 'OpenClaw') : null
+const sourceTag = (r: { name: string; source?: string; action?: string }): string | null =>
+  r.source === 'builtin' ? (r.action === 'none' ? t('panel.tagBuiltin') : r.name.includes('DSH') ? 'DSH' : 'OpenClaw') : null
 
 /** The middle column shows a branch for git rows, the registry latest for version rows. */
 const refLabel = (r: { source?: string; branch?: string; latestVersion?: string }): string =>
@@ -46,10 +46,13 @@ const refLabel = (r: { source?: string; branch?: string; latestVersion?: string 
 const subLabel = (r: {
   dir: string
   source?: string
+  action?: string
   currentVersion?: string
   latestVersion?: string
 }): string =>
-  r.source && r.source !== 'git' ? `${r.currentVersion || '?'} → ${r.latestVersion || '?'}` : r.dir
+  r.source && r.source !== 'git' && r.action !== 'none'
+    ? `${r.currentVersion || '?'} → ${r.latestVersion || '?'}`
+    : r.dir
 </script>
 
 <template>

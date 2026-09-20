@@ -70,6 +70,20 @@ function readPkgJson(dir: string): NpmPkgInfo | null {
 
 /** A page row: git repo → pull; otherwise an npm package → registry compare (manual update). */
 async function checkPage(p: PageMeta): Promise<UpdateCheckResult> {
+  // Container-shipped pages are just manifests here — the runtime they launch is a
+  // built-in row (DSH 本体 / OpenClaw) that updates via npm, so no git/npm signal applies.
+  if (p.builtin) {
+    return {
+      name: p.name,
+      dir: p.dir,
+      isContainer: false,
+      ok: true,
+      hasUpdate: false,
+      source: 'builtin',
+      action: 'none',
+      canAutoUpdate: false
+    }
+  }
   const gitRes = await checkOne(p.name, p.dir, false)
   if (gitRes.ok) return { ...gitRes, source: 'git', action: 'pull', canAutoUpdate: true }
   const pkg = readPkgJson(p.dir)

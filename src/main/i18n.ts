@@ -133,6 +133,7 @@ const zh: Dict = {
   'upd.openclawUpgraded': 'OpenClaw 已升级至 {after}，重启该页面后生效',
   'upd.openclawUpToDate': 'OpenClaw 已是最新（{after}）',
   'upd.localNoAuto': '本地项目不支持自动更新，请在其仓库拉取新版后重装/复制',
+  'upd.builtinFollowsContainer': '容器内置页面，随桌面控制台源码一起更新',
   'upd.unknownChannel': '未知的更新方式'
 }
 
@@ -249,6 +250,8 @@ const en: Dict = {
   'upd.openclawUpToDate': 'OpenClaw is up to date ({after})',
   'upd.localNoAuto':
     'Local projects do not support auto-update; pull the new version in their repo, then reinstall/copy',
+  'upd.builtinFollowsContainer':
+    'Built-in container page — updates with the desktop container source',
   'upd.unknownChannel': 'Unknown update channel'
 }
 
