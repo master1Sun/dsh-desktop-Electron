@@ -18,7 +18,7 @@ function appDataDir() {
       : path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'Desktop Container')
 }
 
-const APP_DIR = path.dirname(__dirname) // <...>/resources when packaged (app.asar + app.asar.unpacked)
+const APP_DIR = __dirname // <installDir>/resources when packaged (boot.cjs + app.asar live side by side)
 const UPDATES_DIR = path.join(APP_DIR, 'updates')
 const META_FILE = path.join(UPDATES_DIR, 'update-meta.json')
 const MARKER_FILE = path.join(appDataDir(), 'dsh-boot-ok-marker')

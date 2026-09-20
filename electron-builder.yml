@@ -26,6 +26,10 @@ files:
 asarUnpack:
   - '**/node_modules/node-pty/**'
 extraResources:
+  # boot.cjs — the external entry point that redirects app.asar to updated versions.
+  # Lives outside app.asar so electron-builder never tries to resolve it inside the archive.
+  - from: src/boot.cjs
+    to: boot.cjs
   # Ship the whole bundled-runtime tree in ONE matcher.
   #
   # Do NOT use per-directory entries (from: resources/dsh, to: dsh): electron-builder's
