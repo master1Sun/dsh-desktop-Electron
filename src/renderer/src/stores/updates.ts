@@ -33,7 +33,9 @@ export const useUpdatesStore = defineStore('updates', () => {
   async function perform(target: UpdateCheckResult): Promise<void> {
     updating.value = target.name
     try {
-      const res = await unwrap<UpdateOutcome>(window.container.performUpdate(target))
+      // Strip Vue reactive proxy before IPC — structuredClone can't serialize proxies.
+      const plain = JSON.parse(JSON.stringify(target)) as UpdateCheckResult
+      const res = await unwrap<UpdateOutcome>(window.container.performUpdate(plain))
       if (res.message) ElMessage.success(res.message)
       else if (!res.ok)
         ElMessage.warning(res.error || t('updates.incomplete', { name: target.name }))
