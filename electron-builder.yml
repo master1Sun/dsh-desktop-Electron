@@ -14,6 +14,15 @@ files:
   - '!pages/**'
   - '!scripts/**'
   - '!tools/**'
+  # Publish/scratch artifacts — dist-release holds the LAST app.zip (~130 MB); electron-builder
+  # does NOT honour .gitignore, so without this it gets packed into app.asar and the release
+  # push then dies on GitHub's 100 MB per-file limit.
+  - '!dist-release/**'
+  - '!.qoder/**'
+  - '!.workbuddy/**'
+  - '!{tsconfig.node,tsconfig.web}.tsbuildinfo'
+  - '!vitest{.config,.ui.config}.ts'
+  - '!build_log_ascii.txt'
   # Bundled runtimes (node/openclaw/dsh) ship via extraResources only — packing
   # them into app.asar as well would duplicate the installer. Everything else
   # under resources/ stays: icon.png is required at runtime (taskbar + tray) and is read
