@@ -49,6 +49,31 @@ function guideForMissing(row: PageState): void {
   ElMessage.warning(t('setup.runtimeMissingToast', { name: row.name }))
 }
 
+/**
+ * Port-conflict recovery: a failed start that timed out on its port names the foreign
+ * LISTENING process on `portHolder` — offer killing it and starting again in one click.
+ */
+const killing = ref<string | null>(null)
+async function killHolderAndRetry(row: PageState): Promise<void> {
+  const port = row.containerPort || row.port
+  if (!port || killing.value) return
+  killing.value = row.id
+  try {
+    const res = await window.container.killPortHolder(port)
+    if (!res?.ok) throw new Error(res?.error || t('pageMgr.msgKillFail'))
+    ElMessage.success(
+      res.data
+        ? t('pageMgr.msgKilled', { pid: (res.data as { pid: number }).pid })
+        : t('pageMgr.msgHolderGone')
+    )
+    await pagesStore.start(row.id)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    killing.value = null
+  }
+}
+
 const gitForm = reactive({ url: '', name: '', port: '' })
 const dirForm = reactive({ path: '', name: '', port: '' })
 // The in-flight import lives in the store, not here, so closing/reopening the Pages panel
@@ -86,7 +111,7 @@ async function installGit(): Promise<void> {
     // A local folder pasted into the URL field: import it as a copy. Only the container
     // repo itself gets adopted for git updates — a blind origin would mislead the pull.
     if (looksLikeLocalPath(url)) {
-      const isContainerRepo = /[/\\]dsh-desktop-Electron(\/|$)/i.test(url)
+      const isContainerRepo = /[/\\]DesktopContainer(\/|$)/i.test(url)
       const id = await pagesStore.installDir(
         url,
         gitForm.name.trim() || undefined,
@@ -401,6 +426,22 @@ function formatTime(ms: number): string {
             >
               {{ row.lastError }}
             </div>
+            <el-button
+              v-if="row.portHolder && !row.external"
+              size="small"
+              type="warning"
+              plain
+              round
+              :loading="killing === row.id"
+              @click="killHolderAndRetry(row)"
+            >
+              {{
+                t('pageMgr.killPort', {
+                  name: row.portHolder.name,
+                  pid: row.portHolder.pid
+                })
+              }}
+            </el-button>
           </template>
         </el-table-column>
         <el-table-column :label="t('pageMgr.colPort')" width="88" show-overflow-tooltip>

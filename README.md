@@ -1,4 +1,4 @@
-# DSH Desktop Container
+# Desktop Container
 
 桌面端 Node 容器：托管 `pages/` 下的 web 项目（deepseek-harness、openclaw 等任意 node http 服务），主界面内嵌展示页面，支持配置持久化、任务栏常驻与 git 更新检测。运行时（Node v24.21.0 / dsh / openclaw）**不再打进安装包**，改为**首次启动引导按需下载到 userData**，以瘦小安装包。
 
@@ -68,7 +68,7 @@ node node_modules/@deepseek-ai/dsh/lib/bin.js plugin --profile web add @someorg/
 - **profile 模型**：一个 profile 是 `<DSH Home>/profiles/<name>` 目录，内含 `package.json`（out-of-tree 插件依赖 + `dsh.profile.bundles` 层栈）。dsh 自带 `web / acp / headless / sdk` 模板，首次使用时由 dsh 自身初始化——容器不会伪造这些目录。
 - **DSH Home（容器）**：默认使用 dsh CLI 自己的 `~/.dsh`，与终端里的 dsh 共用同一套 profile。设置页「环境目录 → DSH 配置目录」可切换到任意独立目录（`~` 会展开）。
 - **安装 / 卸载 / 更新**：npm 通道走 `pnpm add|remove|update`；git 通道先 `git ls-remote <url> HEAD` 取远端 sha，再以 `<url>#<sha>` 重装，因此"更新到最新提交"是可复现的。
-- **pnpm 随包托管**：`dsh plugin` 转发给 PATH 上的 `pnpm`。`npm run setup:dsh` 会把 pnpm（latest）与 dsh 装进同一个 prefix（`resources/dsh/`），容器探测该目录并前置进 PATH，因此零宿主前置条件。**Windows 陷阱**：pnpm v12 包内 `pnpm/pn/pnpx/pnx`（无扩展名）只是 Node shebang 占位文件，原生 `pnpm.exe` 由其 preinstall 从可选依赖 `@pnpm/exe.win32-x64` 硬链过来——而 `--ignore-scripts` 跳过了这一步，npm 生成的根 `pnpm.cmd` 直接 exec 占位文件时 CreateProcess 无法解析 → "不是内部或外部命令"。修复分两层：setup-dsh.mjs 与运行时自升级（`repairPnpmCmd`）先重链原生 exe 覆盖占位文件；若主机缺该可选包，则兜底把 `pnpm.cmd` 重写为「node 直跑 `bin/pnpm.mjs`」。系统全局 pnpm 仍作兜底探测（`npm prefix -g`）。
+- **pnpm 随包托管**：` plugin` 转发给 PATH 上的 `pnpm`。`npm run setup:dsh` 会把 pnpm（latest）与 dsh 装进同一个 prefix（`resources/dsh/`），容器探测该目录并前置进 PATH，因此零宿主前置条件。**Windows 陷阱**：pnpm v12 包内 `pnpm/pn/pnpx/pnx`（无扩展名）只是 Node shebang 占位文件，原生 `pnpm.exe` 由其 preinstall 从可选依赖 `@pnpm/exe.win32-x64` 硬链过来——而 `--ignore-scripts` 跳过了这一步，npm 生成的根 `pnpm.cmd` 直接 exec 占位文件时 CreateProcess 无法解析 → "不是内部或外部命令"。修复分两层：setup-dsh.mjs 与运行时自升级（`repairPnpmCmd`）先重链原生 exe 覆盖占位文件；若主机缺该可选包，则兜底把 `pnpm.cmd` 重写为「node 直跑 `bin/pnpm.mjs`」。系统全局 pnpm 仍作兜底探测（`npm prefix -g`）。
 - **在容器中打开 web UI**：点「把当前 profile 加入我的页面」会在 `pages/dsh-<profile>/container.json` 写入 `{"kind":"dsh","dsh":{"profile":"web","port":5173}}`（只写清单，不复制 profile）。启动后容器解析 dsh 打印的就绪行 `dsh web: http://127.0.0.1:<port>/?token=…`，把这个带 token 的 URL 交给 `<webview>` —— 裸端口会 401。
 
 > ⚠️ `@deepseek-ai/dsh@0.1.6-alpha.1` 无法运行：它声明 `@deepseek-ai/dsh-app-boot: ^0.1.6-alpha.1`，该范围会解析到 alpha.2，而 alpha.2 移除了 `watchUserPatches` 导出，CLI 一启动即抛 `SyntaxError`。本项目固定使用 registry 的 `alpha` 标签版本（当前 `0.1.6-alpha.2`）。

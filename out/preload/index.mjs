@@ -81,7 +81,17 @@ const IPC = {
   /** broadcast: a secondary window asks every window to switch to that CLI page's terminal */
   OpenTerminalPage: "container:open-terminal-page",
   /** broadcast: live progress of a file download inside an embedded webview (DownloadProgress) */
-  OnDownloadProgress: "container:download-progress"
+  OnDownloadProgress: "container:download-progress",
+  /** list readable log files (main + per-page tails) for the in-app viewer (LogFileInfo[]) */
+  ListLogFiles: "container:list-log-files",
+  /** read the tail of one log file, optionally filtered (ReadLogsArgs → LogReadResult) */
+  ReadLogs: "container:read-logs",
+  /** collect versions/settings/logs summary into a zip via a save dialog; resolves the path */
+  ExportDiagnostics: "container:export-diagnostics",
+  /** taskkill the foreign process LISTENING on that port (port-conflict quick fix) */
+  KillPortHolder: "container:kill-port-holder",
+  /** swap the pre-update app.asar.bak back in and relaunch (one-level OTA rollback) */
+  RollbackAsar: "container:rollback-asar"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
@@ -113,6 +123,11 @@ const api = {
   checkUpdates: (force) => ipcRenderer.invoke(IPC.CheckUpdates, force),
   performUpdate: (target) => ipcRenderer.invoke(IPC.PerformUpdate, target),
   openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
+  listLogFiles: () => ipcRenderer.invoke(IPC.ListLogFiles),
+  readLogs: (args) => ipcRenderer.invoke(IPC.ReadLogs, args),
+  exportDiagnostics: () => ipcRenderer.invoke(IPC.ExportDiagnostics),
+  killPortHolder: (port) => ipcRenderer.invoke(IPC.KillPortHolder, port),
+  rollbackAsar: () => ipcRenderer.invoke(IPC.RollbackAsar),
   onUpdateResults: (cb) => {
     const listener = (_e, results) => cb(results);
     ipcRenderer.on(IPC.OnUpdateResults, listener);

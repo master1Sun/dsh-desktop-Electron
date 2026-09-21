@@ -17,6 +17,8 @@ export interface Settings {
   launchAtStartup: boolean
   /** health guard: auto-restart a page that crashes after it has started */
   crashAutoRestart: boolean
+  /** OS notifications for guard give-up / OTA-ready events */
+  systemNotifications: boolean
   autoStartPages: string[]
   lastExternalUrls: string[]
   externalSites: ExternalSite[]
@@ -46,6 +48,7 @@ export const useSettingsStore = defineStore('settings', () => {
     minimizeToTray: true,
     launchAtStartup: false,
     crashAutoRestart: true,
+    systemNotifications: true,
     autoStartPages: [],
     lastExternalUrls: [],
     externalSites: [],

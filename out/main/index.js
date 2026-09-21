@@ -1,11 +1,13 @@
-import electron, { app as app$1, nativeTheme, net, ipcMain as ipcMain$1, BrowserWindow, dialog, shell as shell$1, webContents, session, Notification, nativeImage, Tray, Menu } from "electron";
+import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, dialog, nativeImage, Tray, Menu, ipcMain as ipcMain$1, BrowserWindow, webContents, session } from "electron";
 import * as fs from "node:fs";
-import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, appendFileSync, statSync, renameSync, readdirSync, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync } from "node:fs";
+import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync, promises, copyFileSync } from "node:fs";
 import path, { join, delimiter, dirname, sep, extname, basename } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import { EventEmitter } from "node:events";
 import { spawn, execFile, execFileSync, spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
+import { get as get$2 } from "node:http";
+import { get as get$1 } from "node:https";
 import * as os from "node:os";
 import os__default, { homedir as homedir$1 } from "node:os";
 import process$1 from "node:process";
@@ -13,12 +15,11 @@ import { promisify, isDeepStrictEqual } from "node:util";
 import crypto, { randomBytes } from "node:crypto";
 import assert from "node:assert";
 import { Transform } from "node:stream";
-import { get as get$1 } from "node:https";
 import { pipeline } from "node:stream/promises";
 import { copyFile, readdir, stat } from "node:fs/promises";
 import { simpleGit } from "simple-git";
-import * as pty from "node-pty";
 import { join as join$1 } from "path";
+import * as pty from "node-pty";
 import __cjs_mod__ from "node:module";
 const __filename = import.meta.filename;
 const __dirname = import.meta.dirname;
@@ -107,7 +108,17 @@ const IPC = {
   /** broadcast: a secondary window asks every window to switch to that CLI page's terminal */
   OpenTerminalPage: "container:open-terminal-page",
   /** broadcast: live progress of a file download inside an embedded webview (DownloadProgress) */
-  OnDownloadProgress: "container:download-progress"
+  OnDownloadProgress: "container:download-progress",
+  /** list readable log files (main + per-page tails) for the in-app viewer (LogFileInfo[]) */
+  ListLogFiles: "container:list-log-files",
+  /** read the tail of one log file, optionally filtered (ReadLogsArgs → LogReadResult) */
+  ReadLogs: "container:read-logs",
+  /** collect versions/settings/logs summary into a zip via a save dialog; resolves the path */
+  ExportDiagnostics: "container:export-diagnostics",
+  /** taskkill the foreign process LISTENING on that port (port-conflict quick fix) */
+  KillPortHolder: "container:kill-port-holder",
+  /** swap the pre-update app.asar.bak back in and relaunch (one-level OTA rollback) */
+  RollbackAsar: "container:rollback-asar"
 };
 let cached = null;
 function invalidateNodeRuntimeCache() {
@@ -224,6 +235,17 @@ function envWithPATH(dirs, extra = {}) {
   if (!prepend.length) return base;
   return { ...base, PATH: `${prepend.join(delimiter)}${delimiter}${base.PATH}` };
 }
+const nodeRuntime = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  bundledEnv,
+  envWithPATH,
+  getNodeExePath,
+  getNodeRuntimeInfo,
+  invalidateNodeRuntimeCache,
+  nodeVersionUsable,
+  overrideNodeDir,
+  resolveDshNodeExePath
+}, Symbol.toStringTag, { value: "Module" }));
 const isObject = (value) => {
   const type2 = typeof value;
   return value !== null && (type2 === "object" || type2 === "function");
@@ -11395,7 +11417,9 @@ const DEFAULTS = {
   pageEnvs: {},
   pagePorts: {},
   // a page that crashes after having run is relaunched automatically; off surfaces the error only
-  crashAutoRestart: true
+  crashAutoRestart: true,
+  // rare user-action-needed events (guard gave up, staged update) go to the OS notification center
+  systemNotifications: true
 };
 let store = null;
 function getStore() {
@@ -11545,85 +11569,6 @@ function resolveDownloadDir() {
   const override = (getSettings().downloadDir || "").trim();
   return override ? expandHome(override) : defaultDownloadDir();
 }
-const MAX_BYTES = 5 * 1024 * 1024;
-const ROTATED_KEEP = 1;
-let logsRoot = null;
-let installed = false;
-function logsDir() {
-  if (logsRoot) return logsRoot;
-  let base;
-  try {
-    base = app$1.getPath("userData");
-  } catch {
-    base = app$1.getPath("temp");
-  }
-  logsRoot = join(base, "logs");
-  try {
-    mkdirSync(logsRoot, { recursive: true });
-  } catch {
-  }
-  return logsRoot;
-}
-function rotateIfNeeded(file) {
-  try {
-    if (!existsSync(file) || statSync(file).size < MAX_BYTES) return;
-    for (let i = ROTATED_KEEP; i >= 1; i--) {
-      const from = i === 1 ? file : `${file}.${i - 1}`;
-      const to = `${file}.${i}`;
-      if (existsSync(from)) {
-        if (i > ROTATED_KEEP && existsSync(to)) continue;
-        renameSync(from, to);
-      }
-    }
-  } catch {
-  }
-}
-function append(file, line) {
-  try {
-    rotateIfNeeded(file);
-    appendFileSync(file, line, "utf8");
-  } catch {
-  }
-}
-const stamp = () => (/* @__PURE__ */ new Date()).toISOString();
-function writeLine(level, args) {
-  const parts = args.map((a) => a instanceof Error ? a.stack ?? a.message : safeStr(a));
-  append(join(logsDir(), "main.log"), `[${stamp()}] [${level}] ${parts.join(" ")}
-`);
-}
-function safeStr(v) {
-  if (typeof v === "string") return v;
-  try {
-    return typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
-  } catch {
-    return "[unserializable]";
-  }
-}
-function installFileLogger() {
-  if (installed) return;
-  installed = true;
-  for (const level of ["log", "info", "warn", "error", "debug"]) {
-    const original = console[level].bind(console);
-    console[level] = (...args) => {
-      writeLine(level.toUpperCase(), args);
-      original(...args);
-    };
-  }
-}
-function logPageLine(pageId, chunk) {
-  const safe = pageId.replace(/[^\w.-]/g, "_");
-  const dir = join(logsDir(), "pages");
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    return;
-  }
-  const file = join(dir, `${safe}.log`);
-  rotateIfNeeded(file);
-  const body = chunk.split(/\r?\n/).filter((l) => l.trim()).map((l) => `[${stamp()}] ${l}
-`).join("");
-  if (body) append(file, body);
-}
 const zh = {
   "app.title": "桌面控制台",
   "tray.show": "显示主界面",
@@ -11635,11 +11580,14 @@ const zh = {
   "tray.quitYes": "确定",
   "tray.quitNo": "取消",
   "tray.tooltip": "桌面控制台 · {n} 个 page 运行中",
+  "tray.tooltipAlert": "桌面控制台 · 有页面异常退出，请打开面板排查",
   "dialog.title": "DSH 容器",
   "dialog.chooseDir": "选择要托管的本地项目目录",
   "dialog.saveAs": "另存为",
   "err.nodeVersion": "内置 Node 版本异常：{version}（期望 v24.21.0）",
   "err.nodeMissing": "未找到内置 Node 运行时，请在“环境准备”引导中点击下载（开发者可运行 npm run setup:node）",
+  "err.dualInstance": "未能重新获取单实例锁：可能有另一个实例仍在运行，请确认是否出现双实例并存后手动关闭多余实例",
+  "err.fatal": "桌面控制台遇到致命错误（{err}），即将退出。若反复出现，请通过任务管理器结束残留进程后重新启动；仍无法恢复时请重新安装或回退最近的更新",
   "download.doneTitle": "下载完成",
   "download.doneBody": "{name} 已保存到 {dir}",
   "ipc.portRange": "端口需为 1-65535 的整数",
@@ -11670,6 +11618,19 @@ const zh = {
   "page.processExited": "进程退出，code={code}",
   "page.logReady": "[container] 已就绪，监听端口 {port}",
   "page.dshProfileNotReady": "dsh profile 在 {sec}s 内未就绪（端口 {port}）",
+  "page.healthFail": "端口已监听但健康检查未通过：{url}",
+  "page.portOwner": "端口 {port} 已被进程 {name}（PID {pid}）占用，可结束它后重试，或改用其他端口",
+  "page.depsCycle": "启动依赖存在循环：{chain}",
+  "page.depsFail": "依赖页面 {dep} 启动失败：{err}",
+  "page.logHealthKill": "[container] 健康检查连续 {n} 次失败，判定进程假死，正在重启…",
+  "notify.giveUpTitle": "页面自动重启已放弃",
+  "notify.giveUpBody": "{name} 连续异常退出 {max} 次，容器已停止自动重启，请在「页面」面板排查",
+  "notify.updateReadyTitle": "更新已就绪",
+  "notify.updateReadyBody": "桌面控制台 v{version} 已下载完成，重启后生效",
+  "log.mainLabel": "主进程日志",
+  "update.noRollback": "当前没有可回退的上一版本备份（仅在完成过一次在线更新后可用）",
+  "update.rollbackFailed": "回退调度失败，请查看日志",
+  "diag.exportTitle": "导出诊断报告",
   "page.logStopping": "[container] 正在停止…",
   "page.logRetryAfterReclaim": "[container] 检测到旧进程占用，已清理残留进程，正在重试启动…",
   "page.logCrashRestart": "[container] 进程异常退出（code={code}），{sec} 秒后自动重启（第 {n}/{max} 次）…",
@@ -11763,11 +11724,14 @@ const en = {
   "tray.quitYes": "OK",
   "tray.quitNo": "Cancel",
   "tray.tooltip": "Desktop Console · {n} page(s) running",
+  "tray.tooltipAlert": "Desktop Console · a page exited abnormally — open the panel to investigate",
   "dialog.title": "DSH Container",
   "dialog.chooseDir": "Choose the local project folder to host",
   "dialog.saveAs": "Save As",
   "err.nodeVersion": "Unexpected built-in Node version: {version} (expected v24.21.0)",
   "err.nodeMissing": "Built-in Node runtime not found — download it from the setup guide (developers: run npm run setup:node)",
+  "err.dualInstance": "Failed to re-acquire the single-instance lock: another instance may still be running — check for duplicate instances and close the extra one manually",
+  "err.fatal": "The desktop container hit a fatal error ({err}) and will exit. If it keeps happening, kill leftover processes in Task Manager and restart; if it persists, reinstall or roll back the latest update",
   "download.doneTitle": "Download complete",
   "download.doneBody": "{name} saved to {dir}",
   "ipc.portRange": "Port must be an integer from 1 to 65535",
@@ -11798,6 +11762,19 @@ const en = {
   "page.processExited": "Process exited, code={code}",
   "page.logReady": "[container] Ready, listening on port {port}",
   "page.dshProfileNotReady": "dsh profile was not ready within {sec}s (port {port})",
+  "page.healthFail": "The port is listening but the health check failed: {url}",
+  "page.portOwner": "Port {port} is already held by process {name} (PID {pid}) — kill it and retry, or pick another port",
+  "page.depsCycle": "Circular page startup dependency: {chain}",
+  "page.depsFail": "Dependency page {dep} failed to start: {err}",
+  "page.logHealthKill": "[container] Health check failed {n} times in a row — treating the process as hung and restarting…",
+  "notify.giveUpTitle": "Page auto-restart gave up",
+  "notify.giveUpBody": "{name} exited abnormally {max} times in a row; the container stopped restarting it — investigate in the Pages panel",
+  "notify.updateReadyTitle": "Update ready",
+  "notify.updateReadyBody": "Desktop container v{version} downloaded — restart to apply",
+  "log.mainLabel": "Main process log",
+  "update.noRollback": "No previous-version backup is available to roll back to (only offered after one OTA update has completed)",
+  "update.rollbackFailed": "Failed to schedule the rollback — check the logs",
+  "diag.exportTitle": "Export diagnostic report",
   "page.logStopping": "[container] Stopping…",
   "page.logRetryAfterReclaim": "[container] A stale process was holding the resource; reclaimed it and retrying the start…",
   "page.logCrashRestart": "[container] Process died unexpectedly (code={code}); auto-restarting in {sec}s (attempt {n}/{max})…",
@@ -11884,16 +11861,23 @@ const dictionaries = { zh, en };
 let localeSource = () => "zh";
 function registerLocaleSource(fn) {
   localeSource = fn;
+  cachedLocale = null;
+}
+let cachedLocale = null;
+function invalidateLocaleCache() {
+  cachedLocale = null;
 }
 const localeListeners = /* @__PURE__ */ new Set();
 function onLocaleChanged(fn) {
   localeListeners.add(fn);
 }
 function notifyLocaleChanged() {
+  invalidateLocaleCache();
   for (const fn of localeListeners) fn();
 }
 function currentLocale() {
-  return localeSource() === "en" ? "en" : "zh";
+  if (cachedLocale === null) cachedLocale = localeSource() === "en" ? "en" : "zh";
+  return cachedLocale;
 }
 function msgIn(lang, key, params) {
   const l = lang === "en" ? "en" : "zh";
@@ -11916,6 +11900,218 @@ function resolveText(value, fallback = "") {
   const pick = (v) => typeof v === "string" && v.trim() ? v : "";
   return pick(value[loc]) || pick(value[other]) || fallback;
 }
+const MAX_BYTES = 5 * 1024 * 1024;
+const ROTATED_KEEP = 1;
+let logsRoot = null;
+let installed = false;
+function logsDir() {
+  if (logsRoot) return logsRoot;
+  let base;
+  try {
+    base = app$1.getPath("userData");
+  } catch {
+    base = app$1.getPath("temp");
+  }
+  logsRoot = join(base, "logs");
+  try {
+    mkdirSync(logsRoot, { recursive: true });
+  } catch {
+  }
+  return logsRoot;
+}
+function rotateIfNeeded(file) {
+  try {
+    if (!existsSync(file) || statSync(file).size < MAX_BYTES) return;
+    for (let i = ROTATED_KEEP; i >= 1; i--) {
+      const from = i === 1 ? file : `${file}.${i - 1}`;
+      const to = `${file}.${i}`;
+      if (existsSync(from)) {
+        if (i > ROTATED_KEEP && existsSync(to)) continue;
+        renameSync(from, to);
+      }
+    }
+  } catch {
+  }
+}
+function append(file, line) {
+  try {
+    rotateIfNeeded(file);
+    appendFileSync(file, line, "utf8");
+  } catch {
+  }
+}
+const stamp = () => (/* @__PURE__ */ new Date()).toISOString();
+function writeLine(level, args) {
+  const parts = args.map((a) => a instanceof Error ? a.stack ?? a.message : safeStr(a));
+  append(join(logsDir(), "main.log"), `[${stamp()}] [${level}] ${parts.join(" ")}
+`);
+}
+function safeStr(v) {
+  if (typeof v === "string") return v;
+  try {
+    return typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+  } catch {
+    return "[unserializable]";
+  }
+}
+function installFileLogger() {
+  if (installed) return;
+  installed = true;
+  for (const level of ["log", "info", "warn", "error", "debug"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      writeLine(level.toUpperCase(), args);
+      original(...args);
+    };
+  }
+}
+function logPageLine(pageId, chunk) {
+  const safe = pageId.replace(/[^\w.-]/g, "_");
+  const dir = join(logsDir(), "pages");
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    return;
+  }
+  const file = join(dir, `${safe}.log`);
+  rotateIfNeeded(file);
+  const body = chunk.split(/\r?\n/).filter((l) => l.trim()).map((l) => `[${stamp()}] ${l}
+`).join("");
+  if (body) append(file, body);
+}
+function resolveLogKey(key) {
+  if (key === "main") return join(logsDir(), "main.log");
+  const mm = key.match(/^pages\/([\w.-]+)\.log$/);
+  if (mm && !mm[1].includes("..")) return join(logsDir(), "pages", `${mm[1]}.log`);
+  return null;
+}
+function listLogFiles() {
+  const out = [];
+  const push = (key, label, file) => {
+    try {
+      const st = statSync(file);
+      if (st.isFile()) out.push({ key, label, bytes: st.size, mtimeMs: st.mtimeMs });
+    } catch {
+    }
+  };
+  push("main", m("log.mainLabel"), join(logsDir(), "main.log"));
+  const dir = join(logsDir(), "pages");
+  try {
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir)) {
+        if (f.endsWith(".log")) push(`pages/${f}`, f.replace(/\.log$/, ""), join(dir, f));
+      }
+    }
+  } catch {
+  }
+  return out;
+}
+const TAIL_READ_CAP = 512 * 1024;
+function readLogTail(key, tail = 400, filter) {
+  const file = resolveLogKey(key);
+  if (!file) return { lines: [], truncated: false, readBytes: 0, totalBytes: 0 };
+  let total = 0;
+  try {
+    total = statSync(file).size;
+  } catch {
+    return { lines: [], truncated: false, readBytes: 0, totalBytes: 0 };
+  }
+  const readBytes = Math.min(total, TAIL_READ_CAP);
+  const buf = Buffer.allocUnsafe(readBytes);
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    readSync(fd, buf, 0, readBytes, total - readBytes);
+  } catch {
+    return { lines: [], truncated: false, readBytes: 0, totalBytes: total };
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+  }
+  let lines = buf.toString("utf8").split(/\r?\n/);
+  if (readBytes < total) lines = lines.slice(1);
+  const needle = (filter ?? "").trim().toLowerCase();
+  if (needle) lines = lines.filter((l) => l.toLowerCase().includes(needle));
+  const keep = Math.max(1, Math.min(tail || 400, 5e3));
+  return {
+    lines: lines.slice(-keep),
+    truncated: readBytes < total || lines.length > keep,
+    readBytes,
+    totalBytes: total
+  };
+}
+function capture$1(cmd, args, timeoutMs = 8e3) {
+  return new Promise((resolve2) => {
+    const child = spawn(cmd, args, { windowsHide: true, timeout: timeoutMs });
+    let out = "";
+    child.stdout?.on("data", (d) => out += String(d));
+    child.on("error", () => resolve2(""));
+    child.on("close", () => resolve2(out));
+  });
+}
+async function windowsHolders(port) {
+  const out = await capture$1("netstat", ["-ano", "-p", "tcp"]);
+  const pids = /* @__PURE__ */ new Set();
+  const needle = `:${port}`;
+  for (const line of out.split(/\r?\n/)) {
+    if (!/LISTENING/i.test(line)) continue;
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 5) continue;
+    if (cols[1] !== needle && !cols[1].endsWith(needle)) continue;
+    const pid = Number(cols[cols.length - 1]);
+    if (Number.isFinite(pid) && pid > 0) pids.add(pid);
+  }
+  return [...pids];
+}
+async function posixHolders(port) {
+  const out = await capture$1("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"]);
+  return out.split(/\r?\n/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
+}
+async function processName(pid) {
+  if (process.platform === "win32") {
+    const out2 = await capture$1("tasklist", ["/FI", `PID eq ${pid}`, "/NH", "/FO", "CSV"]);
+    return out2.match(/^"([^"]+)"/)?.[1] || `PID ${pid}`;
+  }
+  const out = await capture$1("ps", ["-p", String(pid), "-o", "comm="]);
+  return out.trim() || `PID ${pid}`;
+}
+async function findPortHolder(port) {
+  try {
+    const pids = process.platform === "win32" ? await windowsHolders(port) : await posixHolders(port);
+    if (!pids.length) return null;
+    return { pid: pids[0], name: await processName(pids[0]) };
+  } catch (err) {
+    console.warn("[port] holder probe failed (ignored):", err.message);
+    return null;
+  }
+}
+async function killPortHolder(port) {
+  const pids = process.platform === "win32" ? await windowsHolders(port) : await posixHolders(port);
+  if (!pids.length) return null;
+  const first = { pid: pids[0], name: await processName(pids[0]) };
+  for (const pid of pids) {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+    } else {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+      }
+    }
+  }
+  await new Promise((r) => setTimeout(r, 700));
+  return first;
+}
+function notifyEvent(titleKey, bodyKey, params, revealPath) {
+  try {
+    if (getSettings().systemNotifications === false) return;
+    if (!Notification.isSupported()) return;
+    const n = new Notification({ title: m(titleKey), body: m(bodyKey, params) });
+    if (revealPath) ;
+    n.show();
+  } catch (err) {
+    console.warn("[notify] failed (ignored):", err.message);
+  }
+}
 const LOG_LIMIT = 1e3;
 const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 3e4);
 const OPENCLAW_READY_TIMEOUT_MS = Number(process.env.DSH_OPENCLAW_READY_TIMEOUT_MS || 12e4);
@@ -11923,6 +12119,47 @@ const DSH_READY_TIMEOUT_MS = Number(process.env.DSH_DSH_READY_TIMEOUT_MS || 12e4
 const ANNOUNCE_GRACE_MS = 1500;
 const CRASH_RETRY_DELAYS_MS = [2e3, 5e3, 15e3];
 const STABLE_RESET_MS = 5 * 6e4;
+const HEALTH_READY_TIMEOUT_MS = 2e4;
+const HEALTH_POLL_MS = 3e4;
+const HEALTH_FAIL_LIMIT = 3;
+function healthTarget(meta, port) {
+  const raw = (meta.healthUrl || "").trim();
+  if (!raw) return null;
+  const filled = raw.replace(/\{port\}/g, String(port));
+  if (/^https?:\/\//i.test(filled)) return filled;
+  try {
+    return new URL(filled.startsWith("/") ? filled : `/${filled}`, `http://127.0.0.1:${port}`).toString();
+  } catch {
+    return null;
+  }
+}
+function probeHealth(url, timeoutMs = 5e3) {
+  return new Promise((resolve2) => {
+    try {
+      const lib = url.startsWith("https") ? get$1 : get$2;
+      const req = lib(url, { timeout: timeoutMs }, (res) => {
+        res.resume();
+        const status = res.statusCode ?? 0;
+        resolve2(status >= 200 && status < 400);
+      });
+      req.on("error", () => resolve2(false));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve2(false);
+      });
+    } catch {
+      resolve2(false);
+    }
+  });
+}
+async function waitHealth(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (; ; ) {
+    if (await probeHealth(url)) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 700));
+  }
+}
 const BUILTIN_PAGE_IDS = /* @__PURE__ */ new Set(["dsh-web", "openclaw"]);
 function runCli$2(cmd, args, opts = {}) {
   return new Promise((resolve2) => {
@@ -12015,6 +12252,10 @@ function readPageMeta(pagesDir, id2) {
     // Agent runtimes live in the 应用 menu by default; imported pages opt in via
     // container.json "manageAsApp": true.
     manageAsApp: raw.manageAsApp ?? (kind === "dsh" || kind === "openclaw"),
+    // Deps keep only non-empty strings that aren't the page itself — self-imports would
+    // deadlock ensureDeps behind an ancestry check that legitimately allows siblings.
+    dependsOn: Array.isArray(raw.dependsOn) ? raw.dependsOn.filter((d) => typeof d === "string" && Boolean(d.trim()) && d.trim() !== id2).map((d) => d.trim()) : void 0,
+    healthUrl: !external && typeof raw.healthUrl === "string" && raw.healthUrl.trim() ? raw.healthUrl.trim() : void 0,
     envVars
   };
 }
@@ -12042,6 +12283,13 @@ function scanInstalledPages(pagesDir) {
   }
   return out;
 }
+class PortNotReadyError extends Error {
+  constructor(port, timeoutMs) {
+    super(m("page.portNotReady", { port, sec: Math.round(timeoutMs / 1e3) }));
+    this.port = port;
+  }
+  port;
+}
 function waitPortReady(port, timeoutMs = START_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve2, reject) => {
@@ -12053,7 +12301,7 @@ function waitPortReady(port, timeoutMs = START_TIMEOUT_MS) {
       sock.on("error", () => {
         sock.destroy();
         if (Date.now() > deadline) {
-          reject(new Error(m("page.portNotReady", { port, sec: Math.round(timeoutMs / 1e3) })));
+          reject(new PortNotReadyError(port, timeoutMs));
         } else {
           setTimeout(attempt, 400);
         }
@@ -12160,7 +12408,14 @@ class PageRegistry extends EventEmitter {
     for (const meta of metas) {
       const existing = this.entries.get(meta.id);
       if (existing) existing.meta = meta;
-      else this.entries.set(meta.id, { meta, status: "stopped", logs: [], crashes: 0 });
+      else
+        this.entries.set(meta.id, {
+          meta,
+          status: "stopped",
+          logs: [],
+          crashes: 0,
+          healthFails: 0
+        });
     }
     return metas;
   }
@@ -12187,6 +12442,7 @@ class PageRegistry extends EventEmitter {
       url,
       launchUrl: withThemeParam(e.launchUrl || url, e.meta.kind),
       runtimeMissing: (e.meta.kind === "dsh" || e.meta.kind === "openclaw") && e.status !== "running" ? !this.hasRuntime(e.meta.kind) : void 0,
+      portHolder: e.portHolder,
       crashes: e.crashes || void 0,
       nextRestartAt: e.nextRestartAt
     };
@@ -12238,6 +12494,7 @@ class PageRegistry extends EventEmitter {
     e.exitCode = void 0;
     e.resolvedPort = void 0;
     e.launchUrl = void 0;
+    e.portHolder = null;
     this.emitProgress(e, "spawning");
     let proc;
     if (isDsh) {
@@ -12316,6 +12573,12 @@ class PageRegistry extends EventEmitter {
       this.emitProgress(e, "port");
       const { port: port2, url } = await this.waitReady(e, proc, isDsh, isOpenclaw, isTerminal);
       e.resolvedPort = port2;
+      if (e.meta.healthUrl) {
+        const target = healthTarget(e.meta, port2);
+        if (target && !await waitHealth(target, HEALTH_READY_TIMEOUT_MS)) {
+          throw new Error(m("page.healthFail", { url: target }));
+        }
+      }
       let launchUrl = url;
       if (isOpenclaw) {
         this.emitProgress(e, "url");
@@ -12335,9 +12598,19 @@ class PageRegistry extends EventEmitter {
       this.emitChanged();
       return this.toState(e);
     } catch (err) {
-      this.fail(e, err.message);
+      let failure = err;
+      if (failure instanceof PortNotReadyError) {
+        const holder = await findPortHolder(failure.port);
+        if (holder && holder.pid !== e.pid) {
+          e.portHolder = holder;
+          failure = new Error(
+            m("page.portOwner", { port: failure.port, pid: holder.pid, name: holder.name })
+          );
+        }
+      }
+      this.fail(e, failure.message);
       if (e.proc) this.stop(id2);
-      throw new Error(e.lastError);
+      throw failure;
     }
   }
   /** Dispatch orphan reclaim by kind, so `start` doesn't import both code paths. */
@@ -12575,6 +12848,64 @@ class PageRegistry extends EventEmitter {
     await this.stopAndWait(id2);
     return this.start(id2);
   }
+  /** Start a page after everything it `dependsOn` is up. The deps chain is walked depth-first
+   *  with an ancestry trail, so a cycle in user-authored container.jsons surfaces as an error
+   *  naming the loop instead of two pages waitLooping on each other. */
+  async startWithDeps(id2) {
+    await this.ensureDeps(id2, []);
+    return this.start(id2);
+  }
+  async restartWithDeps(id2) {
+    await this.stopAndWait(id2);
+    return this.startWithDeps(id2);
+  }
+  /** Recursively make every declared dep `running` (starting it if stopped), before the
+   *  dependent is allowed to spawn. Deps that aren't known pages are ignored — an imported
+   *  project may declare a dep on an optional builtin the user never installed. */
+  async ensureDeps(id2, ancestry) {
+    const e = this.entries.get(id2);
+    const deps = e?.meta.dependsOn ?? [];
+    if (!deps.length) return;
+    if (ancestry.includes(id2)) {
+      throw new Error(m("page.depsCycle", { chain: [...ancestry, id2].join(" → ") }));
+    }
+    for (const dep of deps) {
+      const d = this.entries.get(dep);
+      if (!d || d.meta.external || d.meta.kind === "terminal") continue;
+      if (d.status === "running") continue;
+      if (d.status === "starting") {
+        await this.waitDepReady(dep);
+        continue;
+      }
+      try {
+        await this.ensureDeps(dep, [...ancestry, id2]);
+        await this.start(dep);
+      } catch (err) {
+        throw new Error(m("page.depsFail", { dep, err: err.message }));
+      }
+    }
+  }
+  /** Wait for a dep that's already mid-boot (someone else called start) to settle.
+   *  No cycle re-check here: the dep is in flight, this method never spawns anything, so
+   *  the worst case is the boot timeout firing — a plain depsFail, not a deadlock. */
+  waitDepReady(id2) {
+    const deadline = Date.now() + DSH_READY_TIMEOUT_MS;
+    return new Promise((resolve2, reject) => {
+      const tick = () => {
+        const d = this.entries.get(id2);
+        if (!d) return resolve2();
+        if (d.status === "running") return resolve2();
+        if (d.status !== "starting") {
+          return reject(new Error(m("page.depsFail", { dep: id2, err: d.lastError || d.status })));
+        }
+        if (Date.now() > deadline) {
+          return reject(new Error(m("page.depsFail", { dep: id2, err: "timeout" })));
+        }
+        setTimeout(tick, 400);
+      };
+      tick();
+    });
+  }
   /**
    * Re-run the two on-demand CLI presence probes (pure `existsSync` over candidate paths) and
    * cache them for {@link toState}. The slim installer ships neither dsh nor openclaw — both are
@@ -12615,20 +12946,60 @@ class PageRegistry extends EventEmitter {
           return;
         }
         try {
-          await this.start(id2);
+          await this.startWithDeps(id2);
         } catch (err) {
           console.warn(`[pages] auto-start ${id2} failed:`, err.message);
         }
       })
     );
   }
-  shutdownAll() {
+  /** Stop every tracked page and resolve once all children have actually exited (or
+   * their per-process timeouts fired). On Windows the taskkill tree-kill is async, so
+   * quit paths that don't await this can orphan grandchildren on slow machines. */
+  async shutdownAll() {
     this.quitting = true;
-    for (const id2 of [...this.entries.keys()]) this.stop(id2);
+    await Promise.all([...this.entries.keys()].map((id2) => this.stopAndWait(id2)));
   }
   setStatus(e, status) {
     e.status = status;
+    if (status === "running") this.startHealthMonitor(e);
+    else this.stopHealthMonitor(e);
     this.emitChanged();
+  }
+  /** Periodically probe the declared healthUrl while running. Consecutive failures past
+   *  HEALTH_FAIL_LIMIT mean "bound but hung" — kill the child so the crash guard's normal
+   *  close-event path (backoff + budget) restarts it instead of us inventing a second path. */
+  startHealthMonitor(e) {
+    this.stopHealthMonitor(e);
+    if (!e.meta.healthUrl) return;
+    e.healthTimer = setInterval(() => {
+      if (e.status !== "running" || !e.proc || this.quitting) return;
+      const target = healthTarget(e.meta, e.resolvedPort ?? e.meta.containerPort ?? e.meta.port);
+      if (!target) return;
+      void probeHealth(target).then((alive) => {
+        if (e.status !== "running" || !e.proc) return;
+        if (alive) {
+          e.healthFails = 0;
+          return;
+        }
+        e.healthFails++;
+        if (e.healthFails < HEALTH_FAIL_LIMIT) return;
+        e.healthFails = 0;
+        e.logs.push(`[container] ${m("page.logHealthKill", { n: HEALTH_FAIL_LIMIT })}`);
+        console.warn(`[pages] ${e.meta.id}: ${HEALTH_FAIL_LIMIT} failed health probes — restarting`);
+        if (process.platform === "win32") {
+          spawn("taskkill", ["/pid", String(e.proc.pid), "/T", "/F"], { windowsHide: true });
+        } else {
+          e.proc.kill("SIGTERM");
+        }
+      });
+    }, HEALTH_POLL_MS);
+    e.healthTimer.unref?.();
+  }
+  stopHealthMonitor(e) {
+    if (e.healthTimer) clearInterval(e.healthTimer);
+    e.healthTimer = void 0;
+    e.healthFails = 0;
   }
   /** Cancel the guard's pending auto-restart / budget-refill timers for one entry. */
   clearRestartTimers(e) {
@@ -12651,6 +13022,10 @@ class PageRegistry extends EventEmitter {
       e.lastError = m("page.crashGiveUp", { max });
       e.logs.push(`[container] ${e.lastError}`);
       console.warn(`[pages] ${e.meta.id}: crash budget spent (${max}), auto-restart stopped`);
+      notifyEvent("notify.giveUpTitle", "notify.giveUpBody", {
+        name: e.meta.name,
+        max
+      });
       return;
     }
     const delay = CRASH_RETRY_DELAYS_MS[e.crashes - 1];
@@ -13478,6 +13853,7 @@ async function downloadAsar(tip, name, onProgress) {
   const keep = /* @__PURE__ */ new Set([tip.commit]);
   if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0]);
   pruneOldReleases(root, keep);
+  notifyEvent("notify.updateReadyTitle", "notify.updateReadyBody", { version: tip.version });
   onProgress?.({ name, phase: "done", received: total, total, percent: 100 });
 }
 async function checkAsarUpdate(name, dir) {
@@ -13498,6 +13874,7 @@ async function checkAsarUpdate(name, dir) {
       staged = null;
     }
     if (staged) {
+      const rb2 = canRollbackAsar();
       return {
         ...base,
         ok: true,
@@ -13507,10 +13884,13 @@ async function checkAsarUpdate(name, dir) {
         currentVersion: current,
         latestVersion: staged.version,
         hasUpdate: false,
-        pendingRestart: true
+        pendingRestart: true,
+        canRollback: rb2.available,
+        rollbackVersion: rb2.fromVersion
       };
     }
     const tip = await fetchTip(name);
+    const rb = canRollbackAsar();
     return {
       ...base,
       ok: true,
@@ -13522,7 +13902,9 @@ async function checkAsarUpdate(name, dir) {
       // local ahead of the release branch (e.g. a locally-built 0.1.5 vs server 0.1.4) is
       // simply up-to-date: hasUpdate stays false and no action is offered.
       hasUpdate: isNewer(current, tip.version),
-      pendingRestart: false
+      pendingRestart: false,
+      canRollback: rb.available,
+      rollbackVersion: rb.fromVersion
     };
   } catch (err) {
     return { ...base, error: err.message };
@@ -13573,6 +13955,12 @@ function relaunchToApplyStaged() {
   const stagedUnpacked = join(stagedDir, "app.asar.unpacked");
   const targetUnpacked = join(resourcesDir, "app.asar.unpacked");
   const exe = app$1.getPath("exe");
+  try {
+    const withOrigin = { ...meta, rollbackFromVersion: app$1.getVersion() };
+    writeFileSync$1(metaFile, JSON.stringify(withOrigin));
+    meta = withOrigin;
+  } catch {
+  }
   const noise = /* @__PURE__ */ new Set([
     "--autostart",
     "--dsh-relaunched",
@@ -13595,8 +13983,10 @@ function relaunchToApplyStaged() {
     // the asar / native handles.
     "while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }",
     "Start-Sleep -Milliseconds 800",
-    // Keep a single rollback copy of the version we are replacing.
+    // Keep a single rollback copy of the version we are replacing — asar AND natives, so a
+    // rollback can restore a consistent pair (a mismatched unpacked tree breaks node-pty).
     'if (Test-Path $dstAsar) { Copy-Item $dstAsar "$dstAsar.bak" -Force }',
+    'if (Test-Path $dstUnpacked) { robocopy $dstUnpacked "$dstUnpacked.bak" /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }',
     // Retry the copy while a lingering AV/defender handle releases (up to ~10s).
     "for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $srcAsar $dstAsar -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }",
     // node-pty's natives live beside the asar; mirror them too (robocopy /MIR returns 0-7 on ok).
@@ -13634,6 +14024,92 @@ function relaunchToApplyStaged() {
     return true;
   } catch (err) {
     console.error("[update] failed to schedule staged asar swap:", err);
+    return false;
+  }
+}
+function readMeta() {
+  try {
+    return JSON.parse(readFileSync(join(updatesRoot(), "update-meta.json"), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function canRollbackAsar() {
+  if (!app$1.isPackaged) return { available: false };
+  const resourcesDir = dirname(updatesRoot());
+  const bakAsar = join(resourcesDir, "app.asar.bak");
+  let size = 0;
+  try {
+    size = ofs.statSync(bakAsar).size;
+  } catch {
+    size = 0;
+  }
+  if (size < MIN_ASAR_BYTES) return { available: false };
+  const meta = readMeta();
+  const from = meta?.rollbackFromVersion;
+  return from ? { available: true, fromVersion: from } : { available: false };
+}
+function rollbackToPreviousAsar() {
+  if (!canRollbackAsar().available) return false;
+  const resourcesDir = dirname(updatesRoot());
+  const targetAsar = join(resourcesDir, "app.asar");
+  const bakAsar = `${targetAsar}.bak`;
+  const targetUnpacked = join(resourcesDir, "app.asar.unpacked");
+  const bakUnpacked = `${targetUnpacked}.bak`;
+  const metaFile = join(updatesRoot(), "update-meta.json");
+  const exe = app$1.getPath("exe");
+  const noise = /* @__PURE__ */ new Set(["--autostart", "--dsh-relaunched", "--dsh-boot-retry", "--dsh-asar-launched"]);
+  const relaunchArgs = process.argv.slice(1).filter((a) => !noise.has(a) && !a.startsWith("--app-path=")).concat("--dsh-relaunched");
+  const ps1 = join(updatesRoot(), "rollback-update.ps1");
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$appPid = ${process.pid}`,
+    `$exe = ${psStr(exe)}`,
+    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(", ")})`,
+    `$bakAsar = ${psStr(bakAsar)}`,
+    `$dstAsar = ${psStr(targetAsar)}`,
+    `$bakUnpacked = ${psStr(bakUnpacked)}`,
+    `$dstUnpacked = ${psStr(targetUnpacked)}`,
+    `$metaFile = ${psStr(metaFile)}`,
+    "while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }",
+    "Start-Sleep -Milliseconds 800",
+    // Stage a verified copy first: moving a corrupt .bak over the live asar would brick boot.
+    'for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $bakAsar "$dstAsar.rbk" -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }',
+    'if ((Get-Item "$dstAsar.rbk" -ErrorAction SilentlyContinue).Length -lt ' + MIN_ASAR_BYTES + ") { exit 1 }",
+    'Move-Item -Force "$dstAsar.rbk" $dstAsar',
+    // Restore the matching natives tree, then drop both backups (rollback is one-way).
+    "if (Test-Path $bakUnpacked) { robocopy $bakUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }",
+    'Remove-Item "$bakAsar","$bakUnpacked" -Recurse -Force -ErrorAction SilentlyContinue',
+    // Consume the rollback record + any pending marker so boot/OTA read the restored state.
+    "try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.pendingAsar = $null; $m.rollbackFromVersion = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}",
+    "Start-Process -FilePath $exe -ArgumentList $relaunchArgs"
+  ].join("\r\n");
+  try {
+    writeFileSync$1(ps1, script, "utf-8");
+    const helper = spawn(
+      "cmd.exe",
+      [
+        "/c",
+        "start",
+        "",
+        "/min",
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+        ps1
+      ],
+      { detached: true, stdio: "ignore", windowsHide: true }
+    );
+    helper.on("error", (err) => console.error("[update] rollback helper spawn failed:", err));
+    helper.unref();
+    console.log("[update] scheduled asar rollback swap");
+    return true;
+  } catch (err) {
+    console.error("[update] failed to schedule asar rollback:", err);
     return false;
   }
 }
@@ -14728,6 +15204,293 @@ async function runUpdate(target, onProgress) {
       return { name: target.name, ok: false, updated: false, error: m("upd.unknownChannel") };
   }
 }
+function readTailText(file, cap) {
+  try {
+    const total = statSync(file).size;
+    const len = Math.min(total, cap);
+    const buf = Buffer.allocUnsafe(len);
+    const fd = openSync(file, "r");
+    try {
+      readSync(fd, buf, 0, len, total - len);
+    } finally {
+      closeSync(fd);
+    }
+    return buf.toString("utf8");
+  } catch {
+    return `(unavailable: ${file})
+`;
+  }
+}
+function capture(cmd, args, cwd, timeoutMs = 8e3) {
+  return new Promise((resolve2) => {
+    const child = spawn(cmd, args, { cwd, windowsHide: true, timeout: timeoutMs });
+    let out = "";
+    child.stdout?.on("data", (d) => out += String(d));
+    child.on("error", () => resolve2(""));
+    child.on("close", () => resolve2(out.trim()));
+  });
+}
+const SECRET_KEY_RE = /token|key|secret|password|pwd|auth|cookie/i;
+function maskSettings() {
+  const s = getSettings();
+  const out = { ...s };
+  const envs = s.pageEnvs;
+  if (envs) {
+    out.pageEnvs = Object.fromEntries(
+      Object.entries(envs).map(([page, vars]) => [
+        page,
+        Object.fromEntries(
+          Object.entries(vars ?? {}).map(([k, v]) => [
+            k,
+            SECRET_KEY_RE.test(k) && v ? "***" : v
+          ])
+        )
+      ])
+    );
+  }
+  return out;
+}
+async function exportDiagnostics(registry2) {
+  const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const stage = join(app$1.getPath("temp"), `dsh-diag-${ts}`);
+  mkdirSync(stage, { recursive: true });
+  try {
+    let nodeRuntime$1 = null;
+    try {
+      nodeRuntime$1 = await Promise.resolve().then(() => nodeRuntime).then((r) => r.getNodeRuntimeInfo());
+    } catch {
+    }
+    let runtimes = {};
+    try {
+      const [{ isDshInstalled: isDshInstalled2 }, { isOpenclawInstalled: isOpenclawInstalled2 }] = await Promise.all([
+        Promise.resolve().then(() => dsh),
+        Promise.resolve().then(() => openclaw)
+      ]);
+      runtimes = { dshInstalled: isDshInstalled2(), openclawInstalled: isOpenclawInstalled2() };
+    } catch {
+    }
+    writeFileSync$1(
+      join(stage, "versions.json"),
+      JSON.stringify(
+        {
+          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          appVersion: app$1.getVersion(),
+          packaged: app$1.isPackaged,
+          exePath: app$1.getPath("exe"),
+          userData: app$1.getPath("userData"),
+          electron: process.versions.electron,
+          chrome: process.versions.chrome,
+          node: process.versions.node,
+          bundledNode: nodeRuntime$1,
+          onDemandRuntimes: runtimes
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+    writeFileSync$1(join(stage, "settings.json"), JSON.stringify(maskSettings(), null, 2), "utf8");
+    const pages = registry2.list().map((p) => {
+      let manifest = null;
+      try {
+        const f = join(p.dir, "container.json");
+        manifest = existsSync(f) ? JSON.parse(readFileSyncSafe(f)) : null;
+      } catch {
+        manifest = "(unreadable)";
+      }
+      return {
+        id: p.id,
+        name: p.name,
+        kind: p.kind,
+        status: p.status,
+        pid: p.pid,
+        port: p.containerPort ?? p.port,
+        external: p.external,
+        lastError: p.lastError,
+        crashes: p.crashes,
+        dependsOn: p.dependsOn,
+        healthUrl: p.healthUrl,
+        containerJson: manifest
+      };
+    });
+    writeFileSync$1(join(stage, "pages.json"), JSON.stringify(pages, null, 2), "utf8");
+    writeFileSync$1(
+      join(stage, "system.txt"),
+      [
+        `os: ${os.type()} ${os.release()} (${os.arch()})`,
+        `hostname: ${os.hostname()}`,
+        `cpus: ${os.cpus().length} x ${os.cpus()[0]?.model ?? "?"}`,
+        `totalMemory: ${(os.totalmem() / 1024 / 1024 / 1024).toFixed(1)} GB`,
+        `freeMemory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(1)} GB`,
+        `home: ${os.homedir()}`,
+        `locale: ${Intl.DateTimeFormat().resolvedOptions().locale} / TZ ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+        `env.proxy: ${process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? "(none)"}`
+      ].join("\n"),
+      "utf8"
+    );
+    mkdirSync(join(stage, "logs"), { recursive: true });
+    writeFileSync$1(join(stage, "logs", "main.log"), readTailText(join(logsDir(), "main.log"), 1024 * 1024), "utf8");
+    for (const f of safePageLogFiles()) {
+      writeFileSync$1(
+        join(stage, "logs", f.name),
+        readTailText(join(logsDir(), "pages", f.name), 256 * 1024),
+        "utf8"
+      );
+    }
+    const gitLines = [];
+    for (const p of [{ id: "__container__", dir: registry2.containerEntry().dir }, ...pages.map((p2) => ({ id: p2.id, dir: registry2.get(p2.id)?.dir ?? "" }))]) {
+      if (!p.dir || !existsSync(join(p.dir, ".git"))) {
+        gitLines.push(`${p.id}: (no .git)`);
+        continue;
+      }
+      const head = await capture("git", ["rev-parse", "--short", "HEAD"], p.dir);
+      const branch = await capture("git", ["branch", "--show-current"], p.dir);
+      gitLines.push(`${p.id}: ${branch || "?"} @ ${head || "?"}`);
+    }
+    writeFileSync$1(join(stage, "git.txt"), gitLines.join("\n"), "utf8");
+    const zipPath = join(app$1.getPath("temp"), `dsh-diag-${ts}.zip`);
+    await zipFolder(stage, zipPath);
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: m("diag.exportTitle"),
+      defaultPath: `dsh-diag-${ts}.zip`,
+      filters: [{ name: "zip", extensions: ["zip"] }]
+    });
+    if (canceled || !filePath) return null;
+    await promises.copyFile(zipPath, filePath);
+    return filePath;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+function readFileSyncSafe(file) {
+  return JSON.stringify(JSON.parse(readFileSync(file, "utf-8")));
+}
+function safePageLogFiles() {
+  try {
+    const dir = join(logsDir(), "pages");
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir).filter((f) => f.endsWith(".log")).map((name) => ({ name }));
+  } catch {
+    return [];
+  }
+}
+function zipFolder(src, dest) {
+  const ps = `Compress-Archive -LiteralPath '${src.replace(/'/g, "''")}\\*' -DestinationPath '${dest.replace(/'/g, "''")}' -Force`;
+  const encoded = Buffer.from(ps, "utf16le").toString("base64");
+  return new Promise((resolve2, reject) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-EncodedCommand", encoded], {
+      windowsHide: true,
+      timeout: 6e4
+    });
+    let err = "";
+    child.stderr?.on("data", (d) => err += String(d));
+    child.on("error", reject);
+    child.on(
+      "close",
+      (code2) => code2 === 0 ? resolve2() : reject(new Error(`Compress-Archive failed (${code2}): ${err.trim()}`))
+    );
+  });
+}
+const icon = join$1(import.meta.dirname, "../../resources/icon.png");
+function appIconPath() {
+  const candidates = [
+    icon,
+    join(process.resourcesPath || "", "icon.png"),
+    join(app$1.getAppPath(), "resources", "icon.png")
+  ].filter(Boolean);
+  return candidates.find((p) => existsSync(p)) || icon;
+}
+let tray = null;
+let trayImage = null;
+let updatePending = false;
+const BADGE_COLORS = {
+  1: [245, 158, 11],
+  2: [239, 68, 68]
+};
+function composeImage(level) {
+  if (!trayImage || level === 0) return trayImage;
+  try {
+    const { width, height } = trayImage.getSize();
+    if (!width || !height) return trayImage;
+    const bmp = trayImage.toBitmap();
+    const [r, g, b] = BADGE_COLORS[level];
+    const rad = Math.max(3, Math.round(width * 0.28));
+    const cx = width - rad - 1;
+    const cy = height - rad - 1;
+    for (let y = Math.max(0, cy - rad); y < Math.min(height, cy + rad + 1); y++) {
+      for (let x = Math.max(0, cx - rad); x < Math.min(width, cx + rad + 1); x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > rad * rad) continue;
+        const i = (y * width + x) * 4;
+        const edge = d2 > (rad - 1) * (rad - 1);
+        bmp[i] = edge ? 255 : b;
+        bmp[i + 1] = edge ? 255 : g;
+        bmp[i + 2] = edge ? 255 : r;
+        bmp[i + 3] = 255;
+      }
+    }
+    return nativeImage.createFromBitmap(bmp, { width, height });
+  } catch (err) {
+    console.warn("[tray] badge compose failed, using bare icon:", err.message);
+    return trayImage;
+  }
+}
+let hooks = {
+  getRegistry: () => null,
+  onShowWindow: () => void 0,
+  onQuitRequest: () => void 0
+};
+const TRAY_STOPPED_LIMIT = 8;
+function rebuildTrayMenu() {
+  const registry2 = hooks.getRegistry();
+  if (!tray || !registry2) return;
+  const running = registry2.running();
+  const stopped = registry2.list().filter((p) => p.status !== "running" && !p.external);
+  const template = [
+    { label: m("tray.show"), click: () => hooks.onShowWindow() },
+    { type: "separator" },
+    ...running.map((p) => ({
+      label: m("tray.stop", { name: p.name }),
+      click: () => registry2.stop(p.id)
+    })),
+    ...stopped.slice(0, TRAY_STOPPED_LIMIT).map((p) => ({
+      label: m("tray.start", { name: p.name }),
+      click: () => {
+        registry2.start(p.id).catch((err) => console.warn("[tray] start failed:", err.message));
+      }
+    })),
+    { type: "separator" },
+    {
+      label: m("tray.quit"),
+      click: () => hooks.onQuitRequest()
+    }
+  ];
+  const alert = stopped.some((p) => p.status === "error");
+  tray.setToolTip(alert ? m("tray.tooltipAlert") : m("tray.tooltip", { n: running.length }));
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+  const img = composeImage(alert ? 2 : updatePending ? 1 : 0);
+  if (img) tray.setImage(img);
+}
+function setTrayUpdatePending(v) {
+  if (updatePending === v) return;
+  updatePending = v;
+  const registry2 = hooks.getRegistry();
+  const alert = registry2 ? registry2.list().some((p) => p.status === "error" && !p.external) : false;
+  const img = composeImage(alert ? 2 : v ? 1 : 0);
+  if (tray && img) tray.setImage(img);
+}
+function createTray(injected) {
+  if (tray) return;
+  hooks = injected;
+  const path2 = appIconPath();
+  const image = existsSync(path2) ? nativeImage.createFromPath(path2) : nativeImage.createEmpty();
+  trayImage = image.isEmpty() ? image : image.resize({ width: 16, height: 16 });
+  tray = new Tray(trayImage);
+  tray.on("click", () => hooks.onShowWindow());
+  rebuildTrayMenu();
+}
 class PtySession {
   constructor(id2, title2, cwd, shell2, args, env2) {
     this.id = id2;
@@ -14973,7 +15736,7 @@ function registerIpc(registry2) {
   });
   ipcMain$1.handle(IPC.StartPage, async (_e, id2) => {
     try {
-      return ok(await registry2.start(id2));
+      return ok(await registry2.startWithDeps(id2));
     } catch (err) {
       return fail(err);
     }
@@ -14984,7 +15747,7 @@ function registerIpc(registry2) {
   });
   ipcMain$1.handle(IPC.RestartPage, async (_e, id2) => {
     try {
-      return ok(await registry2.restart(id2));
+      return ok(await registry2.restartWithDeps(id2));
     } catch (err) {
       return fail(err);
     }
@@ -15119,6 +15882,46 @@ function registerIpc(registry2) {
       return fail(e);
     }
   });
+  ipcMain$1.handle(IPC.ListLogFiles, () => {
+    try {
+      return ok(listLogFiles());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ReadLogs, (_e, args) => {
+    try {
+      return ok(readLogTail(args?.key ?? "", args?.tail, args?.filter));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ExportDiagnostics, async () => {
+    try {
+      return ok(await exportDiagnostics(registry2));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.KillPortHolder, async (_e, port) => {
+    try {
+      const n = Number(port);
+      if (!Number.isFinite(n) || n < 1 || n > 65535) return fail(new Error(m("ipc.portRange")));
+      return ok(await killPortHolder(n));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.RollbackAsar, () => {
+    try {
+      if (!canRollbackAsar().available) return fail(new Error(m("update.noRollback")));
+      if (!rollbackToPreviousAsar()) return fail(new Error(m("update.rollbackFailed")));
+      setTimeout(() => app$1.exit(0), 700);
+      return ok(true);
+    } catch (err) {
+      return fail(err);
+    }
+  });
   ipcMain$1.handle(
     IPC.UpdateSettings,
     (_e, partial) => {
@@ -15131,6 +15934,7 @@ function registerIpc(registry2) {
           applyLaunchAtStartup(partial.launchAtStartup);
         }
         if (partial.locale) {
+          invalidateLocaleCache();
           registry2.reconcile();
           notifyLocaleChanged();
           registry2.emitChanged();
@@ -15159,7 +15963,9 @@ function registerIpc(registry2) {
   );
   ipcMain$1.handle(IPC.CheckUpdates, async (_e, force) => {
     try {
-      return ok(await checkUpdates(registry2.list(), Boolean(force)));
+      const results = await checkUpdates(registry2.list(), Boolean(force));
+      setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)));
+      return ok(results);
     } catch (err) {
       return fail(err);
     }
@@ -15167,6 +15973,7 @@ function registerIpc(registry2) {
   if (surveyTimer) clearInterval(surveyTimer);
   const runSurvey = () => {
     checkUpdates(registry2.list(), true).then((results) => {
+      setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)));
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) win.webContents.send(IPC.OnUpdateResults, results);
       }
@@ -15523,7 +16330,25 @@ function registerDownloadHandling() {
     wireItem(item, host);
   });
 }
-const icon = join$1(import.meta.dirname, "../../resources/icon.png");
+const MIGRATION_MARKER = ".ascii-userdata-migrated";
+function copyMissing(src, dst) {
+  let copied = 0;
+  const walk = (s, d) => {
+    for (const ent of readdirSync(s, { withFileTypes: true })) {
+      const sp = join(s, ent.name);
+      const dp = join(d, ent.name);
+      if (ent.isDirectory()) {
+        if (!existsSync(dp)) mkdirSync(dp);
+        walk(sp, dp);
+      } else if (ent.isFile() && !existsSync(dp)) {
+        copyFileSync(sp, dp);
+        copied++;
+      }
+    }
+  };
+  walk(src, dst);
+  return copied;
+}
 function ensureAsciiUserData() {
   const asciiLeaf = "DesktopContainer";
   try {
@@ -15535,6 +16360,16 @@ function ensureAsciiUserData() {
       return;
     }
     if (existsSync(target)) {
+      if (existsSync(current)) {
+        try {
+          const n = copyMissing(current, target);
+          console.warn(
+            `[container] both userData folders existed; merged ${n} file(s) from the Chinese path into ASCII (no overwrite)`
+          );
+        } catch (err) {
+          console.warn("[container] userData merge incomplete (continuing with ASCII):", err);
+        }
+      }
       app$1.setPath("userData", target);
       return;
     }
@@ -15545,6 +16380,10 @@ function ensureAsciiUserData() {
     try {
       renameSync(current, target);
       app$1.setPath("userData", target);
+      try {
+        writeFileSync$1(join(target, MIGRATION_MARKER), `migrated from ${current} at ${(/* @__PURE__ */ new Date()).toISOString()}`);
+      } catch {
+      }
     } catch (err) {
       console.error("[container] userData migration to ASCII path failed; keeping current:", err);
     }
@@ -15559,21 +16398,21 @@ onLocaleChanged(() => {
   mainWindow?.setTitle(m("app.title"));
   rebuildTrayMenu();
 });
-function appIconPath() {
-  const candidates = [
-    icon,
-    join(process.resourcesPath || "", "icon.png"),
-    join(app$1.getAppPath(), "resources", "icon.png")
-  ].filter(Boolean);
-  return candidates.find((p) => existsSync(p)) || icon;
-}
 let mainWindow = null;
-let tray = null;
 let registry = null;
 let isQuitting = false;
 let startHidden = false;
+const FATAL_ERROR_CODES = /* @__PURE__ */ new Set(["MODULE_NOT_FOUND", "ERR_UNKNOWN_BUILTIN_MODULE", "ERR_DLOPEN_FAILED"]);
+let fatalEscalated = false;
 process.on("uncaughtException", (err) => {
   console.error("[container] uncaught exception:", err);
+  const code2 = err.code;
+  if (app$1.isPackaged && code2 && FATAL_ERROR_CODES.has(code2) && !fatalEscalated) {
+    fatalEscalated = true;
+    const msg = m("err.fatal", { err: code2 });
+    console.error(`[container] fatal: ${msg}`);
+    dialog.showMessageBox({ type: "error", title: m("dialog.title"), message: msg }).catch(() => void 0).finally(() => app$1.exit(1));
+  }
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[container] unhandled rejection:", reason);
@@ -15616,12 +16455,20 @@ function createWindow() {
     icon: appIconPath(),
     webPreferences: {
       preload: resolvePreload(),
+      // Deliberate trade-off (container host): sandbox:false so the preload can expose node
+      // helpers; webviewTag:true so managed pages run embedded. The blast radius is kept in
+      // check by the authoritative web-contents-created handler below — every webview guest
+      // gets window.open denied and navigated in place, so no guest escapes to a popup or
+      // the system browser. Don't remove either without re-checking that handler.
       sandbox: false,
       webviewTag: true
     }
   });
   mainWindow.on("ready-to-show", () => {
     if (!startHidden) mainWindow?.show();
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
   });
   const pushMaximized = () => {
     mainWindow?.webContents.send(IPC.OnMaximizedChanged, mainWindow.isMaximized());
@@ -15671,40 +16518,6 @@ function confirmAndQuit() {
   if (!mainWindow.isVisible()) mainWindow.show();
   mainWindow.webContents.send(IPC.OnQuitConfirm);
 }
-function rebuildTrayMenu() {
-  if (!tray || !registry) return;
-  const running = registry.running();
-  const stopped = registry.list().filter((p) => p.status !== "running" && !p.external);
-  const template = [
-    { label: m("tray.show"), click: showWindow },
-    { type: "separator" },
-    ...running.map((p) => ({
-      label: m("tray.stop", { name: p.name }),
-      click: () => registry?.stop(p.id)
-    })),
-    ...stopped.slice(0, 8).map((p) => ({
-      label: m("tray.start", { name: p.name }),
-      click: () => {
-        registry?.start(p.id).catch((err) => console.warn("[tray] start failed:", err.message));
-      }
-    })),
-    { type: "separator" },
-    {
-      label: m("tray.quit"),
-      click: () => confirmAndQuit()
-    }
-  ];
-  tray.setToolTip(m("tray.tooltip", { n: running.length }));
-  tray.setContextMenu(Menu.buildFromTemplate(template));
-}
-function createTray() {
-  if (tray) return;
-  const path2 = appIconPath();
-  const image = existsSync(path2) ? nativeImage.createFromPath(path2) : nativeImage.createEmpty();
-  tray = new Tray(image.isEmpty() ? image : image.resize({ width: 16, height: 16 }));
-  tray.on("click", showWindow);
-  rebuildTrayMenu();
-}
 async function verifyNodeRuntime() {
   const info = await getNodeRuntimeInfo();
   if (!info.ok) {
@@ -15722,13 +16535,31 @@ async function verifyNodeRuntime() {
 function dialogWarn(msg) {
   dialog.showMessageBox({ type: "warning", title: m("dialog.title"), message: msg }).catch(() => void 0);
 }
+function reacquireSingleInstanceLock() {
+  const RETRY_MS = 500;
+  const MAX_ATTEMPTS = 10;
+  const attempt = (n) => {
+    if (app$1.requestSingleInstanceLock()) {
+      console.log(`[container] relaunched instance took over the single-instance lock (attempt ${n})`);
+      return;
+    }
+    if (n >= MAX_ATTEMPTS) {
+      const msg = m("err.dualInstance");
+      console.error(`[container] ${msg} (lock still held after ${n} attempts)`);
+      dialogWarn(msg);
+      return;
+    }
+    setTimeout(() => attempt(n + 1), RETRY_MS);
+  };
+  attempt(1);
+}
 const relaunched = process.argv.includes("--dsh-relaunched");
 const gotLock = relaunched || app$1.requestSingleInstanceLock();
 if (!gotLock) {
   app$1.quit();
 } else {
   if (relaunched) {
-    setTimeout(() => app$1.requestSingleInstanceLock(), 1e3);
+    reacquireSingleInstanceLock();
   }
   app$1.on("second-instance", showWindow);
   app$1.whenReady().then(async () => {
@@ -15747,14 +16578,21 @@ if (!gotLock) {
       }
     });
     registerDownloadHandling();
-    await verifyNodeRuntime();
+    createWindow();
+    createTray({
+      getRegistry: () => registry,
+      onShowWindow: showWindow,
+      onQuitRequest: confirmAndQuit
+    });
+    verifyNodeRuntime().catch(
+      (err) => console.error("[container] node runtime verification failed:", err)
+    );
     ensureDefaultOpenclawPage();
     ensureBuiltinPages();
     registry = new PageRegistry({ pagesDir: resolvePagesDir(), projectDir: resolveProjectDir() });
     registerIpc(registry);
     registry.on("changed", rebuildTrayMenu);
-    createWindow();
-    createTray();
+    rebuildTrayMenu();
     const settings = getSettings();
     if (settings.autoStartPages.length) {
       registry.autoStart(settings.autoStartPages).catch((err) => console.warn("[container] auto-start failed", err));
@@ -15772,16 +16610,20 @@ if (!gotLock) {
     }
   });
   let shutdownDone = false;
+  const QUIT_FLUSH_MS = 3e3;
   app$1.on("before-quit", (e) => {
     isQuitting = true;
     if (registry && !shutdownDone) {
       shutdownDone = true;
       e.preventDefault();
-      registry.shutdownAll();
-      setTimeout(() => {
-        shutdownDone = false;
-        app$1.exit(0);
-      }, 800);
+      const grace = new Promise((resolve2) => setTimeout(resolve2, QUIT_FLUSH_MS));
+      Promise.race([registry.shutdownAll(), grace]).then(
+        () => app$1.exit(0),
+        (err) => {
+          console.error("[container] shutdownAll failed, forcing exit:", err);
+          app$1.exit(0);
+        }
+      );
     }
   });
 }

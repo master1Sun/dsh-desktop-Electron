@@ -55,7 +55,7 @@ extraResources:
 win:
   executableName: DesktopContainer
 nsis:
-  # fixed product-name artifact (was ${name}-… = dsh-desktop-electron-…); matches executableName/appId
+  # fixed product-name artifact (was ${name}-… = DesktopContainer-…); matches executableName/appId
   artifactName: DesktopContainer-${version}.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}

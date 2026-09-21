@@ -7,6 +7,7 @@ import OpenclawManager from './OpenclawManager.vue'
 import ExternalSitesManager from './ExternalSitesManager.vue'
 import SettingsPanel from './SettingsPanel.vue'
 import AppManager from './AppManager.vue'
+import LogViewer from './LogViewer.vue'
 import { usePagesStore } from '../stores/pages'
 import { useUpdatesStore } from '../stores/updates'
 import { useTasksStore } from '../stores/tasks'
@@ -76,6 +77,30 @@ async function relaunchNow(): Promise<void> {
     return // user deferred — the row keeps offering 立即重启 until they restart
   }
   await window.container.relaunchApp()
+}
+
+/**
+ * OTA rollback: the last in-place update left app.asar.bak (+ natives backup) behind, so a
+ * row reporting canRollback offers a way back to the version we replaced. Like relaunchNow,
+ * a successful call ends the process — the detached helper swaps files and relaunches.
+ */
+async function rollbackNow(row: UpdateCheckResult): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      t('panel.rollbackConfirm', { version: row.rollbackVersion || '?' }),
+      t('panel.rollbackTitle'),
+      { type: 'warning', confirmButtonText: t('panel.rollbackBtn'), cancelButtonText: t('common.cancel') }
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await window.container.rollbackAsar()
+    if (!res?.ok) ElMessage.error(res?.error || t('panel.rollbackFailed'))
+    // ok: app.exit fires a beat later — the window is already going away.
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
 }
 
 /* ---- builtin page reset (dsh-web / openclaw) ----
@@ -423,6 +448,16 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
             >
               {{ t('panel.updateBtn') }}
             </el-button>
+            <el-button
+              v-else-if="row.isContainer && row.canRollback"
+              size="small"
+              round
+              type="warning"
+              plain
+              @click="rollbackNow(row)"
+            >
+              {{ t('panel.rollbackBtn') }}
+            </el-button>
             <el-tooltip v-else-if="row.hasUpdate" :content="t('panel.manualTip')" placement="top">
               <el-button size="small" round disabled>{{ t('panel.manualBtn') }}</el-button>
             </el-tooltip>
@@ -438,6 +473,11 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
           </template>
         </el-table-column>
       </el-table>
+      <div class="line" />
+      <div class="head">
+        <span>{{ t('panel.logViewerTitle') }}</span>
+      </div>
+      <LogViewer />
     </section>
   </div>
 </template>

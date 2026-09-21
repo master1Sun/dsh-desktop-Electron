@@ -119,6 +119,9 @@ const zh: Dict = {
     crashAutoRestart: '崩溃自动重启',
     crashAutoRestartTip:
       '页面启动后异常退出时自动重试（2s/5s/15s 退避）；稳定运行 5 分钟后清零。关闭后崩溃仅标红、不自动重启。',
+    systemNotifications: '系统通知',
+    systemNotificationsTip:
+      '页面崩溃放弃自动重启、在线更新下载就绪时显示系统通知；关闭后仅托盘角标提示。',
     openLogs: '打开日志目录',
     openLogsHint: '主进程与各页面的运行日志会落盘到该目录，便于打包后排查问题。',
     envDir: '环境目录',
@@ -195,7 +198,21 @@ const zh: Dict = {
       '{name} 将删除当前页面目录并从容器自带副本重新恢复：你对该目录内文件（配置、代码）的任何修改都会丢失且无法撤销；运行中的页面会先停止，重置完成后自动重新启动。端口、环境目录等设置不受影响。确定重置吗？',
     resetDone: '{name} 已重置为出厂内容',
     manualTip: '本地项目不支持自动更新：请在其仓库拉取新版后重装/复制',
-    notDetected: '未检测到'
+    notDetected: '未检测到',
+    logViewerTitle: '运行日志',
+    logFilter: '过滤关键字',
+    logTail: '行',
+    logAuto: '自动刷新',
+    logRefresh: '刷新',
+    logEmpty: '（空）',
+    exportDiagBtn: '导出诊断报告',
+    exportDiagDone: '诊断报告已导出：{path}',
+    exportDiagFailed: '诊断报告导出失败',
+    rollbackBtn: '回退到上一版本',
+    rollbackTitle: '回退版本',
+    rollbackConfirm:
+      '将用上次在线更新前的版本 v{version} 替换当前程序并自动重启；回退完成后需重新检查更新。确定回退吗？',
+    rollbackFailed: '回退调度失败，请查看日志'
   },
   app: {
     title: '桌面控制台',
@@ -309,7 +326,11 @@ const zh: Dict = {
     logStatus: '状态：',
     logExitCode: '退出码：',
     logStarted: '启动：',
-    logError: '错误：'
+    logError: '错误：',
+    killPort: '结束占用进程 {name} (PID {pid}) 并重试',
+    msgKillFail: '结束占用进程失败',
+    msgKilled: '已结束占用端口的进程 (PID {pid})，正在重新启动…',
+    msgHolderGone: '端口已无占用，正在重新启动…'
   },
   dshMgr: {
     emptyError: '未安装 @deepseek-ai/dsh',
@@ -680,6 +701,9 @@ const en: Dict = {
     crashAutoRestart: 'Auto-restart on crash',
     crashAutoRestartTip:
       'Retries a page that exits abnormally after it has started (2s/5s/15s backoff); the counter clears after 5 min stable. When off, crashes only flag red and never auto-restart.',
+    systemNotifications: 'System notifications',
+    systemNotificationsTip:
+      'Show an OS notification when a page crashes out of the auto-restart budget or an OTA update finishes downloading; when off, only the tray badge reports them.',
     openLogs: 'Open log folder',
     openLogsHint: 'Main-process and per-page output is written here, to debug a packaged build.',
     envDir: 'Environment directory',
@@ -758,7 +782,21 @@ const en: Dict = {
     resetDone: '{name} has been reset to its factory content',
     manualTip:
       'Local projects do not support auto-update: pull the new version in their repo, then reinstall/copy.',
-    notDetected: 'Not detected'
+    notDetected: 'Not detected',
+    logViewerTitle: 'Run logs',
+    logFilter: 'Filter keyword',
+    logTail: 'lines',
+    logAuto: 'Auto refresh',
+    logRefresh: 'Refresh',
+    logEmpty: '(empty)',
+    exportDiagBtn: 'Export diagnostics',
+    exportDiagDone: 'Diagnostics exported: {path}',
+    exportDiagFailed: 'Failed to export diagnostics',
+    rollbackBtn: 'Roll back to previous version',
+    rollbackTitle: 'Version rollback',
+    rollbackConfirm:
+      'Replaces the running program with v{version} (the version before the last OTA update) and relaunches automatically; after the rollback you will need to re-check for updates. Roll back now?',
+    rollbackFailed: 'Failed to schedule the rollback — check the logs'
   },
   app: {
     title: 'Desktop Console',
@@ -875,7 +913,11 @@ const en: Dict = {
     logStatus: 'Status: ',
     logExitCode: 'Exit code: ',
     logStarted: 'Started: ',
-    logError: 'Error: '
+    logError: 'Error: ',
+    killPort: 'Kill holder {name} (PID {pid}) and retry',
+    msgKillFail: 'Failed to kill the port holder',
+    msgKilled: 'Killed the process holding the port (PID {pid}) — restarting…',
+    msgHolderGone: 'The port is no longer held — restarting…'
   },
   dshMgr: {
     emptyError: '@deepseek-ai/dsh is not installed',

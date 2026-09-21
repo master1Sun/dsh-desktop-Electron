@@ -35,12 +35,17 @@ const zh: Dict = {
   'tray.quitYes': '确定',
   'tray.quitNo': '取消',
   'tray.tooltip': '桌面控制台 · {n} 个 page 运行中',
+  'tray.tooltipAlert': '桌面控制台 · 有页面异常退出，请打开面板排查',
   'dialog.title': 'DSH 容器',
   'dialog.chooseDir': '选择要托管的本地项目目录',
   'dialog.saveAs': '另存为',
   'err.nodeVersion': '内置 Node 版本异常：{version}（期望 v24.21.0）',
   'err.nodeMissing':
     '未找到内置 Node 运行时，请在“环境准备”引导中点击下载（开发者可运行 npm run setup:node）',
+  'err.dualInstance':
+    '未能重新获取单实例锁：可能有另一个实例仍在运行，请确认是否出现双实例并存后手动关闭多余实例',
+  'err.fatal':
+    '桌面控制台遇到致命错误（{err}），即将退出。若反复出现，请通过任务管理器结束残留进程后重新启动；仍无法恢复时请重新安装或回退最近的更新',
 
   'download.doneTitle': '下载完成',
   'download.doneBody': '{name} 已保存到 {dir}',
@@ -77,6 +82,19 @@ const zh: Dict = {
   'page.processExited': '进程退出，code={code}',
   'page.logReady': '[container] 已就绪，监听端口 {port}',
   'page.dshProfileNotReady': 'dsh profile 在 {sec}s 内未就绪（端口 {port}）',
+  'page.healthFail': '端口已监听但健康检查未通过：{url}',
+  'page.portOwner': '端口 {port} 已被进程 {name}（PID {pid}）占用，可结束它后重试，或改用其他端口',
+  'page.depsCycle': '启动依赖存在循环：{chain}',
+  'page.depsFail': '依赖页面 {dep} 启动失败：{err}',
+  'page.logHealthKill': '[container] 健康检查连续 {n} 次失败，判定进程假死，正在重启…',
+  'notify.giveUpTitle': '页面自动重启已放弃',
+  'notify.giveUpBody': '{name} 连续异常退出 {max} 次，容器已停止自动重启，请在「页面」面板排查',
+  'notify.updateReadyTitle': '更新已就绪',
+  'notify.updateReadyBody': '桌面控制台 v{version} 已下载完成，重启后生效',
+  'log.mainLabel': '主进程日志',
+  'update.noRollback': '当前没有可回退的上一版本备份（仅在完成过一次在线更新后可用）',
+  'update.rollbackFailed': '回退调度失败，请查看日志',
+  'diag.exportTitle': '导出诊断报告',
   'page.logStopping': '[container] 正在停止…',
   'page.logRetryAfterReclaim': '[container] 检测到旧进程占用，已清理残留进程，正在重试启动…',
   'page.logCrashRestart':
@@ -185,12 +203,17 @@ const en: Dict = {
   'tray.quitYes': 'OK',
   'tray.quitNo': 'Cancel',
   'tray.tooltip': 'Desktop Console · {n} page(s) running',
+  'tray.tooltipAlert': 'Desktop Console · a page exited abnormally — open the panel to investigate',
   'dialog.title': 'DSH Container',
   'dialog.chooseDir': 'Choose the local project folder to host',
   'dialog.saveAs': 'Save As',
   'err.nodeVersion': 'Unexpected built-in Node version: {version} (expected v24.21.0)',
   'err.nodeMissing':
     'Built-in Node runtime not found — download it from the setup guide (developers: run npm run setup:node)',
+  'err.dualInstance':
+    'Failed to re-acquire the single-instance lock: another instance may still be running — check for duplicate instances and close the extra one manually',
+  'err.fatal':
+    'The desktop container hit a fatal error ({err}) and will exit. If it keeps happening, kill leftover processes in Task Manager and restart; if it persists, reinstall or roll back the latest update',
 
   'download.doneTitle': 'Download complete',
   'download.doneBody': '{name} saved to {dir}',
@@ -229,6 +252,23 @@ const en: Dict = {
   'page.processExited': 'Process exited, code={code}',
   'page.logReady': '[container] Ready, listening on port {port}',
   'page.dshProfileNotReady': 'dsh profile was not ready within {sec}s (port {port})',
+  'page.healthFail': 'The port is listening but the health check failed: {url}',
+  'page.portOwner':
+    'Port {port} is already held by process {name} (PID {pid}) — kill it and retry, or pick another port',
+  'page.depsCycle': 'Circular page startup dependency: {chain}',
+  'page.depsFail': 'Dependency page {dep} failed to start: {err}',
+  'page.logHealthKill':
+    '[container] Health check failed {n} times in a row — treating the process as hung and restarting…',
+  'notify.giveUpTitle': 'Page auto-restart gave up',
+  'notify.giveUpBody':
+    '{name} exited abnormally {max} times in a row; the container stopped restarting it — investigate in the Pages panel',
+  'notify.updateReadyTitle': 'Update ready',
+  'notify.updateReadyBody': 'Desktop container v{version} downloaded — restart to apply',
+  'log.mainLabel': 'Main process log',
+  'update.noRollback':
+    'No previous-version backup is available to roll back to (only offered after one OTA update has completed)',
+  'update.rollbackFailed': 'Failed to schedule the rollback — check the logs',
+  'diag.exportTitle': 'Export diagnostic report',
   'page.logStopping': '[container] Stopping…',
   'page.logRetryAfterReclaim':
     '[container] A stale process was holding the resource; reclaimed it and retrying the start…',
@@ -343,6 +383,14 @@ let localeSource: () => Locale | undefined = () => 'zh'
 
 export function registerLocaleSource(fn: () => Locale | undefined): void {
   localeSource = fn
+  cachedLocale = null // a (re)registered source is only meaningful if re-read
+}
+
+let cachedLocale: Locale | null = null
+
+/** Drop the memoized locale so the next read hits the injected source again. */
+export function invalidateLocaleCache(): void {
+  cachedLocale = null
 }
 
 /**
@@ -357,12 +405,14 @@ export function onLocaleChanged(fn: () => void): void {
 }
 
 export function notifyLocaleChanged(): void {
+  invalidateLocaleCache() // settings just moved — the next read must see the new locale
   for (const fn of localeListeners) fn()
 }
 
 /** The language currently in effect (unknown/empty settings always mean Chinese). */
 export function currentLocale(): Locale {
-  return localeSource() === 'en' ? 'en' : 'zh'
+  if (cachedLocale === null) cachedLocale = localeSource() === 'en' ? 'en' : 'zh'
+  return cachedLocale
 }
 
 /** Translate in an explicitly chosen language — used when a value has to be written out in

@@ -6,6 +6,7 @@ import {
   type DownloadProgress,
   type InstallProgress,
   type PageProgress,
+  type ReadLogsArgs,
   type UpdateCheckResult,
   type UpdateProgress
 } from '../shared/types'
@@ -43,6 +44,11 @@ const api = {
   checkUpdates: (force?: boolean) => ipcRenderer.invoke(IPC.CheckUpdates, force),
   performUpdate: (target: UpdateCheckResult) => ipcRenderer.invoke(IPC.PerformUpdate, target),
   openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
+  listLogFiles: () => ipcRenderer.invoke(IPC.ListLogFiles),
+  readLogs: (args: ReadLogsArgs) => ipcRenderer.invoke(IPC.ReadLogs, args),
+  exportDiagnostics: () => ipcRenderer.invoke(IPC.ExportDiagnostics),
+  killPortHolder: (port: number) => ipcRenderer.invoke(IPC.KillPortHolder, port),
+  rollbackAsar: () => ipcRenderer.invoke(IPC.RollbackAsar),
   onUpdateResults: (cb: (results: UpdateCheckResult[]) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, results: UpdateCheckResult[]): void =>
       cb(results)

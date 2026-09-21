@@ -24,6 +24,7 @@ import {
 import { m } from './i18n'
 import { isNewer } from './update-service'
 import { extractZip } from './node-updater'
+import { notifyEvent } from './notifications'
 
 /**
  * Electron patches `fs` so every path carrying a `.asar` segment is routed through its archive
@@ -394,6 +395,9 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
   const keep = new Set<string>([tip.commit])
   if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0])
   pruneOldReleases(root, keep)
+  // A staged update sits idle until the user restarts — which a tray-resident app
+  // never notices. Ping the notification center once the artifact is on disk.
+  notifyEvent('notify.updateReadyTitle', 'notify.updateReadyBody', { version: tip.version })
   onProgress?.({ name, phase: 'done', received: total, total, percent: 100 })
 }
 
@@ -422,6 +426,7 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
       staged = null
     }
     if (staged) {
+      const rb = canRollbackAsar()
       return {
         ...base,
         ok: true,
@@ -431,10 +436,13 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
         currentVersion: current,
         latestVersion: staged.version,
         hasUpdate: false,
-        pendingRestart: true
+        pendingRestart: true,
+        canRollback: rb.available,
+        rollbackVersion: rb.fromVersion
       }
     }
     const tip = await fetchTip(name)
+    const rb = canRollbackAsar()
     return {
       ...base,
       ok: true,
@@ -446,7 +454,9 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
       // local ahead of the release branch (e.g. a locally-built 0.1.5 vs server 0.1.4) is
       // simply up-to-date: hasUpdate stays false and no action is offered.
       hasUpdate: isNewer(current, tip.version),
-      pendingRestart: false
+      pendingRestart: false,
+      canRollback: rb.available,
+      rollbackVersion: rb.fromVersion
     }
   } catch (err) {
     return { ...base, error: (err as Error).message }
@@ -524,6 +534,16 @@ export function relaunchToApplyStaged(): boolean {
   const stagedUnpacked = join(stagedDir, 'app.asar.unpacked')
   const targetUnpacked = join(resourcesDir, 'app.asar.unpacked')
   const exe = app.getPath('exe')
+  // Record which version we are replacing, so canRollbackAsar knows the swap actually
+  // produced a restorable .bak (a crashed/interrupted apply leaves none) and the UI can
+  // name the version being rolled back to. Write it back before handing off to the helper.
+  try {
+    const withOrigin: Record<string, unknown> = { ...meta!, rollbackFromVersion: app.getVersion() }
+    writeFileSync(metaFile, JSON.stringify(withOrigin))
+    meta = withOrigin as typeof meta
+  } catch {
+    /* meta write failed: rollback simply reports unavailable later */
+  }
   // Re-launch flags the dying process may carry; strip them so the fresh instance starts clean,
   // then add the one that lets it take over the single-instance lock.
   const noise = new Set([
@@ -552,8 +572,10 @@ export function relaunchToApplyStaged(): boolean {
     // the asar / native handles.
     'while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }',
     'Start-Sleep -Milliseconds 800',
-    // Keep a single rollback copy of the version we are replacing.
+    // Keep a single rollback copy of the version we are replacing — asar AND natives, so a
+    // rollback can restore a consistent pair (a mismatched unpacked tree breaks node-pty).
     'if (Test-Path $dstAsar) { Copy-Item $dstAsar "$dstAsar.bak" -Force }',
+    'if (Test-Path $dstUnpacked) { robocopy $dstUnpacked "$dstUnpacked.bak" /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }',
     // Retry the copy while a lingering AV/defender handle releases (up to ~10s).
     'for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $srcAsar $dstAsar -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }',
     // node-pty's natives live beside the asar; mirror them too (robocopy /MIR returns 0-7 on ok).
@@ -596,6 +618,126 @@ export function relaunchToApplyStaged(): boolean {
     return true
   } catch (err) {
     console.error('[update] failed to schedule staged asar swap:', err)
+    return false
+  }
+}
+
+/** Shape of update-meta.json shared by every writer/reader in this file. */
+interface UpdateMeta {
+  pendingAsar?: string | null
+  currentAsar?: string | null
+  version?: string
+  commit?: string
+  broken?: boolean
+  /** version that was running when the last staged swap replaced it (rollback target) */
+  rollbackFromVersion?: string | null
+}
+
+function readMeta(): UpdateMeta | null {
+  try {
+    return JSON.parse(readFileSync(join(updatesRoot(), 'update-meta.json'), 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Is a previous version restorable? Both halves of the backup must exist — the asar and its
+ * unpacked natives (written together by relaunchToApplyStaged's script) — plus the meta record
+ * naming the version we'd go back to. A half-backed-up tree is worse than none, so we require
+ * both. Dev builds and a first-ever install answer "no".
+ */
+export function canRollbackAsar(): { available: boolean; fromVersion?: string } {
+  if (!app.isPackaged) return { available: false }
+  const resourcesDir = dirname(updatesRoot())
+  const bakAsar = join(resourcesDir, 'app.asar.bak')
+  let size = 0
+  try {
+    size = ofs.statSync(bakAsar).size
+  } catch {
+    size = 0
+  }
+  if (size < MIN_ASAR_BYTES) return { available: false }
+  const meta = readMeta()
+  const from = meta?.rollbackFromVersion
+  // rollbackFromVersion is only set by relaunchToApplyStaged — the same event that produced
+  // the .bak — so it doubles as the authenticity check for the backup pair.
+  return from ? { available: true, fromVersion: from } : { available: false }
+}
+
+/**
+ * Restore `app.asar.bak` (+ `app.asar.unpacked.bak`) over the running pair and relaunch —
+ * the OTA "回退到上一版本" path. Mirrors relaunchToApplyStaged's detached-helper shape for the
+ * same reason: Windows locks both live files, so the swap must happen after this process exits.
+ * The .bak is copied to a `.rbk` staging name and size-checked before the move, so an
+ * interrupted run can never boot a truncated restore. Meta keeps `rollbackFromVersion` nulled
+ * afterwards (one-way door: after a rollback there is no newer backup to go back to).
+ */
+export function rollbackToPreviousAsar(): boolean {
+  if (!canRollbackAsar().available) return false
+  const resourcesDir = dirname(updatesRoot())
+  const targetAsar = join(resourcesDir, 'app.asar')
+  const bakAsar = `${targetAsar}.bak`
+  const targetUnpacked = join(resourcesDir, 'app.asar.unpacked')
+  const bakUnpacked = `${targetUnpacked}.bak`
+  const metaFile = join(updatesRoot(), 'update-meta.json')
+  const exe = app.getPath('exe')
+  const noise = new Set(['--autostart', '--dsh-relaunched', '--dsh-boot-retry', '--dsh-asar-launched'])
+  const relaunchArgs = process.argv
+    .slice(1)
+    .filter((a) => !noise.has(a) && !a.startsWith('--app-path='))
+    .concat('--dsh-relaunched')
+
+  const ps1 = join(updatesRoot(), 'rollback-update.ps1')
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$appPid = ${process.pid}`,
+    `$exe = ${psStr(exe)}`,
+    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(', ')})`,
+    `$bakAsar = ${psStr(bakAsar)}`,
+    `$dstAsar = ${psStr(targetAsar)}`,
+    `$bakUnpacked = ${psStr(bakUnpacked)}`,
+    `$dstUnpacked = ${psStr(targetUnpacked)}`,
+    `$metaFile = ${psStr(metaFile)}`,
+    'while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }',
+    'Start-Sleep -Milliseconds 800',
+    // Stage a verified copy first: moving a corrupt .bak over the live asar would brick boot.
+    'for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $bakAsar "$dstAsar.rbk" -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }',
+    'if ((Get-Item "$dstAsar.rbk" -ErrorAction SilentlyContinue).Length -lt ' + MIN_ASAR_BYTES + ') { exit 1 }',
+    'Move-Item -Force "$dstAsar.rbk" $dstAsar',
+    // Restore the matching natives tree, then drop both backups (rollback is one-way).
+    'if (Test-Path $bakUnpacked) { robocopy $bakUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }',
+    'Remove-Item "$bakAsar","$bakUnpacked" -Recurse -Force -ErrorAction SilentlyContinue',
+    // Consume the rollback record + any pending marker so boot/OTA read the restored state.
+    'try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.pendingAsar = $null; $m.rollbackFromVersion = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}',
+    'Start-Process -FilePath $exe -ArgumentList $relaunchArgs'
+  ].join('\r\n')
+  try {
+    writeFileSync(ps1, script, 'utf-8')
+    const helper = spawn(
+      'cmd.exe',
+      [
+        '/c',
+        'start',
+        '',
+        '/min',
+        'powershell.exe',
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-File',
+        ps1
+      ],
+      { detached: true, stdio: 'ignore', windowsHide: true }
+    )
+    helper.on('error', (err) => console.error('[update] rollback helper spawn failed:', err))
+    helper.unref()
+    console.log('[update] scheduled asar rollback swap')
+    return true
+  } catch (err) {
+    console.error('[update] failed to schedule asar rollback:', err)
     return false
   }
 }

@@ -315,6 +315,14 @@ function onLocaleChange(next: 'zh' | 'en'): void {
             />
             <div class="tip">{{ t('settings.crashAutoRestartTip') }}</div>
           </el-form-item>
+
+          <el-form-item :label="t('settings.systemNotifications')">
+            <el-switch
+              :model-value="settingsStore.settings.systemNotifications"
+              @update:model-value="patch({ systemNotifications: $event as boolean })"
+            />
+            <div class="tip">{{ t('settings.systemNotificationsTip') }}</div>
+          </el-form-item>
         </el-form>
       </el-tab-pane>
 

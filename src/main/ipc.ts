@@ -11,6 +11,7 @@ import {
   type OpenclawInitTokenResult,
   type PageProgress,
   type InstallProgress,
+  type ReadLogsArgs,
   type UpdateCheckResult,
   type UpdateProgress
 } from '../shared/types'
@@ -41,8 +42,15 @@ import {
 } from './store'
 import { installFromGit, installFromLocalDir, removePage } from './installer'
 import { checkUpdates, performUpdate, clearUpdateCache, provisionBuiltin } from './update-service'
-import { relaunchToApplyStaged } from './asar-updates'
-import { logsDir } from './logger'
+import {
+  relaunchToApplyStaged,
+  canRollbackAsar,
+  rollbackToPreviousAsar
+} from './asar-updates'
+import { logsDir, listLogFiles, readLogTail } from './logger'
+import { exportDiagnostics } from './diagnostics'
+import { killPortHolder } from './port-holder'
+import { setTrayUpdatePending } from './tray'
 import { PtyManager } from './pty'
 import {
   getDshStatus,
@@ -62,7 +70,7 @@ import {
   ensureDefaultOpenclawPage,
   ensureBuiltinPages
 } from './openclaw'
-import { m, notifyLocaleChanged } from './i18n'
+import { m, notifyLocaleChanged, invalidateLocaleCache } from './i18n'
 
 /** Periodic silent update-check timer; module-level so a dev-HMR re-register resets it instead of stacking. */
 let surveyTimer: NodeJS.Timeout | null = null
@@ -225,7 +233,8 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(IPC.StartPage, async (_e, id: string): Promise<IpcResult> => {
     try {
-      return ok(await registry.start(id))
+      // Deps-first: a page declaring `dependsOn` starts its chain (cycle-checked) before spawning.
+      return ok(await registry.startWithDeps(id))
     } catch (err) {
       return fail(err)
     }
@@ -238,7 +247,7 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(IPC.RestartPage, async (_e, id: string): Promise<IpcResult> => {
     try {
-      return ok(await registry.restart(id))
+      return ok(await registry.restartWithDeps(id))
     } catch (err) {
       return fail(err)
     }
@@ -404,6 +413,58 @@ export function registerIpc(registry: PageRegistry): void {
     }
   })
 
+  // In-app log viewer: list what exists, then tail one file (key-validated in logger.ts).
+  ipcMain.handle(IPC.ListLogFiles, (): IpcResult => {
+    try {
+      return ok(listLogFiles())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.ReadLogs, (_e, args: ReadLogsArgs): IpcResult => {
+    try {
+      return ok(readLogTail(args?.key ?? '', args?.tail, args?.filter))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // One-click diagnostic bundle (versions / masked settings / log tails / git HEADs).
+  ipcMain.handle(IPC.ExportDiagnostics, async (): Promise<IpcResult> => {
+    try {
+      // null = the user cancelled the save dialog — a success with no file, not an error.
+      return ok(await exportDiagnostics(registry))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // Port-conflict recovery: the failed start named its holder (PageState.portHolder), so the
+  // panel offers a one-click "kill it and retry" — kill returns whether anything was found.
+  ipcMain.handle(IPC.KillPortHolder, async (_e, port: number): Promise<IpcResult> => {
+    try {
+      const n = Number(port)
+      if (!Number.isFinite(n) || n < 1 || n > 65535) return fail(new Error(m('ipc.portRange')))
+      return ok(await killPortHolder(n))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // OTA rollback: schedule the .bak swap in a detached helper, then exit so it can run —
+  // same "return then never come back" contract as RelaunchApp.
+  ipcMain.handle(IPC.RollbackAsar, (): IpcResult => {
+    try {
+      if (!canRollbackAsar().available) return fail(new Error(m('update.noRollback')))
+      if (!rollbackToPreviousAsar()) return fail(new Error(m('update.rollbackFailed')))
+      setTimeout(() => app.exit(0), 700)
+      return ok(true)
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
   ipcMain.handle(
     IPC.UpdateSettings,
     (
@@ -423,6 +484,7 @@ export function registerIpc(registry: PageRegistry): void {
         pageEnvs?: Record<string, Record<string, string>>
         pagePorts?: Record<string, number>
         crashAutoRestart?: boolean
+        systemNotifications?: boolean
       }
     ): IpcResult => {
       try {
@@ -440,6 +502,9 @@ export function registerIpc(registry: PageRegistry): void {
         // is resolved in the *active* language when a manifest is read, so the cached metas
         // have to be re-read first and the windows told to refetch their page list.
         if (partial.locale) {
+          // Drop the memoized locale BEFORE re-reading manifests: reconcile resolves
+          // container.json text through currentLocale(), which now caches.
+          invalidateLocaleCache()
           registry.reconcile()
           notifyLocaleChanged()
           registry.emitChanged()
@@ -471,7 +536,9 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(IPC.CheckUpdates, async (_e, force?: boolean): Promise<IpcResult> => {
     try {
-      return ok(await checkUpdates(registry.list(), Boolean(force)))
+      const results = await checkUpdates(registry.list(), Boolean(force))
+      setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)))
+      return ok(results)
     } catch (err) {
       return fail(err)
     }
@@ -487,6 +554,7 @@ export function registerIpc(registry: PageRegistry): void {
   const runSurvey = (): void => {
     checkUpdates(registry.list(), true)
       .then((results) => {
+        setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)))
         for (const win of BrowserWindow.getAllWindows()) {
           if (!win.isDestroyed()) win.webContents.send(IPC.OnUpdateResults, results)
         }

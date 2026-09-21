@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, Menu, nativeImage, Tray, shell } from 'electron'
-import { cpSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { app, BrowserWindow, dialog, shell } from 'electron'
+import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
@@ -12,46 +12,12 @@ import { getNodeRuntimeInfo } from './node-runtime'
 import { m, onLocaleChanged, registerLocaleSource } from './i18n'
 import { installFileLogger } from './logger'
 import { registerDownloadHandling } from './downloads'
-import icon from '../../resources/icon.png?asset'
+import { ensureAsciiUserData } from './user-data'
+import { appIconPath } from './icon'
+import { createTray, rebuildTrayMenu } from './tray'
 
-/**
- * The packaged `productName` is Chinese (桌面控制台), so Electron's default userData folder is
- * `%APPDATA%\桌面控制台`. A non-ASCII install path breaks the PowerShell Expand-Archive call in
- * the bundled-Node updater (the mangled `-Command` string can hang it at 0%) and trips other
- * native / git tooling the container shells out to. Pin userData — and therefore every install
- * path (pages, env root, node-update staging) — to an ASCII folder BEFORE any path-dependent
- * init runs (logger, electron-store, node override). The Chinese name stays everywhere it is
- * user-visible (window title, shortcuts); existing data is renamed across so settings survive.
- */
-function ensureAsciiUserData(): void {
-  const asciiLeaf = 'DesktopContainer'
-  try {
-    const current = app.getPath('userData')
-    // Non-ASCII = control/extended chars outside printable 7-bit ASCII.
-    if (!/[^\x20-\x7e]/.test(current)) return // already ASCII (e.g. dev) — leave it untouched
-    const target = join(app.getPath('appData'), asciiLeaf)
-    if (/[^\x20-\x7e]/.test(target)) {
-      console.warn('[container] no ASCII userData path available (Chinese username?):', target)
-      return
-    }
-    if (existsSync(target)) {
-      app.setPath('userData', target)
-      return
-    }
-    if (!existsSync(current)) {
-      app.setPath('userData', target) // fresh install — nothing to migrate
-      return
-    }
-    try {
-      renameSync(current, target)
-      app.setPath('userData', target)
-    } catch (err) {
-      console.error('[container] userData migration to ASCII path failed; keeping current:', err)
-    }
-  } catch (err) {
-    console.error('[container] ensureAsciiUserData error:', err)
-  }
-}
+// Why userData must be ASCII before any path-dependent init (logger, electron-store,
+// node override): see user-data.ts. The call itself has to stay here, first thing.
 ensureAsciiUserData()
 
 // Mirror every console call into userData/logs BEFORE anything else logs: a packaged
@@ -59,7 +25,8 @@ ensureAsciiUserData()
 installFileLogger()
 
 // Main-process strings (window title, tray, dialogs, IPC errors) follow the persisted locale.
-// Reading it lazily keeps a mid-session language switch reflected without extra plumbing.
+// The value is memoized by i18n after the first read; a settings change invalidates it via
+// notifyLocaleChanged (see ipc.ts), so mid-session switches still land everywhere.
 registerLocaleSource(() => getSettings().locale)
 
 // Surfaces that cache translated text rebuild themselves when the language changes.
@@ -68,23 +35,9 @@ onLocaleChanged(() => {
   rebuildTrayMenu()
 })
 
-/**
- * Resolve the app icon at runtime. `?asset` points inside app.asar, but the
- * installer also unpacks resources/icon.png next to the exe — and on some builds the
- * asar copy is missing (electron-builder files filters). Probing both keeps the
- * taskbar/tray icon from silently coming up empty in a packaged install.
- */
-function appIconPath(): string {
-  const candidates = [
-    icon,
-    join(process.resourcesPath || '', 'icon.png'),
-    join(app.getAppPath(), 'resources', 'icon.png')
-  ].filter(Boolean)
-  return candidates.find((p) => existsSync(p)) || icon
-}
-
+// mainWindow is nulled on 'closed' (see createWindow) so every `if (!mainWindow)`
+// guard below means "really no window" and can safely rebuild one.
 let mainWindow: BrowserWindow | null = null
-let tray: Tray | null = null
 let registry: PageRegistry | null = null
 let isQuitting = false
 // True when this run was kicked off by the OS login item (--autostart / wasOpenedAtLogin):
@@ -94,8 +47,24 @@ let startHidden = false
 // A throw inside a main-process event callback (e.g. node-pty's internal onData/exit pump,
 // which isn't wrapped by an ipcMain.handle try/catch) would otherwise terminate Electron.
 // Log and keep the app alive so one bad PTY frame can't take the whole container down.
+// Exception: module / native-binding resolution failures mean every later feature re-throws
+// too — a packaged app in that state is a hollow shell (broken asar switch, half-applied
+// update), so surface a visible reason and exit instead of pretending to live. Dev is left
+// alone: hot-reload can transiently throw these codes and a dialog there is pure nagging.
+const FATAL_ERROR_CODES = new Set(['MODULE_NOT_FOUND', 'ERR_UNKNOWN_BUILTIN_MODULE', 'ERR_DLOPEN_FAILED'])
+let fatalEscalated = false
 process.on('uncaughtException', (err) => {
   console.error('[container] uncaught exception:', err)
+  const code = (err as NodeJS.ErrnoException).code
+  if (app.isPackaged && code && FATAL_ERROR_CODES.has(code) && !fatalEscalated) {
+    fatalEscalated = true // only one dialog even if the broken pump keeps throwing
+    const msg = m('err.fatal', { err: code })
+    console.error(`[container] fatal: ${msg}`)
+    dialog
+      .showMessageBox({ type: 'error', title: m('dialog.title'), message: msg })
+      .catch(() => undefined) // dialogs can fail this early — the exit below still runs
+      .finally(() => app.exit(1))
+  }
 })
 process.on('unhandledRejection', (reason) => {
   console.error('[container] unhandled rejection:', reason)
@@ -154,6 +123,11 @@ function createWindow(): void {
     icon: appIconPath(),
     webPreferences: {
       preload: resolvePreload(),
+      // Deliberate trade-off (container host): sandbox:false so the preload can expose node
+      // helpers; webviewTag:true so managed pages run embedded. The blast radius is kept in
+      // check by the authoritative web-contents-created handler below — every webview guest
+      // gets window.open denied and navigated in place, so no guest escapes to a popup or
+      // the system browser. Don't remove either without re-checking that handler.
       sandbox: false,
       webviewTag: true
     }
@@ -162,6 +136,13 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => {
     // A login-item launch stays in the tray; the user opens it from there when wanted.
     if (!startHidden) mainWindow?.show()
+  })
+
+  // The window can still die out from under us (OS session end, a crash we survived).
+  // Drop the reference so showWindow()/activate correctly build a fresh one instead of
+  // calling show() on a destroyed object.
+  mainWindow.on('closed', () => {
+    mainWindow = null
   })
 
   // push OS-maximize state (incl. snap/drag) so the custom title bar updates its icon
@@ -224,42 +205,6 @@ function confirmAndQuit(): void {
   mainWindow.webContents.send(IPC.OnQuitConfirm)
 }
 
-function rebuildTrayMenu(): void {
-  if (!tray || !registry) return
-  const running = registry.running()
-  const stopped = registry.list().filter((p) => p.status !== 'running' && !p.external)
-  const template: Electron.MenuItemConstructorOptions[] = [
-    { label: m('tray.show'), click: showWindow },
-    { type: 'separator' },
-    ...running.map((p): Electron.MenuItemConstructorOptions => ({
-      label: m('tray.stop', { name: p.name }),
-      click: () => registry?.stop(p.id)
-    })),
-    ...stopped.slice(0, 8).map((p): Electron.MenuItemConstructorOptions => ({
-      label: m('tray.start', { name: p.name }),
-      click: () => {
-        registry?.start(p.id).catch((err) => console.warn('[tray] start failed:', err.message))
-      }
-    })),
-    { type: 'separator' },
-    {
-      label: m('tray.quit'),
-      click: () => confirmAndQuit()
-    }
-  ]
-  tray.setToolTip(m('tray.tooltip', { n: running.length }))
-  tray.setContextMenu(Menu.buildFromTemplate(template))
-}
-
-function createTray(): void {
-  if (tray) return
-  const path = appIconPath()
-  const image = existsSync(path) ? nativeImage.createFromPath(path) : nativeImage.createEmpty()
-  tray = new Tray(image.isEmpty() ? image : image.resize({ width: 16, height: 16 }))
-  tray.on('click', showWindow)
-  rebuildTrayMenu()
-}
-
 async function verifyNodeRuntime(): Promise<void> {
   const info = await getNodeRuntimeInfo()
   if (!info.ok) {
@@ -285,6 +230,33 @@ function dialogWarn(msg: string): void {
     .catch(() => undefined)
 }
 
+/**
+ * After a self-update relaunch the outgoing process may still hold the single-instance
+ * lock while it tears down (the fixed 1s gamble lost it on slow machines, so the next
+ * launch — without --dsh-relaunched — couldn't dedupe and two instances coexisted).
+ * Retry every 500ms until the lock frees; booting continues meanwhile. If it's still
+ * taken after the budget a live instance really owns it — surface that instead of
+ * silently running doubled-up.
+ */
+function reacquireSingleInstanceLock(): void {
+  const RETRY_MS = 500
+  const MAX_ATTEMPTS = 10 // ~5s total grace for the predecessor to exit
+  const attempt = (n: number): void => {
+    if (app.requestSingleInstanceLock()) {
+      console.log(`[container] relaunched instance took over the single-instance lock (attempt ${n})`)
+      return
+    }
+    if (n >= MAX_ATTEMPTS) {
+      const msg = m('err.dualInstance')
+      console.error(`[container] ${msg} (lock still held after ${n} attempts)`)
+      dialogWarn(msg)
+      return
+    }
+    setTimeout(() => attempt(n + 1), RETRY_MS)
+  }
+  attempt(1)
+}
+
 // A relaunch right after a container self-update must not be treated as a second instance:
 // the old process is mid-exit (app.exit) and may still hold the lock for a moment.
 const relaunched = process.argv.includes('--dsh-relaunched')
@@ -294,7 +266,7 @@ if (!gotLock) {
 } else {
   if (relaunched) {
     // Take over the lock so the next launch (even without the flag) dedupes normally.
-    setTimeout(() => app.requestSingleInstanceLock(), 1000)
+    reacquireSingleInstanceLock()
   }
   app.on('second-instance', showWindow)
 
@@ -328,16 +300,32 @@ if (!gotLock) {
     // bar and pop a completion notice naming the save location (see downloads.ts).
     registerDownloadHandling()
 
-    await verifyNodeRuntime()
+    // Get the window/tray in front of the user first: the renderer only needs IPC handlers,
+    // which registerIpc() below installs in this same synchronous tick — long before any page
+    // script can invoke them — so creating the window here can't race the handlers.
+    createWindow()
+    // Registry-less by design at this point: the tray re-reads it through the injected
+    // getter on every rebuild, so it can come up before the registry exists.
+    createTray({
+      getRegistry: () => registry,
+      onShowWindow: showWindow,
+      onQuitRequest: confirmAndQuit
+    })
+
+    // Node probing may spawn a process (seconds on cold starts) — never await it on the
+    // first-frame path. A missing Node is already handled by the renderer SetupGate; the
+    // dialog inside only fires for the version-anomaly case SetupGate can't catch.
+    verifyNodeRuntime().catch((err) =>
+      console.error('[container] node runtime verification failed:', err)
+    )
 
     ensureDefaultOpenclawPage()
     ensureBuiltinPages()
     registry = new PageRegistry({ pagesDir: resolvePagesDir(), projectDir: resolveProjectDir() })
     registerIpc(registry)
     registry.on('changed', rebuildTrayMenu)
-
-    createWindow()
-    createTray()
+    // Tray came up before the registry existed (empty page list) — populate it now.
+    rebuildTrayMenu()
 
     const settings = getSettings()
     if (settings.autoStartPages.length) {
@@ -364,17 +352,24 @@ if (!gotLock) {
   })
 
   let shutdownDone = false
+  // Hard cap on the exit flush: children are given up to this long to die for real
+  // (shutdownAll awaits each process 'close'); a wedged one must not block quit forever.
+  const QUIT_FLUSH_MS = 3000
   app.on('before-quit', (e) => {
     isQuitting = true
     if (registry && !shutdownDone) {
-      shutdownDone = true
+      shutdownDone = true // one-shot: never reset, re-entrant quits fall through to Electron
       e.preventDefault()
-      registry.shutdownAll()
-      // give taskkill a moment then finish quitting
-      setTimeout(() => {
-        shutdownDone = false
-        app.exit(0)
-      }, 800)
+      const grace = new Promise<void>((resolve) => setTimeout(resolve, QUIT_FLUSH_MS))
+      Promise.race([registry.shutdownAll(), grace]).then(
+        () => app.exit(0),
+        (err) => {
+          // A throw here means the kill path itself broke — don't loop in the
+          // uncaughtException handler, log once and force the exit.
+          console.error('[container] shutdownAll failed, forcing exit:', err)
+          app.exit(0)
+        }
+      )
     }
   })
 }

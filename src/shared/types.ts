@@ -74,6 +74,18 @@ export interface PageMeta {
    * built-in agent kinds (dsh / openclaw) default to true so they always appear there.
    */
   manageAsApp?: boolean
+  /**
+   * Page ids that must be running before this page starts (container.json `dependsOn`).
+   * `startWithDeps` boots them in order and refuses cycles; auto-start honours it too.
+   */
+  dependsOn?: string[]
+  /**
+   * Health endpoint polled after the port is LISTEN (and every 30s while running).
+   * A full `http(s)://…` URL, or a path appended to `http://127.0.0.1:{port}`; `{port}`
+   * inside the value is substituted. A hung-but-alive process is killed so the crash
+   * guard's restart ladder takes over instead of the row silently lying.
+   */
+  healthUrl?: string
 }
 
 export interface PageState extends PageMeta {
@@ -97,6 +109,11 @@ export interface PageState extends PageMeta {
    * dsh/openclaw page; `undefined` otherwise (plain/terminal/external, or a running page).
    */
   runtimeMissing?: boolean
+  /**
+   * Set when a start failed because the declared port never came up and a *foreign*
+   * process is LISTENING on it — the Pages panel offers a one-click kill-and-retry.
+   */
+  portHolder?: { pid: number; name: string } | null
 }
 
 export interface RunningPageInfo {
@@ -178,6 +195,8 @@ export interface ContainerSettings {
   pagePorts: Record<string, number>
   /** restart a page whose process crashes after having been up; off = surface the error only */
   crashAutoRestart: boolean
+  /** OS notifications for out-of-band events (guard gave up restarting, staged update ready) */
+  systemNotifications: boolean
 }
 
 export interface UpdateCheckResult {
@@ -206,6 +225,10 @@ export interface UpdateCheckResult {
   pendingRestart?: boolean
   /** builtin-page row (action 'none'): the pages/<id> this row manages — reset entry key */
   pageId?: string
+  /** container row: a pre-update app.asar.bak exists, so one-level 回退 is offered */
+  canRollback?: boolean
+  /** version the .bak copy belongs to (shown in the confirm dialog) */
+  rollbackVersion?: string
 }
 
 export interface UpdateOutcome {
@@ -474,5 +497,41 @@ export const IPC = {
   /** broadcast: a secondary window asks every window to switch to that CLI page's terminal */
   OpenTerminalPage: 'container:open-terminal-page',
   /** broadcast: live progress of a file download inside an embedded webview (DownloadProgress) */
-  OnDownloadProgress: 'container:download-progress'
+  OnDownloadProgress: 'container:download-progress',
+  /** list readable log files (main + per-page tails) for the in-app viewer (LogFileInfo[]) */
+  ListLogFiles: 'container:list-log-files',
+  /** read the tail of one log file, optionally filtered (ReadLogsArgs → LogReadResult) */
+  ReadLogs: 'container:read-logs',
+  /** collect versions/settings/logs summary into a zip via a save dialog; resolves the path */
+  ExportDiagnostics: 'container:export-diagnostics',
+  /** taskkill the foreign process LISTENING on that port (port-conflict quick fix) */
+  KillPortHolder: 'container:kill-port-holder',
+  /** swap the pre-update app.asar.bak back in and relaunch (one-level OTA rollback) */
+  RollbackAsar: 'container:rollback-asar'
 } as const
+
+/** One row of `IPC.ListLogFiles`. `key` is 'main' or a `pages/<file>` basename. */
+export interface LogFileInfo {
+  key: string
+  /** display label (already localized in the main process) */
+  label: string
+  bytes: number
+  mtimeMs: number
+}
+
+/** Args for `IPC.ReadLogs`; tail defaults to 400 lines, filter is a case-insensitive substring. */
+export interface ReadLogsArgs {
+  key: string
+  tail?: number
+  filter?: string
+}
+
+export interface LogReadResult {
+  lines: string[]
+  /** true when only the last slice of the file could be read */
+  truncated: boolean
+  /** bytes actually read from the tail of the file */
+  readBytes: number
+  /** total size of the file on disk */
+  totalBytes: number
+}

@@ -28,7 +28,9 @@ const DEFAULTS: ContainerSettings = {
   pageEnvs: {},
   pagePorts: {},
   // a page that crashes after having run is relaunched automatically; off surfaces the error only
-  crashAutoRestart: true
+  crashAutoRestart: true,
+  // rare user-action-needed events (guard gave up, staged update) go to the OS notification center
+  systemNotifications: true
 }
 
 let store: Store<ContainerSettings> | null = null

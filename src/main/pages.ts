@@ -3,10 +3,14 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createConnection } from 'node:net'
+import { get as httpGet } from 'node:http'
+import { get as httpsGet } from 'node:https'
 import { nativeTheme } from 'electron'
 import { getNodeExePath, bundledEnv } from './node-runtime'
 import { resolvePageEnv, resolvePagePort, expandHome, isValidPort, getSettings } from './store'
 import { logPageLine } from './logger'
+import { findPortHolder } from './port-holder'
+import { notifyEvent } from './notifications'
 // aliased: `m` is already a local identifier in this file (regex match / map callback)
 import { m as msg, resolveText } from './i18n'
 import {
@@ -38,6 +42,60 @@ const ANNOUNCE_GRACE_MS = 1500
  * the full retry set again). */
 const CRASH_RETRY_DELAYS_MS = [2_000, 5_000, 15_000]
 const STABLE_RESET_MS = 5 * 60_000
+
+/* ---- health check (container.json `healthUrl`) ----
+ * Port-LISTEN alone can't tell "booting" from "alive but hung": a server that binds
+ * then stops answering keeps the green dot forever. When a page declares healthUrl we
+ * require a 2xx/3xx before reporting running, then poll every HEALTH_POLL_MS; HEALTH_FAIL_LIMIT
+ * consecutive failures mean the process is hung — we kill it so the crash guard's restart
+ * ladder (backoff + budget) takes over through the normal close event. */
+const HEALTH_READY_TIMEOUT_MS = 20_000
+const HEALTH_POLL_MS = 30_000
+const HEALTH_FAIL_LIMIT = 3
+
+/** Resolve a declared healthUrl against the page's effective port; null when unset/unparseable. */
+function healthTarget(meta: PageMeta, port: number): string | null {
+  const raw = (meta.healthUrl || '').trim()
+  if (!raw) return null
+  const filled = raw.replace(/\{port\}/g, String(port))
+  if (/^https?:\/\//i.test(filled)) return filled
+  try {
+    return new URL(filled.startsWith('/') ? filled : `/${filled}`, `http://127.0.0.1:${port}`).toString()
+  } catch {
+    return null
+  }
+}
+
+/** One GET; true on any 2xx/3xx. Never throws — errors/timeouts read as "not healthy". */
+function probeHealth(url: string, timeoutMs = 5000): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const lib = url.startsWith('https') ? httpsGet : httpGet
+      const req = lib(url, { timeout: timeoutMs }, (res) => {
+        res.resume() // drain so the socket can close and the next poll isn't queued behind it
+        const status = res.statusCode ?? 0
+        resolve(status >= 200 && status < 400)
+      })
+      req.on('error', () => resolve(false))
+      req.on('timeout', () => {
+        req.destroy()
+        resolve(false)
+      })
+    } catch {
+      resolve(false)
+    }
+  })
+}
+
+/** Poll one probe until healthy or the deadline — absorbs a few seconds of post-bind warm-up. */
+async function waitHealth(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await probeHealth(url)) return true
+    if (Date.now() > deadline) return false
+    await new Promise((r) => setTimeout(r, 700))
+  }
+}
 
 /** Pages shipped with the container (repo `pages/`) — never removable. */
 export const BUILTIN_PAGE_IDS = new Set(['dsh-web', 'openclaw'])
@@ -82,6 +140,12 @@ interface RuntimeEntry {
   stableTimer?: NodeJS.Timeout
   /** epoch ms of the pending auto-restart (surfaced to the renderer). */
   nextRestartAt?: number
+  /** foreign LISTENING process found when this start timed out on its port (null/undefined = none). */
+  portHolder?: { pid: number; name: string } | null
+  /** interval polling the declared healthUrl while running; armed/cleared by setStatus. */
+  healthTimer?: NodeJS.Timeout
+  /** consecutive failed health probes (a pass resets it to 0). */
+  healthFails: number
 }
 
 export interface PagesRoot {
@@ -142,6 +206,10 @@ export interface ContainerManifest {
   openclaw?: OpenclawConfig
   /** opt this page into the top-bar 应用 menu + generic AppManager panel */
   manageAsApp?: boolean
+  /** page ids that must be running before this one starts (see startWithDeps) */
+  dependsOn?: string[]
+  /** health endpoint: full URL or path against the page's port; `{port}` is substituted */
+  healthUrl?: string
   envVars?: Array<{
     key: string
     label?: LocalizableText
@@ -239,6 +307,17 @@ export function readPageMeta(pagesDir: string, id: string): PageMeta {
     // Agent runtimes live in the 应用 menu by default; imported pages opt in via
     // container.json "manageAsApp": true.
     manageAsApp: raw.manageAsApp ?? (kind === 'dsh' || kind === 'openclaw'),
+    // Deps keep only non-empty strings that aren't the page itself — self-imports would
+    // deadlock ensureDeps behind an ancestry check that legitimately allows siblings.
+    dependsOn: Array.isArray(raw.dependsOn)
+      ? raw.dependsOn
+          .filter((d): d is string => typeof d === 'string' && Boolean(d.trim()) && d.trim() !== id)
+          .map((d) => d.trim())
+      : undefined,
+    healthUrl:
+      !external && typeof raw.healthUrl === 'string' && raw.healthUrl.trim()
+        ? raw.healthUrl.trim()
+        : undefined,
     envVars
   }
 }
@@ -268,6 +347,15 @@ export function scanInstalledPages(pagesDir: string): PageMeta[] {
   return out
 }
 
+export class PortNotReadyError extends Error {
+  constructor(
+    readonly port: number,
+    timeoutMs: number
+  ) {
+    super(msg('page.portNotReady', { port, sec: Math.round(timeoutMs / 1000) }))
+  }
+}
+
 export function waitPortReady(port: number, timeoutMs = START_TIMEOUT_MS): Promise<number> {
   const deadline = Date.now() + timeoutMs
   return new Promise((resolve, reject) => {
@@ -279,7 +367,7 @@ export function waitPortReady(port: number, timeoutMs = START_TIMEOUT_MS): Promi
       sock.on('error', () => {
         sock.destroy()
         if (Date.now() > deadline) {
-          reject(new Error(msg('page.portNotReady', { port, sec: Math.round(timeoutMs / 1000) })))
+          reject(new PortNotReadyError(port, timeoutMs))
         } else {
           setTimeout(attempt, 400)
         }
@@ -436,7 +524,14 @@ export class PageRegistry extends EventEmitter {
     for (const meta of metas) {
       const existing = this.entries.get(meta.id)
       if (existing) existing.meta = meta
-      else this.entries.set(meta.id, { meta, status: 'stopped', logs: [], crashes: 0 })
+      else
+        this.entries.set(meta.id, {
+          meta,
+          status: 'stopped',
+          logs: [],
+          crashes: 0,
+          healthFails: 0
+        })
     }
     return metas
   }
@@ -470,6 +565,7 @@ export class PageRegistry extends EventEmitter {
         (e.meta.kind === 'dsh' || e.meta.kind === 'openclaw') && e.status !== 'running'
           ? !this.hasRuntime(e.meta.kind)
           : undefined,
+      portHolder: e.portHolder,
       crashes: e.crashes || undefined,
       nextRestartAt: e.nextRestartAt
     }
@@ -542,6 +638,7 @@ export class PageRegistry extends EventEmitter {
     e.exitCode = undefined
     e.resolvedPort = undefined
     e.launchUrl = undefined
+    e.portHolder = null
     this.emitProgress(e, 'spawning')
 
     let proc: ChildProcessWithoutNullStreams
@@ -635,6 +732,14 @@ export class PageRegistry extends EventEmitter {
       this.emitProgress(e, 'port')
       const { port, url } = await this.waitReady(e, proc, isDsh, isOpenclaw, isTerminal)
       e.resolvedPort = port
+      // A declared healthUrl must answer before we call the page running — a port that
+      // binds but never serves is exactly the false-green this catches (see below).
+      if (e.meta.healthUrl) {
+        const target = healthTarget(e.meta, port)
+        if (target && !(await waitHealth(target, HEALTH_READY_TIMEOUT_MS))) {
+          throw new Error(msg('page.healthFail', { url: target }))
+        }
+      }
       let launchUrl = url
       if (isOpenclaw) {
         // Self-pair the webview past the "gateway needs a token" screen by fetching a
@@ -658,9 +763,22 @@ export class PageRegistry extends EventEmitter {
       this.emitChanged()
       return this.toState(e)
     } catch (err) {
-      this.fail(e, (err as Error).message)
+      let failure = err as Error
+      // Port never came up AND a process we don't track owns it: name the holder (pid +
+      // image) and stash it on the state so the panel can offer a kill-and-retry instead
+      // of a bare timeout the user can't act on. Our own just-died child doesn't count.
+      if (failure instanceof PortNotReadyError) {
+        const holder = await findPortHolder(failure.port)
+        if (holder && holder.pid !== e.pid) {
+          e.portHolder = holder
+          failure = new Error(
+            msg('page.portOwner', { port: failure.port, pid: holder.pid, name: holder.name })
+          )
+        }
+      }
+      this.fail(e, failure.message)
       if (e.proc) this.stop(id)
-      throw new Error(e.lastError)
+      throw failure
     }
   }
 
@@ -946,6 +1064,69 @@ export class PageRegistry extends EventEmitter {
     return this.start(id)
   }
 
+  /** Start a page after everything it `dependsOn` is up. The deps chain is walked depth-first
+   *  with an ancestry trail, so a cycle in user-authored container.jsons surfaces as an error
+   *  naming the loop instead of two pages waitLooping on each other. */
+  async startWithDeps(id: string): Promise<PageState> {
+    await this.ensureDeps(id, [])
+    return this.start(id)
+  }
+
+  async restartWithDeps(id: string): Promise<PageState> {
+    await this.stopAndWait(id)
+    return this.startWithDeps(id)
+  }
+
+  /** Recursively make every declared dep `running` (starting it if stopped), before the
+   *  dependent is allowed to spawn. Deps that aren't known pages are ignored — an imported
+   *  project may declare a dep on an optional builtin the user never installed. */
+  private async ensureDeps(id: string, ancestry: string[]): Promise<void> {
+    const e = this.entries.get(id)
+    const deps = e?.meta.dependsOn ?? []
+    if (!deps.length) return
+    if (ancestry.includes(id)) {
+      throw new Error(msg('page.depsCycle', { chain: [...ancestry, id].join(' → ') }))
+    }
+    for (const dep of deps) {
+      const d = this.entries.get(dep)
+      // Unknown, external, and terminal-kind deps can't be started by us — skip them.
+      if (!d || d.meta.external || d.meta.kind === 'terminal') continue
+      if (d.status === 'running') continue
+      if (d.status === 'starting') {
+        await this.waitDepReady(dep)
+        continue
+      }
+      try {
+        await this.ensureDeps(dep, [...ancestry, id])
+        await this.start(dep)
+      } catch (err) {
+        throw new Error(msg('page.depsFail', { dep, err: (err as Error).message }))
+      }
+    }
+  }
+
+  /** Wait for a dep that's already mid-boot (someone else called start) to settle.
+   *  No cycle re-check here: the dep is in flight, this method never spawns anything, so
+   *  the worst case is the boot timeout firing — a plain depsFail, not a deadlock. */
+  private waitDepReady(id: string): Promise<void> {
+    const deadline = Date.now() + DSH_READY_TIMEOUT_MS
+    return new Promise((resolve, reject) => {
+      const tick = (): void => {
+        const d = this.entries.get(id)
+        if (!d) return resolve()
+        if (d.status === 'running') return resolve()
+        if (d.status !== 'starting') {
+          return reject(new Error(msg('page.depsFail', { dep: id, err: d.lastError || d.status })))
+        }
+        if (Date.now() > deadline) {
+          return reject(new Error(msg('page.depsFail', { dep: id, err: 'timeout' })))
+        }
+        setTimeout(tick, 400)
+      }
+      tick()
+    })
+  }
+
   /**
    * Re-run the two on-demand CLI presence probes (pure `existsSync` over candidate paths) and
    * cache them for {@link toState}. The slim installer ships neither dsh nor openclaw — both are
@@ -996,7 +1177,7 @@ export class PageRegistry extends EventEmitter {
           return
         }
         try {
-          await this.start(id)
+          await this.startWithDeps(id)
         } catch (err) {
           console.warn(`[pages] auto-start ${id} failed:`, (err as Error).message)
         }
@@ -1004,14 +1185,59 @@ export class PageRegistry extends EventEmitter {
     )
   }
 
-  shutdownAll(): void {
+  /** Stop every tracked page and resolve once all children have actually exited (or
+   * their per-process timeouts fired). On Windows the taskkill tree-kill is async, so
+   * quit paths that don't await this can orphan grandchildren on slow machines. */
+  async shutdownAll(): Promise<void> {
     this.quitting = true
-    for (const id of [...this.entries.keys()]) this.stop(id)
+    await Promise.all([...this.entries.keys()].map((id) => this.stopAndWait(id)))
   }
 
   private setStatus(e: RuntimeEntry, status: PageStatus): void {
     e.status = status
+    // The health watchdog only makes sense against a live, running server; every other
+    // transition (including 'starting' on a restart) disarms it and resets the fail streak.
+    if (status === 'running') this.startHealthMonitor(e)
+    else this.stopHealthMonitor(e)
     this.emitChanged()
+  }
+
+  /** Periodically probe the declared healthUrl while running. Consecutive failures past
+   *  HEALTH_FAIL_LIMIT mean "bound but hung" — kill the child so the crash guard's normal
+   *  close-event path (backoff + budget) restarts it instead of us inventing a second path. */
+  private startHealthMonitor(e: RuntimeEntry): void {
+    this.stopHealthMonitor(e)
+    if (!e.meta.healthUrl) return
+    e.healthTimer = setInterval(() => {
+      if (e.status !== 'running' || !e.proc || this.quitting) return
+      const target = healthTarget(e.meta, e.resolvedPort ?? e.meta.containerPort ?? e.meta.port)
+      if (!target) return
+      void probeHealth(target).then((alive) => {
+        // Re-check after the async probe — a stop/restart may have landed meanwhile.
+        if (e.status !== 'running' || !e.proc) return
+        if (alive) {
+          e.healthFails = 0
+          return
+        }
+        e.healthFails++
+        if (e.healthFails < HEALTH_FAIL_LIMIT) return
+        e.healthFails = 0
+        e.logs.push(`[container] ${msg('page.logHealthKill', { n: HEALTH_FAIL_LIMIT })}`)
+        console.warn(`[pages] ${e.meta.id}: ${HEALTH_FAIL_LIMIT} failed health probes — restarting`)
+        if (process.platform === 'win32') {
+          spawn('taskkill', ['/pid', String(e.proc.pid), '/T', '/F'], { windowsHide: true })
+        } else {
+          e.proc.kill('SIGTERM')
+        }
+      })
+    }, HEALTH_POLL_MS)
+    e.healthTimer.unref?.()
+  }
+
+  private stopHealthMonitor(e: RuntimeEntry): void {
+    if (e.healthTimer) clearInterval(e.healthTimer)
+    e.healthTimer = undefined
+    e.healthFails = 0
   }
 
   /** Cancel the guard's pending auto-restart / budget-refill timers for one entry. */
@@ -1036,6 +1262,12 @@ export class PageRegistry extends EventEmitter {
       e.lastError = msg('page.crashGiveUp', { max })
       e.logs.push(`[container] ${e.lastError}`)
       console.warn(`[pages] ${e.meta.id}: crash budget spent (${max}), auto-restart stopped`)
+      // A tray-resident app misses this silently — the page just sits red. Ping the
+      // notification center so the user knows the guard stopped before they check.
+      notifyEvent('notify.giveUpTitle', 'notify.giveUpBody', {
+        name: e.meta.name,
+        max
+      })
       return
     }
     const delay = CRASH_RETRY_DELAYS_MS[e.crashes - 1]

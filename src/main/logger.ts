@@ -1,6 +1,18 @@
 import { app } from 'electron'
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readSync,
+  renameSync,
+  statSync
+} from 'node:fs'
 import { join } from 'node:path'
+import { m } from './i18n'
+import type { LogFileInfo, LogReadResult } from '../shared/types'
 
 /**
  * Dependency-free file logging for the packaged app.
@@ -113,4 +125,83 @@ export function logPageLine(pageId: string, chunk: string): void {
     .map((l) => `[${stamp()}] ${l}\n`)
     .join('')
   if (body) append(file, body)
+}
+
+/* ---- in-app log viewer backing (IPC container:list-log-files / container:read-logs) ---- */
+
+/** Resolve a viewer key ('main' | 'pages/<file>') to an on-disk path; null on anything
+ *  else — the key comes from the renderer, so path traversal must not resolve. */
+function resolveLogKey(key: string): string | null {
+  if (key === 'main') return join(logsDir(), 'main.log')
+  const mm = key.match(/^pages\/([\w.-]+)\.log$/)
+  if (mm && !mm[1].includes('..')) return join(logsDir(), 'pages', `${mm[1]}.log`)
+  return null
+}
+
+/** Every readable log file: the mirrored main log + one per hosted page child. */
+export function listLogFiles(): LogFileInfo[] {
+  const out: LogFileInfo[] = []
+  const push = (key: string, label: string, file: string): void => {
+    try {
+      const st = statSync(file)
+      if (st.isFile()) out.push({ key, label, bytes: st.size, mtimeMs: st.mtimeMs })
+    } catch {
+      /* missing/unreadable: simply not listed */
+    }
+  }
+  push('main', m('log.mainLabel'), join(logsDir(), 'main.log'))
+  const dir = join(logsDir(), 'pages')
+  try {
+    if (existsSync(dir)) {
+      for (const f of readdirSync(dir)) {
+        if (f.endsWith('.log')) push(`pages/${f}`, f.replace(/\.log$/, ''), join(dir, f))
+      }
+    }
+  } catch {
+    /* pages dir may not exist before the first hosted boot */
+  }
+  return out
+}
+
+/** Tail cap: reading more than this for a "last N lines" view is pure IO waste. */
+const TAIL_READ_CAP = 512 * 1024
+
+/**
+ * Read the tail of one log without slurping the whole (up-to-5MB, rotated) file: open,
+ * readSync the last min(size, TAIL_READ_CAP) bytes, split lines, optional case-insensitive
+ * filter, then keep the last `tail` lines. A mid-file split of the first (partial) line is
+ * fine — the byte window starts wherever a line does, and dropping the leading fragment only
+ * trims, never duplicates. Returns empty lines for a missing file rather than throwing.
+ */
+export function readLogTail(key: string, tail = 400, filter?: string): LogReadResult {
+  const file = resolveLogKey(key)
+  if (!file) return { lines: [], truncated: false, readBytes: 0, totalBytes: 0 }
+  let total = 0
+  try {
+    total = statSync(file).size
+  } catch {
+    return { lines: [], truncated: false, readBytes: 0, totalBytes: 0 }
+  }
+  const readBytes = Math.min(total, TAIL_READ_CAP)
+  const buf = Buffer.allocUnsafe(readBytes)
+  let fd: number | undefined
+  try {
+    fd = openSync(file, 'r')
+    readSync(fd, buf, 0, readBytes, total - readBytes)
+  } catch {
+    return { lines: [], truncated: false, readBytes: 0, totalBytes: total }
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+  let lines = buf.toString('utf8').split(/\r?\n/)
+  if (readBytes < total) lines = lines.slice(1) // drop the window's partial first line
+  const needle = (filter ?? '').trim().toLowerCase()
+  if (needle) lines = lines.filter((l) => l.toLowerCase().includes(needle))
+  const keep = Math.max(1, Math.min(tail || 400, 5000))
+  return {
+    lines: lines.slice(-keep),
+    truncated: readBytes < total || lines.length > keep,
+    readBytes,
+    totalBytes: total
+  }
 }
