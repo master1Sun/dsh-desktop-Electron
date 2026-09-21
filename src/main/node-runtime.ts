@@ -135,10 +135,31 @@ function readNodeVersion(nodePath: string): Promise<string | null> {
   })
 }
 
+/**
+ * Debugger flags must never leak into page children. A dev app launched with the inspector on
+ * carries NODE_OPTIONS=--inspect…; every spawned node child then tries to bind the SAME debug
+ * port (9229). The winner boots, the loser dies within seconds with a bare exit code 1 — which
+ * surfaced as the phantom "auto-start openclaw failed: 进程退出，code=1" toast on every dev
+ * restart (dsh grabbed the port, the gateway choked). Strip them; keep every other option.
+ */
+function stripInspectorOptions(value?: string): string | undefined {
+  if (!value) return value
+  const kept = value.split(/\s+/).filter((o) => o && !/^--inspect\b/i.test(o))
+  return kept.length ? kept.join(' ') : undefined
+}
+
 /** env with the bundled node dir prepended to PATH so pages resolve node/npm to the bundled one */
 export function bundledEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const dir = join(getNodeExePath(), '..')
-  return { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH || ''}`, ...extra }
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: `${dir}${delimiter}${process.env.PATH || ''}`,
+    ...extra
+  }
+  const nodeOptions = stripInspectorOptions(env.NODE_OPTIONS)
+  if (nodeOptions) env.NODE_OPTIONS = nodeOptions
+  else delete env.NODE_OPTIONS
+  return env
 }
 
 /**

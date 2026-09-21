@@ -23,6 +23,9 @@ const LOG_LIMIT = 1000
 const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 30_000)
 /** openclaw's first boot self-installs provider plugins + runs state migrations, so it can take ~30s+ to bind; give it generous headroom. */
 const OPENCLAW_READY_TIMEOUT_MS = Number(process.env.DSH_OPENCLAW_READY_TIMEOUT_MS || 120_000)
+/** dsh's first boot initializes a profile (plugin bundle build + credential self-heal) and a cold
+ *  machine/AV scan can stretch it well past 30s — same generous budget as openclaw. */
+const DSH_READY_TIMEOUT_MS = Number(process.env.DSH_DSH_READY_TIMEOUT_MS || 120_000)
 /** How long the declared-port fallback waits for dsh's token-bearing ready line before launching without it. */
 const ANNOUNCE_GRACE_MS = 1500
 
@@ -692,7 +695,11 @@ export class PageRegistry extends EventEmitter {
     isTerminal = false
   ): Promise<{ port: number; url?: string }> {
     if (isTerminal) return Promise.resolve({ port: 0 })
-    const timeoutMs = isOpenclaw ? OPENCLAW_READY_TIMEOUT_MS : START_TIMEOUT_MS
+    const timeoutMs = isOpenclaw
+      ? OPENCLAW_READY_TIMEOUT_MS
+      : isDsh
+        ? DSH_READY_TIMEOUT_MS
+        : START_TIMEOUT_MS
     const wantPort = e.meta.containerPort || e.meta.port
     if (!isDsh) {
       // Fail the moment the child exits non-zero (a gateway lock / EADDRINUSE) instead of
@@ -750,7 +757,7 @@ export class PageRegistry extends EventEmitter {
           failWith(
             new Error(
               msg('page.dshProfileNotReady', {
-                sec: Math.round(START_TIMEOUT_MS / 1000),
+                sec: Math.round(timeoutMs / 1000),
                 port: wantPort
               })
             )
@@ -765,7 +772,7 @@ export class PageRegistry extends EventEmitter {
       proc.stdout.on('data', onChunk)
       proc.once('close', onExit)
       // fallback: the declared port may come up without a parsable announcement
-      waitPortReady(wantPort, START_TIMEOUT_MS).then(
+      waitPortReady(wantPort, timeoutMs).then(
         (port) =>
           setTimeout(() => {
             cleanup()

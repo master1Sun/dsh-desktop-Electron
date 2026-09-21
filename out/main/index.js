@@ -196,9 +196,22 @@ function readNodeVersion(nodePath) {
     child.on("close", () => resolve2(out.trim() || null));
   });
 }
+function stripInspectorOptions(value) {
+  if (!value) return value;
+  const kept = value.split(/\s+/).filter((o) => o && !/^--inspect\b/i.test(o));
+  return kept.length ? kept.join(" ") : void 0;
+}
 function bundledEnv(extra = {}) {
   const dir = join(getNodeExePath(), "..");
-  return { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH || ""}`, ...extra };
+  const env2 = {
+    ...process.env,
+    PATH: `${dir}${delimiter}${process.env.PATH || ""}`,
+    ...extra
+  };
+  const nodeOptions = stripInspectorOptions(env2.NODE_OPTIONS);
+  if (nodeOptions) env2.NODE_OPTIONS = nodeOptions;
+  else delete env2.NODE_OPTIONS;
+  return env2;
 }
 function envWithPATH(dirs, extra = {}) {
   let base = { ...process.env };
@@ -11906,6 +11919,7 @@ function resolveText(value, fallback = "") {
 const LOG_LIMIT = 1e3;
 const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 3e4);
 const OPENCLAW_READY_TIMEOUT_MS = Number(process.env.DSH_OPENCLAW_READY_TIMEOUT_MS || 12e4);
+const DSH_READY_TIMEOUT_MS = Number(process.env.DSH_DSH_READY_TIMEOUT_MS || 12e4);
 const ANNOUNCE_GRACE_MS = 1500;
 const CRASH_RETRY_DELAYS_MS = [2e3, 5e3, 15e3];
 const STABLE_RESET_MS = 5 * 6e4;
@@ -12348,7 +12362,7 @@ class PageRegistry extends EventEmitter {
       terminal kinds: ready as soon as the process is alive (no HTTP surface to wait for). */
   waitReady(e, proc, isDsh, isOpenclaw = false, isTerminal = false) {
     if (isTerminal) return Promise.resolve({ port: 0 });
-    const timeoutMs = isOpenclaw ? OPENCLAW_READY_TIMEOUT_MS : START_TIMEOUT_MS;
+    const timeoutMs = isOpenclaw ? OPENCLAW_READY_TIMEOUT_MS : isDsh ? DSH_READY_TIMEOUT_MS : START_TIMEOUT_MS;
     const wantPort = e.meta.containerPort || e.meta.port;
     if (!isDsh) {
       return new Promise((resolve2, reject) => {
@@ -12397,7 +12411,7 @@ class PageRegistry extends EventEmitter {
           failWith(
             new Error(
               m("page.dshProfileNotReady", {
-                sec: Math.round(START_TIMEOUT_MS / 1e3),
+                sec: Math.round(timeoutMs / 1e3),
                 port: wantPort
               })
             )
@@ -12411,7 +12425,7 @@ class PageRegistry extends EventEmitter {
       };
       proc.stdout.on("data", onChunk);
       proc.once("close", onExit);
-      waitPortReady(wantPort, START_TIMEOUT_MS).then(
+      waitPortReady(wantPort, timeoutMs).then(
         (port) => setTimeout(() => {
           cleanup();
           resolve2({ port, url: announced?.url });

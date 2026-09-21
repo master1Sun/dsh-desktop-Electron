@@ -1,4 +1,4 @@
-appId: com.dsh.desktop-container
+appId: com.desktop-container
 productName: 桌面控制台
 directories:
   buildResources: build
@@ -55,7 +55,8 @@ extraResources:
 win:
   executableName: DesktopContainer
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  # fixed product-name artifact (was ${name}-… = dsh-desktop-electron-…); matches executableName/appId
+  artifactName: DesktopContainer-${version}.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
