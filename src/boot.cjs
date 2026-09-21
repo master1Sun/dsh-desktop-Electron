@@ -7,15 +7,14 @@
 // resources/ including our updates dir, while userData survives — after such a reinstall
 // the stale marker must not let a broken update be retried forever.
 // NOTE: main/index.ts ensureAsciiUserData() pins userData to the ASCII leaf
-// 'dsh-desktop-container' (the Chinese name broke PowerShell/git tooling), so the
-// *current* marker path is ASCII; '桌面控制台' stays in the candidate list only as a
-// legacy fallback for machines migrated before a marker was ever written there.
+// 'DesktopContainer' (the Chinese name broke PowerShell/git tooling), so the
+// marker path is always that ASCII folder.
 const fs = require('node:fs')
 const path = require('node:path')
 
 function appDataDirs() {
   const home = process.env.USERPROFILE || process.env.HOME || ''
-  const leaves = ['dsh-desktop-container', '桌面控制台']
+  const leaves = ['DesktopContainer']
   const base =
     process.platform === 'win32'
       ? process.env.APPDATA || path.join(home, 'AppData', 'Roaming')

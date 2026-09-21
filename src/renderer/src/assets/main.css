@@ -1,6 +1,12 @@
 /* DSH Desktop Container — Win11 Fluent inspired theme */
 
 :root {
+  /* Single app font stack; Element Plus components (menus/tabs/buttons/dialogs) default to their
+     own Helvetica/PingFang/YaHei stack which renders differently from the body text, so point
+     --el-font-family at the same stack to keep every surface on one typeface. */
+  --font-app: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Microsoft YaHei UI',
+    sans-serif;
+  --el-font-family: var(--font-app);
   --accent: #4f8cff;
   --accent-strong: #2f6fe4;
   --bg: #f3f5fa;
@@ -201,13 +207,7 @@ body,
 }
 
 body {
-  font-family:
-    'Segoe UI Variable Text',
-    'Segoe UI',
-    system-ui,
-    -apple-system,
-    'Microsoft YaHei UI',
-    sans-serif;
+  font-family: var(--font-app);
   background: var(--bg);
   color: var(--text);
   font-size: 14px;

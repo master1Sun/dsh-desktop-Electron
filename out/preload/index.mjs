@@ -11,6 +11,8 @@ const IPC = {
   InstallPageFromDir: "container:install-page-dir",
   ChooseDirectory: "container:choose-directory",
   RemovePage: "container:remove-page",
+  /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
+  ResetBuiltinPage: "container:reset-builtin-page",
   SetPagePort: "container:set-page-port",
   OpenPageExternal: "container:open-page-external",
   GetSettings: "container:get-settings",
@@ -42,6 +44,9 @@ const IPC = {
   OpenLogsDir: "container:open-logs-dir",
   /** relaunch the app after the container updated its own source from git */
   RelaunchApp: "container:relaunch-app",
+  QuitApp: "container:quit-app",
+  /** push: main asks the renderer to show a horizontal quit-confirm dialog */
+  OnQuitConfirm: "container:quit-confirm",
   OnStateChanged: "container:state-changed",
   DshStatus: "dsh:status",
   DshListPlugins: "dsh:list-plugins",
@@ -98,6 +103,7 @@ const api = {
   installPageFromDir: (srcDir, name, port, originUrl) => ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port, originUrl),
   chooseDirectory: (title) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id) => ipcRenderer.invoke(IPC.RemovePage, id),
+  resetBuiltinPage: (id) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),
   setPagePort: (id, port) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
   openExternal: (url) => ipcRenderer.invoke(IPC.OpenPageExternal, url),
   getSettings: () => ipcRenderer.invoke(IPC.GetSettings),
@@ -133,6 +139,12 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.OnDownloadProgress, listener);
   },
   relaunchApp: () => ipcRenderer.invoke(IPC.RelaunchApp),
+  quitApp: () => ipcRenderer.invoke(IPC.QuitApp),
+  onQuitConfirm: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on(IPC.OnQuitConfirm, listener);
+    return () => ipcRenderer.removeListener(IPC.OnQuitConfirm, listener);
+  },
   dshStatus: (profile) => ipcRenderer.invoke(IPC.DshStatus, profile),
   dshListPlugins: (profile) => ipcRenderer.invoke(IPC.DshListPlugins, profile),
   dshCheckUpdates: (profile) => ipcRenderer.invoke(IPC.DshPluginUpdates, profile),

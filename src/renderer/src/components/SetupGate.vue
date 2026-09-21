@@ -276,16 +276,33 @@ const nodeProgress = computed(() => updates.nodeProgress)
   width: min(560px, calc(100vw - 32px));
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background:
+    radial-gradient(120% 60% at 50% -10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
+    color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
   border-radius: 14px;
-  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(32px) saturate(145%);
+  backdrop-filter: blur(32px) saturate(145%);
+  box-shadow:
+    var(--shadow),
+    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset,
+    0 20px 60px color-mix(in srgb, var(--accent) 14%, transparent);
   padding: 18px 20px 16px;
 }
 
 .sg-head h2 {
   margin: 0 0 6px;
   font-size: 16px;
+  font-weight: 700;
+  background: linear-gradient(
+    100deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 45%, #a855f7)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: var(--accent);
+  -webkit-text-fill-color: transparent;
 }
 .sg-intro {
   margin: 0 0 12px;

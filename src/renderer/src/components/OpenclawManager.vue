@@ -119,7 +119,7 @@ async function openHomeTerminal(): Promise<void> {
     </EmptyState>
 
     <template v-else-if="status">
-      <div class="head">
+      <div class="head neon">
         <div class="ver">
           <span class="status-dot running" /> openclaw <b>v{{ status.version || '?' }}</b>
           <el-tag size="small" effect="plain" round>{{ t('openclawMgr.verTag') }}</el-tag>

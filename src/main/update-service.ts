@@ -9,7 +9,12 @@ import { getDshStatus, repairPnpmCmd } from './dsh'
 import { openclawVersion } from './openclaw'
 import { resolveInstallDir } from './store'
 import { m } from './i18n'
-import { type BuiltinKind, type PageMeta, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
+import {
+  type BuiltinKind,
+  type PageMeta,
+  type UpdateCheckResult,
+  type UpdateOutcome
+} from '../shared/types'
 
 const REGISTRY = process.env.npm_config_registry || 'https://registry.npmmirror.com/'
 const DSH_PKG = '@deepseek-ai/dsh'
@@ -81,7 +86,9 @@ async function checkPage(p: PageMeta): Promise<UpdateCheckResult> {
       hasUpdate: false,
       source: 'builtin',
       action: 'none',
-      canAutoUpdate: false
+      canAutoUpdate: false,
+      // lets the panel offer 重置 (re-seed pages/<id> from the bundled original)
+      pageId: p.id
     }
   }
   const gitRes = await checkOne(p.name, p.dir, false)
@@ -149,8 +156,8 @@ async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
   return Promise.all([
     // Both packaged and dev detect the container's own update the same way: compare the
     // running version against the `release` branch tip (over-the-air app.asar channel).
-    // A packaged install swaps the asar at boot; a dev checkout downloads/stages it but
-    // boot.cjs is not on its launch path, so applying takes effect only once packaged.
+    // On relaunch, relaunchToApplyStaged swaps a staged asar into resources/ in place
+    // (packaged only — a dev checkout just stages the download, since out/ isn't the running asar).
     checkAsarUpdate(name, resolveInstallDir()),
     ...pages.filter((p) => !p.id.startsWith('__')).map(checkPage),
     checkBuiltin(
@@ -345,7 +352,34 @@ export async function provisionBuiltin(kind: BuiltinKind): Promise<UpdateOutcome
   return kind === 'dsh' ? updateDshSelf() : reprovisionOpenclaw()
 }
 
-export async function performUpdate(
+/**
+ * One update per row at a time. Overlapping invokes (a retry while an earlier attempt still
+ * awaits, a double click, a stale row re-clicked after relaunch) would download and extract
+ * into the same commit folder twice — wasteful at best, and with two pipelines interleaving
+ * their rmSync/extract steps on one directory, outright hazardous. Later callers join the
+ * in-flight promise and share its outcome instead of starting a second pipeline. (The bogus
+ * "解压后未找到有效的 app.asar" aborts users hit were caused separately by Electron's
+ * asar-patched fs mis-stating the staged file — see ofs in asar-updates.ts.)
+ */
+const inFlightUpdates = new Map<string, Promise<UpdateOutcome>>()
+
+export function performUpdate(
+  target: UpdateCheckResult,
+  onProgress?: ProgressCb
+): Promise<UpdateOutcome> {
+  const running = inFlightUpdates.get(target.name)
+  if (running) {
+    console.log(`[update] ${target.name}: update already in flight, joining`)
+    return running
+  }
+  const done = runUpdate(target, onProgress).finally(() => {
+    inFlightUpdates.delete(target.name)
+  })
+  inFlightUpdates.set(target.name, done)
+  return done
+}
+
+async function runUpdate(
   target: UpdateCheckResult,
   onProgress?: ProgressCb
 ): Promise<UpdateOutcome> {

@@ -27,10 +27,16 @@ const props = defineProps<{
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
-  padding: 12px 2px;
+  padding: 14px 16px;
   font-size: 12.5px;
   line-height: 1.7;
   color: var(--text-dim);
+  /* frosted glass chip */
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 12px);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
 }
 .tone-error .desc {
   color: var(--err);

@@ -31,6 +31,12 @@ export interface PageState {
   nextRestartAt?: number
   url?: string
   launchUrl?: string
+  /**
+   * Set by the main process for a stopped hosted dsh/openclaw page whose on-demand CLI runtime is
+   * not provisioned yet. The badges/guards read this instead of the async runtimes store, so they
+   * can't flash the wrong verdict during the status-IPC round trip.
+   */
+  runtimeMissing?: boolean
 }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
@@ -41,7 +47,12 @@ async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>):
 
 export const usePagesStore = defineStore('pages', () => {
   const pages = reactive<PageState[]>([])
-  const nodeInfo = reactive({ path: '', version: null as string | null, ok: false, override: false })
+  const nodeInfo = reactive({
+    path: '',
+    version: null as string | null,
+    ok: false,
+    override: false
+  })
   /** True once the first refresh() has actually reported Node; `ok:false` before that just means "unknown". */
   const nodeInfoLoaded = ref(false)
   const busy = reactive<Record<string, boolean>>({})

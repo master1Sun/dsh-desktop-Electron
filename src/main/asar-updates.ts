@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import * as nodeFs from 'node:fs'
 import {
   createWriteStream,
   existsSync,
@@ -14,7 +15,6 @@ import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
-import extract from 'extract-zip'
 import {
   CONTAINER_REPO_URL,
   type UpdateProgress,
@@ -23,6 +23,28 @@ import {
 } from '../shared/types'
 import { m } from './i18n'
 import { isNewer } from './update-service'
+import { extractZip } from './node-updater'
+
+/**
+ * Electron patches `fs` so every path carrying a `.asar` segment is routed through its archive
+ * reader: statSync() on a REAL on-disk app.asar then reports the archive root (size 0, isFile
+ * false). Verified in-probe: patched fs said size=0/isFile=false for a 129 MB file while
+ * `original-fs` said 129173541/isFile=true. Every size verification of a staged asar therefore
+ * has to go through original-fs, or the post-extract check aborts every perfectly good update
+ * ("解压后未找到有效的 app.asar") and readStagedUpdate never recognises a staged download.
+ * Under vitest (plain node) original-fs does not exist and node:fs is unpatched already.
+ */
+const ofs: typeof nodeFs = (() => {
+  try {
+    // original-fs has no ESM/type export and must bypass Electron's patched fs at runtime, so
+    // a plain `require` is the only correct way in.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    if (typeof require === 'function') return require('original-fs') as typeof nodeFs
+  } catch {
+    /* plain node: nothing to bypass */
+  }
+  return nodeFs
+})()
 
 /**
  * Over-the-air asar updates. The publisher (scripts/publish-update.mjs) commits the
@@ -30,7 +52,8 @@ import { isNewer } from './update-service'
  * single app.zip, plus version.txt, to an orphan `release` branch; a packaged client fetches that
  * branch with its own git credentials, extracts the zip into
  * <installDir>/resources/updates/<commit>/ (yielding a literal `app.asar` and its sibling
- * `app.asar.unpacked`), and boot.cjs swaps the running asar on next launch. Each release lives in
+ * `app.asar.unpacked`), and {@link relaunchToApplyStaged} copies it over `resources/` via a detached
+ * helper when the app relaunches. Each release lives in
  * its own commit folder, so Electron's sibling `app.asar.unpacked` convention stays valid and a
  * newer update can stage a different file rather than overwrite the running (Windows-locked) asar.
  *
@@ -79,7 +102,8 @@ export function readStagedUpdate(): StagedAsarUpdate | null {
   const pending = join(updatesRoot(), meta.pendingAsar)
   let size = 0
   try {
-    size = statSync(pending).size
+    // original-fs: the patched fs would report the archive root (size 0) for a *.asar path.
+    size = ofs.statSync(pending).size
   } catch {
     size = 0
   }
@@ -335,9 +359,16 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
   // native binaries). It is the step that actually materialises app.asar, so a crash before it
   // leaves only the .zip on disk and boot.cjs can never see a half-extracted asar.
   onProgress?.({ name, phase: 'extract', percent: 100, message: m('git.zipUnpacking') })
-  await extract(zipPath, { dir })
+  // Out-of-process Expand-Archive instead of in-process extract-zip: the yauzl/fd-slicer reader
+  // was observed wedging forever on the packaged app (one DEP0005 warning, then silence — no
+  // error, no files, the IPC handler never replied). A child PowerShell keeps the ~50 MB unpack
+  // off the main event loop and its execFile timeout backstops a wedged shell.
+  console.log(`[update] extracting ${zipPath} -> ${dir}`)
+  await extractZip(zipPath, dir)
+  console.log(`[update] extract finished: ${dir}`)
   const stagedAsar = join(dir, 'app.asar')
-  if (!existsSync(stagedAsar) || statSync(stagedAsar).size < MIN_ASAR_BYTES)
+  // original-fs again: the patched fs stats a real app.asar as the archive root (size 0).
+  if (!ofs.existsSync(stagedAsar) || ofs.statSync(stagedAsar).size < MIN_ASAR_BYTES)
     throw new Error(m('git.asarExtractFailed'))
 
   // Preserve the running currentAsar as a rollback record and clear any stale broken flag while
@@ -428,7 +459,9 @@ export async function applyAsarUpdate(
 ): Promise<UpdateOutcome> {
   try {
     const tip = await fetchTip(name, onProgress)
+    console.log(`[update] ${name}: release tip ${tip.version} (${tip.commit.slice(0, 8)})`)
     await downloadAsar(tip, name, onProgress)
+    console.log(`[update] ${name}: staged ${tip.version}, restart to apply`)
     return {
       name,
       ok: true,
@@ -436,6 +469,133 @@ export async function applyAsarUpdate(
       message: m('git.asarDownloaded', { version: tip.version })
     }
   } catch (err) {
+    console.error(`[update] ${name}: apply failed:`, err)
     return { name, ok: false, updated: false, error: (err as Error).message }
+  }
+}
+
+/** Escape a value for single-quoted PowerShell string literals ('' doubles the quote). */
+function psStr(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`
+}
+
+/**
+ * Swap a fully-staged asar into `resources/` the instant this process exits, then relaunch — the
+ * packaged update path, replacing the old boot.cjs "swap on next launch" hook.
+ *
+ * Two facts force this shape: (1) Windows locks the running `app.asar` and its `app.asar.unpacked`
+ * natives, so the copy cannot happen in-process; it has to run after we quit. (2) boot.cjs is not
+ * actually on the launch path — the packaged `main` resolves to `out/main/index.js` INSIDE app.asar
+ * — which is why staged downloads used to sit in `updates/<commit>` forever and never take effect.
+ * So we hand the swap to a detached PowerShell: wait for this PID to disappear, copy the staged
+ * `app.asar` (backing up the current one) and mirror its `app.asar.unpacked` over `resources/`,
+ * clear the pending marker, then relaunch the exe with `--dsh-relaunched` so it seizes the lock
+ * the dying process may still briefly hold.
+ *
+ * Returns true when a relaunch was scheduled (a valid staged update exists). False means nothing is
+ * staged — the caller should fall back to a plain `app.relaunch`.
+ */
+export function relaunchToApplyStaged(): boolean {
+  // Dev (`npm run dev`) boots from out/, not a packaged resources/ layout — nothing to swap.
+  if (!app.isPackaged) return false
+  const metaFile = join(updatesRoot(), 'update-meta.json')
+  let meta: { pendingAsar?: string | null } | null = null
+  try {
+    meta = JSON.parse(readFileSync(metaFile, 'utf-8'))
+  } catch {
+    meta = null
+  }
+  const pending = meta?.pendingAsar
+  if (!pending) return false
+
+  const stagedAsar = join(updatesRoot(), pending)
+  let size = 0
+  try {
+    // original-fs: Electron's patched fs stats a real *.asar as the archive root (size 0).
+    size = ofs.statSync(stagedAsar).size
+  } catch {
+    size = 0
+  }
+  if (size < MIN_ASAR_BYTES) return false // truncated / missing — never swap in garbage
+
+  const stagedDir = dirname(stagedAsar)
+  const resourcesDir = dirname(updatesRoot()) // <install>/resources (updates is its child)
+  const targetAsar = join(resourcesDir, 'app.asar')
+  const stagedUnpacked = join(stagedDir, 'app.asar.unpacked')
+  const targetUnpacked = join(resourcesDir, 'app.asar.unpacked')
+  const exe = app.getPath('exe')
+  // Re-launch flags the dying process may carry; strip them so the fresh instance starts clean,
+  // then add the one that lets it take over the single-instance lock.
+  const noise = new Set([
+    '--autostart',
+    '--dsh-relaunched',
+    '--dsh-boot-retry',
+    '--dsh-asar-launched'
+  ])
+  const relaunchArgs = process.argv
+    .slice(1)
+    .filter((a) => !noise.has(a) && !a.startsWith('--app-path='))
+    .concat('--dsh-relaunched')
+
+  const ps1 = join(updatesRoot(), 'apply-update.ps1')
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$appPid = ${process.pid}`,
+    `$exe = ${psStr(exe)}`,
+    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(', ')})`,
+    `$srcAsar = ${psStr(stagedAsar)}`,
+    `$dstAsar = ${psStr(targetAsar)}`,
+    `$srcUnpacked = ${psStr(stagedUnpacked)}`,
+    `$dstUnpacked = ${psStr(targetUnpacked)}`,
+    `$metaFile = ${psStr(metaFile)}`,
+    // Wait for the app to actually exit (this PID gone), then a short grace for the OS to free
+    // the asar / native handles.
+    'while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }',
+    'Start-Sleep -Milliseconds 800',
+    // Keep a single rollback copy of the version we are replacing.
+    'if (Test-Path $dstAsar) { Copy-Item $dstAsar "$dstAsar.bak" -Force }',
+    // Retry the copy while a lingering AV/defender handle releases (up to ~10s).
+    'for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $srcAsar $dstAsar -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }',
+    // node-pty's natives live beside the asar; mirror them too (robocopy /MIR returns 0-7 on ok).
+    'if (Test-Path $srcUnpacked) { robocopy $srcUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }',
+    // Clear pending so a later plain launch does not re-apply; record what is now current.
+    // WriteAllText (not Set-Content -Encoding UTF8) so PowerShell 5.1 emits no BOM — the main
+    // process JSON.parses this file and a leading \uFEFF would make it throw and mis-report "none".
+    'try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.currentAsar = $m.pendingAsar; $m.pendingAsar = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}',
+    'Start-Process -FilePath $exe -ArgumentList $relaunchArgs'
+  ].join('\r\n')
+  try {
+    mkdirSync(updatesRoot(), { recursive: true })
+    writeFileSync(ps1, script, 'utf-8')
+    // Detach hard enough to survive a subsequent synchronous `app.exit()`. Empirically a plain
+    // `spawn(powershell, ..., {detached:true})` still died with the app before reaching the swap:
+    // Electron tears down its whole process tree on a hard exit, and the OS had not finished
+    // materialising the child. `cmd /c start "" /min ...` reparents the PowerShell helper away from
+    // cmd (which returns immediately), orphaning it - the Windows idiom for outliving the launcher.
+    const helper = spawn(
+      'cmd.exe',
+      [
+        '/c',
+        'start',
+        '',
+        '/min',
+        'powershell.exe',
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-WindowStyle',
+        'Hidden',
+        '-File',
+        ps1
+      ],
+      { detached: true, stdio: 'ignore', windowsHide: true }
+    )
+    helper.on('error', (err) => console.error('[update] swap helper spawn failed:', err))
+    helper.unref()
+    console.log(`[update] scheduled in-place swap of ${pending} into ${targetAsar}`)
+    return true
+  } catch (err) {
+    console.error('[update] failed to schedule staged asar swap:', err)
+    return false
   }
 }

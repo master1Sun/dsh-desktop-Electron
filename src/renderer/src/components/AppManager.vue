@@ -154,7 +154,7 @@ onMounted(() => {
   <div v-else class="appmgr">
     <header class="head">
       <div class="head-main">
-        <span class="name">{{ page.name }}</span>
+        <span class="name neon">{{ page.name }}</span>
         <span class="status" :class="statusClass">{{ statusText }}</span>
         <el-tag v-if="(page.crashes || 0) > 0" size="small" type="danger" effect="plain" round>
           {{ t('menu.crashCount', { n: page.crashes || 0 }) }}
@@ -373,5 +373,15 @@ onMounted(() => {
 
 .err-text {
   color: var(--err);
+}
+
+/* Frosted sub-cards for each management section. */
+.appmgr .blk {
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 12px);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+  padding: 12px 14px;
 }
 </style>

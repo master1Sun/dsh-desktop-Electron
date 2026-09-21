@@ -1,0 +1,261 @@
+/* =============================================================================
+ * DSH Desktop — global glass + neon theme layer
+ * -----------------------------------------------------------------------------
+ * Reusable utilities shared by every panel / manager / overlay so the whole app
+ * reads with the same "cool" treatment as MarketView, without copying scoped
+ * `--mp-*` tokens into each file.
+ *
+ * Built on the Fluent tokens in main.css (--accent / --surface / --bg / --border
+ * / --text-dim / --shadow / --radius-*), which already carry light + dark values,
+ * so every utility here adapts to the active theme automatically.
+ * ========================================================================== */
+
+/* Registered so the conic sweep on `.neon-edge` can interpolate (smooth spin). */
+@property --ang {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* ---- frosted glass surfaces -------------------------------------------------
+   `.glass` — primary floating surface (panels, dialogs, cards).
+   `.glass-soft` — lighter inset surface (rows, sub-cards, inputs). */
+.glass {
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: var(--radius-lg, 16px);
+  -webkit-backdrop-filter: blur(30px) saturate(140%);
+  backdrop-filter: blur(30px) saturate(140%);
+  box-shadow:
+    var(--shadow),
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent) inset,
+    0 1px 0 0 color-mix(in srgb, #ffffff 14%, transparent) inset;
+}
+.glass-soft {
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 12px);
+  -webkit-backdrop-filter: blur(20px) saturate(125%);
+  backdrop-filter: blur(20px) saturate(125%);
+}
+
+/* ---- neon title -------------------------------------------------------------
+   Gradient-clipped text for headings. A solid `color` fallback keeps it legible
+   if a browser drops background-clip; in modern Electron it is the gradient. */
+.neon-title {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  background: linear-gradient(
+    100deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 45%, #a855f7),
+    color-mix(in srgb, var(--accent) 38%, #0ea5e9)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: var(--accent); /* fallback */
+  -webkit-text-fill-color: transparent;
+}
+.neon-title.soft {
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--accent) 80%, var(--text)),
+    color-mix(in srgb, var(--accent) 55%, #a855f7)
+  );
+}
+
+/* ---- neon glow (safe on elements that contain tags / status dots) ---------
+   Uses color + text-shadow rather than gradient-clip, so child Element Plus
+   tags keep their own color instead of turning transparent. */
+.neon {
+  color: var(--accent);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ---- neon edge accent (subtle conic ring on hover) -------------------------- */
+.neon-edge {
+  position: relative;
+  isolation: isolate;
+}
+.neon-edge::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--ang, 0deg),
+    transparent,
+    color-mix(in srgb, var(--accent) 70%, transparent),
+    color-mix(in srgb, #a855f7 70%, transparent),
+    transparent 60%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  z-index: 0;
+}
+.neon-edge:hover::before {
+  opacity: 0.8;
+  animation: neon-spin 4s linear infinite;
+}
+
+/* ---- reveal (entrance) ------------------------------------------------------
+   Plays once on mount (no JS observer needed — panels mount/unmount as they
+   open, so the entrance replays naturally). Stagger via .reveal.d1..d4. */
+.reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  animation: reveal-up 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+.reveal.d1 {
+  animation-delay: 0.05s;
+}
+.reveal.d2 {
+  animation-delay: 0.12s;
+}
+.reveal.d3 {
+  animation-delay: 0.19s;
+}
+.reveal.d4 {
+  animation-delay: 0.26s;
+}
+
+/* ---- aurora backdrop --------------------------------------------------------
+   Fixed, non-interactive field of slowly drifting color blobs. Sits behind the
+   chrome (z-index 0) so glass menubars / panels let it bleed through. The
+   webview content area is opaque and covers it; the market overlay paints its
+   own copy. */
+.aurora {
+  position: fixed;
+  inset: -18%;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.aurora .blob {
+  position: absolute;
+  width: 40vw;
+  height: 40vw;
+  border-radius: 50%;
+  filter: blur(96px);
+  opacity: 0.58;
+  will-change: transform;
+  animation: aurora-drift 26s ease-in-out infinite;
+}
+html.dark .aurora .blob {
+  opacity: 0.72;
+}
+html.light .aurora .blob {
+  opacity: 0.42;
+}
+.aurora .b1 {
+  left: 1%;
+  top: 3%;
+  background: radial-gradient(circle at 32% 32%, var(--accent), transparent 70%);
+  animation-delay: 0s;
+}
+.aurora .b2 {
+  right: 4%;
+  top: 9%;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--accent) 72%, #a855f7),
+    transparent 70%
+  );
+  animation-delay: -8s;
+}
+.aurora .b3 {
+  left: 26%;
+  bottom: 2%;
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--accent) 60%, #0ea5e9),
+    transparent 70%
+  );
+  animation-delay: -15s;
+}
+
+/* ---- Element Plus primary button: neon glow --------------------------------- */
+.el-button--primary {
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 42%, transparent);
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.2s ease,
+    transform 0.09s ease;
+}
+.el-button--primary:hover:not(.is-disabled) {
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--accent) 58%, transparent);
+}
+
+/* ---- keyframes -------------------------------------------------------------- */
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes aurora-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+  }
+  33% {
+    transform: translate3d(4vw, 3vh, 0) scale(1.12) rotate(12deg);
+  }
+  66% {
+    transform: translate3d(-3vw, -2vh, 0) scale(0.94) rotate(-10deg);
+  }
+}
+@keyframes neon-spin {
+  to {
+    --ang: 360deg;
+  }
+}
+
+/* ---- accessibility: respect reduced-motion ----------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .aurora .blob,
+  .neon-edge::before {
+    animation: none !important;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+  .neon-edge:hover::before {
+    opacity: 0.55;
+  }
+  .el-button--primary {
+    transition: background-color 0.16s ease;
+  }
+}
+
+/* ---- frosted inputs (Element Plus) -----------------------------------------
+   Inputs/textarea keep a translucent, blurred fill so they read as glass instead
+   of an opaque block — the dark-mode gap the other surfaces already fixed. */
+.el-input__wrapper,
+.el-textarea__inner {
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
+  backdrop-filter: blur(8px) saturate(120%);
+}
+html.dark .el-input__wrapper,
+html.dark .el-textarea__inner {
+  background: color-mix(in srgb, var(--surface) 68%, transparent);
+}

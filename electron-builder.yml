@@ -44,7 +44,7 @@ extraResources:
     to: pages
     filter: ['**/*']
 win:
-  executableName: dsh-desktop-container
+  executableName: DesktopContainer
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}

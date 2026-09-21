@@ -23,7 +23,7 @@ function download(url, target) {
     const request = url.startsWith('https') ? httpsGet : httpGet
     const req = request(
       url,
-      { headers: { 'user-agent': 'dsh-desktop-container' }, timeout: 30000 },
+      { headers: { 'user-agent': 'DesktopContainer' }, timeout: 30000 },
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume()

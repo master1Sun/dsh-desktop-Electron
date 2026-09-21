@@ -27,3 +27,4 @@ test/tmp/
 # macOS icon source folder (regenerate icon.icns via build/make-icns.sh on a Mac)
 build/icon.iconset/
 /.workbuddy
+/.qoder

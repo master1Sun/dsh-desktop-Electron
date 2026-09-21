@@ -86,8 +86,8 @@ const zh: Dict = {
     updateNoRow: '尚未检测到该应用的更新信息'
   },
   settings: {
-    tabView: '界面与视图',
-    tabBehavior: '行为',
+    tabView: '界面视图',
+    tabBehavior: '行为规范',
     tabDownload: '外链下载',
     tabEnv: '环境目录',
     interfaceTitle: '界面与默认视图',
@@ -189,6 +189,11 @@ const zh: Dict = {
     installBtn: '安装',
     manualBtn: '手动',
     restartNowBtn: '立即重启',
+    resetBtn: '重置',
+    resetTitle: '重置内置页面',
+    resetConfirm:
+      '{name} 将删除当前页面目录并从容器自带副本重新恢复：你对该目录内文件（配置、代码）的任何修改都会丢失且无法撤销；运行中的页面会先停止，重置完成后自动重新启动。端口、环境目录等设置不受影响。确定重置吗？',
+    resetDone: '{name} 已重置为出厂内容',
     manualTip: '本地项目不支持自动更新：请在其仓库拉取新版后重装/复制',
     notDetected: '未检测到'
   },
@@ -200,7 +205,11 @@ const zh: Dict = {
     startFail: '{name} 启动失败：{err}',
     started: '{name} 已启动',
     notRunningStarting: '{name} 未运行，正在启动…',
-    webviewLoading: '加载中…'
+    webviewLoading: '加载中…',
+    quitConfirmTitle: '确认退出',
+    quitConfirmMsg: '确定要退出吗？',
+    quitConfirmOk: '确定',
+    quitConfirmCancel: '取消'
   },
   boot: {
     firstBootHint: '首次启动需下载并初始化依赖，可能需要 1-2 分钟，请稍候…',
@@ -518,13 +527,16 @@ const zh: Dict = {
     tagline:
       '内置 Node v24.21.0 的桌面端多页容器：pages/ 下的项目由内置 node 托管启停，顶部「选择页面」下拉切换运行中的 page，关闭主窗口最小化到任务栏继续运行。',
     installBtn: '安装并管理 Pages',
-    okBadge: '重启工作台后在「扩展」里启用',
+    termName: 'dsh — 桌面控制台',
+    termOut: 'Desktop console ready · 已加载 6 个模块',
+    okBadge: '桌面控制台已就绪 · 点击任意模块进入',
     feat1Title: '免编译直装',
-    feat1Desc: '插件是纯 JS 单文件，导入即打包激活，无需 node_modules 地狱。',
+    feat1Desc: '插件是纯 JS 单文件：导入即打包激活，无需编译，也没有 node_modules 地狱。',
     feat2Title: '贡献点体系',
-    feat2Desc: '侧栏视图 / 状态栏 / 「扩展」气泡菜单 / 编辑器装饰，一处 register 全接管。',
+    feat2Desc: '侧栏视图、状态栏、「扩展」气泡菜单、编辑器装饰——一处 register，全部接管。',
     feat3Title: '容器托管',
-    feat3Desc: '顶栏「应用 › DSH」面板可直接对 profile 安装 / 更新插件。',
+    feat3Desc:
+      '顶栏「视图 › DSH 管理器」按 profile 直接安装 / 更新 / 卸载插件；内置页面改坏了还能一键重置还原。',
     featuredHeading: '精选插件',
     featuredSub: '点「复制」拿到安装命令，粘贴到终端执行即可。',
     copy: '复制',
@@ -537,7 +549,25 @@ const zh: Dict = {
     plugin2Desc:
       'DSH 文件工作台本体：右侧文件树 + 仿 VS Code 编辑器，开放外部插件注入 API（侧栏视图、状态栏、编辑器装饰、宿主 HTTP API）。',
     plugin3Tag: 'QQ 机器人',
-    plugin3Desc: 'DSH × QQ 机器人桥接插件：把 dsh 会话接入 QQ 频道，消息驱动任务并在群里回收结果。'
+    plugin3Desc: 'DSH × QQ 机器人桥接插件：把 dsh 会话接入 QQ 频道，消息驱动任务并在群里回收结果。',
+    consoleHeading: '桌面控制台 · 功能全景',
+    consoleSub: '一个内置 Node 的桌面多页容器：下面是所有核心模块，点任意卡片直达对应配置界面。',
+    consoleKicker: '能力全景',
+    modReady: '已配置',
+    modTodo: '未配置',
+    modPagesTitle: '页面管理',
+    modPagesDesc: '从 Git / 本地目录安装 pages，启停、端口与环境目录一站式配置。',
+    modExternalTitle: '外部站点',
+    modExternalDesc: '把常用 URL 存成带名称的条目，顶部切换器一键内嵌预览。',
+    modDshTitle: 'DSH 管理器',
+    modDshDesc: '按 profile 安装 / 更新 / 卸载插件，查看并复制 dsh 运行令牌。',
+    modOpenclawTitle: 'OpenClaw 管理器',
+    modOpenclawDesc: '初始化 Gateway、生成并管理本地令牌，启停内嵌页面。',
+    modSettingsTitle: '设置',
+    modSettingsDesc: '默认视图、主题、语言、开机自启、环境目录与下载目录。',
+    modHelpTitle: '关于与更新',
+    modHelpDesc: '检测容器 / 内置 Node / DSH / OpenClaw 的版本更新并一键升级。',
+    enterLabel: '进入'
   }
 }
 
@@ -721,6 +751,11 @@ const en: Dict = {
     installBtn: 'Install',
     manualBtn: 'Manual',
     restartNowBtn: 'Restart now',
+    resetBtn: 'Reset',
+    resetTitle: 'Reset built-in page',
+    resetConfirm:
+      '{name} deletes the current page folder and re-seeds it from the built-in copy of the container: any edits you made to files in that folder (config, code) are lost and cannot be undone; a running page is stopped first and restarted automatically after the reset. Port and environment-directory settings are unaffected. Reset now?',
+    resetDone: '{name} has been reset to its factory content',
     manualTip:
       'Local projects do not support auto-update: pull the new version in their repo, then reinstall/copy.',
     notDetected: 'Not detected'
@@ -733,7 +768,11 @@ const en: Dict = {
     startFail: '{name} failed to start: {err}',
     started: '{name} started',
     notRunningStarting: '{name} is not running; starting…',
-    webviewLoading: 'Loading…'
+    webviewLoading: 'Loading…',
+    quitConfirmTitle: 'Confirm Exit',
+    quitConfirmMsg: 'Are you sure you want to quit?',
+    quitConfirmOk: 'OK',
+    quitConfirmCancel: 'Cancel'
   },
   boot: {
     firstBootHint:
@@ -1058,15 +1097,18 @@ const en: Dict = {
     tagline:
       'A desktop multi-page container with built-in Node v24.21.0: projects under pages/ are hosted and started/stopped by the built-in node. Switch running pages from the "Select page" dropdown at the top; closing the main window minimizes to the taskbar and keeps running.',
     installBtn: 'Install & manage Pages',
-    okBadge: 'Enable in "Extensions" after restarting the workbench',
+    termName: 'dsh — desktop console',
+    termOut: 'Desktop console ready · 6 modules loaded',
+    okBadge: 'Desktop console is ready · open any module to enter',
     feat1Title: 'No-build install',
     feat1Desc:
-      'Plugins are single-file plain JS — import to package and activate, no node_modules hell.',
+      'Plugins are single-file plain JS: import to package and activate — no build step, no node_modules hell.',
     feat2Title: 'Contribution points',
     feat2Desc:
-      'Sidebar views / status bar / "Extensions" popover menu / editor decorations — register once, take over all.',
+      'Sidebar views, status bar, the "Extensions" popover and editor decorations — register once, take over all of them.',
     feat3Title: 'Container hosting',
-    feat3Desc: 'The top-bar "Apps › DSH" panel installs / updates plugins for a profile directly.',
+    feat3Desc:
+      'The top-bar "View › DSH Manager" panel installs / updates / removes plugins per profile; a broken built-in page resets to factory content in one click.',
     featuredHeading: 'Featured plugins',
     featuredSub: 'Click Copy to get the install command, then paste it into a terminal to run.',
     copy: 'Copy',
@@ -1080,7 +1122,26 @@ const en: Dict = {
       'DSH File Workbench core: a right-side file tree + VS Code-like editor, exposing an external plugin injection API (sidebar views, status bar, editor decorations, host HTTP API).',
     plugin3Tag: 'QQ bot',
     plugin3Desc:
-      'DSH × QQ bot bridge plugin: connect a dsh session to a QQ channel; messages drive tasks and return results in the group.'
+      'DSH × QQ bot bridge plugin: connect a dsh session to a QQ channel; messages drive tasks and return results in the group.',
+    consoleHeading: 'Desktop Console · Feature panorama',
+    consoleSub:
+      'A desktop multi-page container with built-in Node: below are all core modules — click any card to jump straight to its config screen.',
+    consoleKicker: 'CAPABILITY MAP',
+    modReady: 'Configured',
+    modTodo: 'Not set',
+    modPagesTitle: 'Page manager',
+    modPagesDesc: 'Install pages from Git / local folder; start/stop, port and env dir config in one place.',
+    modExternalTitle: 'External sites',
+    modExternalDesc: 'Save frequent URLs as named entries, preview them embedded from the top switcher.',
+    modDshTitle: 'DSH manager',
+    modDshDesc: 'Install / update / uninstall plugins per profile; view and copy the dsh token.',
+    modOpenclawTitle: 'OpenClaw manager',
+    modOpenclawDesc: 'Initialize the gateway, generate and manage the local token, start/stop the embedded page.',
+    modSettingsTitle: 'Settings',
+    modSettingsDesc: 'Default view, theme, language, launch-at-startup, env and download folders.',
+    modHelpTitle: 'About & updates',
+    modHelpDesc: 'Check version updates for container / bundled Node / DSH / OpenClaw and upgrade in one click.',
+    enterLabel: 'Open'
   }
 }
 

@@ -1,8 +1,8 @@
 {
   "name": "dsh-desktop-electron",
   "productName": "桌面控制台",
-  "version": "0.1.4",
-  "description": "桌面端 Node 容器：内置 Node v24.21.0，pages 插件项目托管与页面视图、配置持久化、git 更新检测",
+  "version": "0.1.10",
+  "description": "插件项目托管与页面视图、配置持久化、git 更新检测",
   "main": "./out/main/index.js",
   "author": "sunjuntao",
   "type": "module",

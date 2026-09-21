@@ -1,4 +1,6 @@
 import { ipcMain, shell, BrowserWindow, webContents, nativeTheme, dialog, app } from 'electron'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   IPC,
   type IpcResult,
@@ -14,7 +16,13 @@ import {
 } from '../shared/types'
 import { getNodeRuntimeInfo } from './node-runtime'
 import { listNodeVersions, updateNodeRuntime, restoreBundledNode } from './node-updater'
-import { PageRegistry, expandStartCommand, buildPageEnv, resolveDshToken } from './pages'
+import {
+  PageRegistry,
+  expandStartCommand,
+  buildPageEnv,
+  resolveDshToken,
+  BUILTIN_PAGE_IDS
+} from './pages'
 import {
   getSettings,
   updateSettings,
@@ -33,6 +41,7 @@ import {
 } from './store'
 import { installFromGit, installFromLocalDir, removePage } from './installer'
 import { checkUpdates, performUpdate, clearUpdateCache, provisionBuiltin } from './update-service'
+import { relaunchToApplyStaged } from './asar-updates'
 import { logsDir } from './logger'
 import { PtyManager } from './pty'
 import {
@@ -49,7 +58,9 @@ import {
   getOpenclawStatus,
   createOpenclawPage,
   getOpenclawGatewayToken,
-  initializeOpenclawToken
+  initializeOpenclawToken,
+  ensureDefaultOpenclawPage,
+  ensureBuiltinPages
 } from './openclaw'
 import { m, notifyLocaleChanged } from './i18n'
 
@@ -193,6 +204,10 @@ export function registerIpc(registry: PageRegistry): void {
     try {
       const res = await provisionBuiltin(kind)
       clearUpdateCache()
+      // Provisioning clears the `runtimeMissing` badge on the hosted page. Nudge every window to
+      // re-list (onStateChanged -> pagesStore.refresh -> ListPages re-probes presence) so the row
+      // becomes startable now, without the renderer having to await an install-status IPC itself.
+      registry.emitChanged()
       return ok(res)
     } catch (err) {
       return fail(err)
@@ -201,6 +216,10 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(IPC.ListPages, async (): Promise<IpcResult> => {
     registry.reconcile()
+    // Re-probe on-demand runtime presence (cheap existsSync) before listing, so each PageState's
+    // `runtimeMissing` is current when the renderer draws its badges — an install clears the row
+    // on the very next refresh without a dedicated signal.
+    await registry.refreshRuntimePresence().catch(() => undefined)
     return ok(registry.list())
   })
 
@@ -236,7 +255,14 @@ export function registerIpc(registry: PageRegistry): void {
         if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p)
       }
       try {
-        const dirName = await installFromGit(resolvePagesDir(), repoUrl, name, port, undefined, onProgress)
+        const dirName = await installFromGit(
+          resolvePagesDir(),
+          repoUrl,
+          name,
+          port,
+          undefined,
+          onProgress
+        )
         registry.reconcile()
         clearUpdateCache()
         return ok(dirName)
@@ -308,6 +334,33 @@ export function registerIpc(registry: PageRegistry): void {
         updateSettings({ autoStartPages: s.autoStartPages.filter((x) => x !== id) })
       if (s.defaultView.kind === 'page' && s.defaultView.pageId === id)
         setDefaultView({ kind: 'none' })
+      return ok(true)
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  /**
+   * Restore a builtin page (dsh-web / openclaw) the user broke in userData: stop it, drop the
+   * whole pages/<id> folder and re-seed from the bundled originals (both ensure* are no-ops while
+   * the dir exists, so calling them after the delete is exactly a factory re-install). Port and
+   * env overrides live in settings, not in the page dir — they deliberately survive a reset.
+   */
+  ipcMain.handle(IPC.ResetBuiltinPage, (_e, id: string): IpcResult => {
+    try {
+      if (!BUILTIN_PAGE_IDS.has(id)) return fail(new Error(m('ipc.resetNotBuiltin')))
+      const wasRunning = registry.get(id)?.status === 'running'
+      registry.stop(id)
+      rmSync(join(resolvePagesDir(), id), { recursive: true, force: true })
+      ensureDefaultOpenclawPage()
+      ensureBuiltinPages()
+      registry.reconcile()
+      // A reset of a RUNNING page should land back where the user left it, not in 已停止.
+      if (wasRunning) {
+        registry
+          .start(id)
+          .catch((err) => console.error(`[page:${id}] reset auto-start failed:`, err))
+      }
       return ok(true)
     } catch (err) {
       return fail(err)
@@ -466,11 +519,27 @@ export function registerIpc(registry: PageRegistry): void {
   // The container updated its own source: relaunch so the new code runs. before-quit
   // still gets to shut the pages down; --dsh-relaunched bypasses the single-instance lock.
   ipcMain.handle(IPC.RelaunchApp, (): IpcResult => {
+    // A container asar update is staged under resources/updates/<commit>/: hand the swap to a
+    // detached helper that replaces app.asar the moment this PID exits and then relaunches, so the
+    // update is applied IN PLACE (the old boot.cjs next-launch hook is not on the launch path).
+    // Nothing staged (a plain relaunch) falls through to the in-process app.relaunch below.
+    if (relaunchToApplyStaged()) {
+      // Exit only after a short grace so the OS fully materialises the orphaned swap helper before
+      // Electron tears down its process tree; the helper itself waits for this PID to vanish.
+      setTimeout(() => app.exit(0), 700)
+      return ok(true)
+    }
     // Drop --autostart: it marks a hidden login launch and would otherwise be inherited by
     // the relaunched process, leaving the user with a tray-only (seemingly vanished) app.
     const args = process.argv.slice(1).filter((a) => a !== '--autostart')
     app.relaunch({ args: [...args, '--dsh-relaunched'] })
     app.exit(0)
+    return ok(true)
+  })
+
+  // Renderer confirms quit (after ElMessageBox) — initiate graceful shutdown.
+  ipcMain.handle(IPC.QuitApp, (): IpcResult => {
+    app.quit()
     return ok(true)
   })
 
@@ -746,20 +815,23 @@ export function registerIpc(registry: PageRegistry): void {
    * the gateway page is already running we restart it fire-and-forget so it enforces the new
    * credential, without blocking this call on openclaw's slow (~2min) first-boot readiness.
    */
-  ipcMain.handle(IPC.OpenclawInitToken, (_e, rotate?: boolean): IpcResult<OpenclawInitTokenResult> => {
-    try {
-      const { token, created } = initializeOpenclawToken(Boolean(rotate))
-      let restarted = false
-      const page = registry.get('openclaw')
-      if (page && page.status === 'running') {
-        restarted = true
-        registry.restart('openclaw').catch((err) => {
-          console.warn('[openclaw] token restart failed (ignored):', (err as Error).message)
-        })
+  ipcMain.handle(
+    IPC.OpenclawInitToken,
+    (_e, rotate?: boolean): IpcResult<OpenclawInitTokenResult> => {
+      try {
+        const { token, created } = initializeOpenclawToken(Boolean(rotate))
+        let restarted = false
+        const page = registry.get('openclaw')
+        if (page && page.status === 'running') {
+          restarted = true
+          registry.restart('openclaw').catch((err) => {
+            console.warn('[openclaw] token restart failed (ignored):', (err as Error).message)
+          })
+        }
+        return ok({ token, created, restarted })
+      } catch (err) {
+        return fail(err)
       }
-      return ok({ token, created, restarted })
-    } catch (err) {
-      return fail(err)
     }
-  })
+  )
 }

@@ -228,7 +228,7 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
         <span class="foot-hint">{{ t('dshMgr.profileTemplatesHint') }}</span>
       </div>
 
-      <div class="head">
+      <div class="head neon">
         <div class="ver">
           <span class="status-dot running" /> @deepseek-ai/dsh <b>v{{ status.version }}</b>
           <el-tag size="small" effect="plain" round>{{
@@ -414,6 +414,23 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
   gap: 8px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+/* Form rows (profile picker + install path) and the plugin list read on hover with a
+   glassy accent wash instead of an opaque block — mirrors the other panels. */
+.profile-row:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 8px;
+}
+.dsh-manager :deep(.el-form-item):hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.dsh-manager :deep(.el-table__body tr:hover > td) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
+  -webkit-backdrop-filter: blur(4px) saturate(125%);
+  backdrop-filter: blur(4px) saturate(125%);
 }
 .foot-hint {
   font-size: 12px;

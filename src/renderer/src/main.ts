@@ -7,6 +7,9 @@ import 'element-plus/dist/index.css'
 // main.css so our html.dark overrides still win.
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import './assets/main.css'
+// Global glass + neon theme layer: reusable .glass / .neon-title / .reveal / .aurora
+// utilities shared by every panel and manager so the whole app reads consistently.
+import './styles/glass.css'
 
 const app = createApp(App)
 app.use(createPinia())

@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, FolderOpened } from '@element-plus/icons-vue'
 import { usePagesStore, type PageState } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
+import { useRuntimesStore } from '../stores/runtimes'
 import { CONTAINER_REPO_URL } from '@shared/types'
 import { t } from '../i18n'
 
@@ -16,7 +17,18 @@ function looksLikeLocalPath(s: string): boolean {
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
+const runtimes = useRuntimesStore()
 const emit = defineEmits<{ close: [] }>()
+
+/**
+ * A hosted dsh/openclaw row can't start without its CLI runtime (both are provisioned on demand
+ * into userData, never shipped in the slim installer). The verdict comes from the main process on
+ * `PageState.runtimeMissing` — a synchronous probe it re-runs on every list — so the badge can't
+ * lag the async install-status IPC or flicker during its round trip, and needs no `loaded` guard.
+ */
+function runtimeMissing(row: PageState): boolean {
+  return row.runtimeMissing === true
+}
 
 /** terminal-kind rows open a system console instead of spawning a server */
 async function runRow(row: PageState): Promise<void> {
@@ -29,6 +41,12 @@ async function runRow(row: PageState): Promise<void> {
     return
   }
   await pagesStore.start(row.id).catch((err) => ElMessage.error((err as Error).message))
+}
+
+/** Same bounce App uses for a blocked page: send the user to the install guide, don't spawn. */
+function guideForMissing(row: PageState): void {
+  runtimes.requestGuide()
+  ElMessage.warning(t('setup.runtimeMissingToast', { name: row.name }))
 }
 
 const gitForm = reactive({ url: '', name: '', port: '' })
@@ -348,7 +366,7 @@ function formatTime(ms: number): string {
     </el-tabs>
 
     <div class="installed">
-      <div class="installed-head">
+      <div class="installed-head neon">
         <span>{{ t('pageMgr.installed', { n: pagesStore.pages.length }) }}</span>
         <el-button size="small" text @click="pagesStore.refresh()">{{
           t('common.refresh')
@@ -363,10 +381,17 @@ function formatTime(ms: number): string {
         >
           <template #default="{ row }">
             <div class="cell-name">
-              <span class="status-dot" :class="row.status" />
+              <!-- A missing runtime never "starts": keep the dot grey instead of implying
+                   progress (the amber 启动中 dot used to spin forever on these rows). -->
+              <span class="status-dot" :class="runtimeMissing(row) ? 'stopped' : row.status" />
               {{ row.name }}
             </div>
             <div class="cell-sub">{{ row.description || row.dir }}</div>
+            <div v-if="runtimeMissing(row)" class="runtime-missing">
+              <el-button size="small" text type="warning" @click="guideForMissing(row)">
+                {{ t('setup.runtimeMissingTag') }} · {{ t('setup.installBtn') }}
+              </el-button>
+            </div>
             <div
               v-if="row.lastError"
               class="cell-sub err-text"
@@ -397,7 +422,13 @@ function formatTime(ms: number): string {
         </el-table-column>
         <el-table-column :label="t('pageMgr.colStatus')" width="70">
           <template #default="{ row }">
+            <!-- When the runtime isn't installed, 启动中/失败 is noise — the actionable fact is
+                 未安装, so it owns the status cell (the name row links to the install guide). -->
+            <el-tag v-if="runtimeMissing(row)" size="small" type="warning" effect="plain" round>
+              {{ t('setup.missingTag') }}
+            </el-tag>
             <el-tag
+              v-else
               size="small"
               :type="
                 row.status === 'running'
@@ -433,7 +464,13 @@ function formatTime(ms: number): string {
               size="small"
               text
               :loading="pagesStore.busy[row.id]"
-              @click="row.status === 'running' ? pagesStore.stop(row.id) : runRow(row)"
+              @click="
+                row.status === 'running'
+                  ? pagesStore.stop(row.id)
+                  : runtimeMissing(row)
+                    ? guideForMissing(row)
+                    : runRow(row)
+              "
             >
               {{ row.status === 'running' ? t('pageMgr.actionStop') : t('pageMgr.actionStart') }}
             </el-button>
@@ -462,6 +499,7 @@ function formatTime(ms: number): string {
       :title="t('pageMgr.logTitle', { name: logFor?.name ?? '' })"
       width="720px"
       top="6vh"
+      append-to-body
     >
       <div class="log-meta">
         <span
@@ -491,6 +529,7 @@ function formatTime(ms: number): string {
       :title="t('pageMgr.configTitle', { name: configFor?.name ?? '' })"
       width="560px"
       top="8vh"
+      append-to-body
     >
       <el-form label-position="top" @submit.prevent="saveConfig">
         <el-form-item
@@ -591,9 +630,14 @@ function formatTime(ms: number): string {
   max-width: 440px;
 }
 .installed {
-  margin-top: 18px;
-  border-top: 1px dashed var(--border);
-  padding-top: 14px;
+  margin-top: 16px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  /* frosted glass card */
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
+  backdrop-filter: blur(18px) saturate(125%);
+  border-radius: var(--radius-md, 12px);
+  padding: 14px 16px 4px;
 }
 .installed-head {
   display: flex;
@@ -615,6 +659,16 @@ function formatTime(ms: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* The 运行环境未安装 shortcut sits under the row name; keep it off .cell-sub's single-line
+   ellipsis clipping so the button stays clickable across its full width. */
+.runtime-missing {
+  margin-top: 2px;
+}
+.runtime-missing :deep(.el-button) {
+  height: auto;
+  padding: 0;
+  font-size: 12px;
 }
 .err-text {
   color: var(--err);

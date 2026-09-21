@@ -1,5 +1,13 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { join, dirname } from 'node:path'
 import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
 import { resolveDshProfileDir, resolveDshRuntimeDirs, resolvePagesDir } from './store'
@@ -191,6 +199,15 @@ function validateProfileName(profile: string): string {
   }
   if (p.toLowerCase() === 'desktop') throw new Error(msg('dsh.reservedProfile'))
   return p
+}
+
+/**
+ * Cheap synchronous "is the dsh CLI provisioned" check — the same first test `getDshStatus`
+ * makes, minus the async pnpm probe and the version read. Page auto-start uses it to skip a
+ * spawn that can only fail (`dshSpawnCommand` throws when no bin candidate exists).
+ */
+export function isDshInstalled(): boolean {
+  return dshBinCandidates().some((p) => existsSync(p))
 }
 
 export async function getDshStatus(profile = DEFAULT_PROFILE): Promise<DshStatus> {
@@ -403,7 +420,7 @@ const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
 
 /**
  * git dependency specs, e.g. github:user/repo#<sha> / github:user/repo#v1.2.3 /
- * git+https://…​.git#<sha>. Captures the raw ref after `#` and whether it is a commit sha,
+ * git+https://….git#<sha>. Captures the raw ref after `#` and whether it is a commit sha,
  * so callers can compare a pinned tag against the remote's latest tag (not just HEAD shas).
  */
 function parseGitSpec(version: string): { repo: string; ref?: string; isSha: boolean } | null {

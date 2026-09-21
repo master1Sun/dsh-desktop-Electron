@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import type { PageState } from '../stores/pages'
-import { useRuntimesStore } from '../stores/runtimes'
 import { t } from '../i18n'
 
 /**
@@ -62,16 +61,14 @@ function needsStart(p: PageState): boolean {
 }
 
 /**
- * A hosted dsh/openclaw page whose runtime is not installed yet: the row is flagged so the
- * user is guided to install (the ▶ click is intercepted upstream and opens the setup guide)
- * rather than attempting a start that can only fail. A running page is never blocked.
+ * A hosted dsh/openclaw page whose runtime is not installed yet: the row is flagged so the user
+ * is guided to install (the ▶ click is intercepted upstream and opens the setup guide) rather than
+ * attempting a start that can only fail. The verdict is the main process's `PageState.runtimeMissing`
+ * — a synchronous probe re-run on every list — so it never lags an async status IPC round trip; a
+ * running page is reported unblocked by that same probe.
  */
-const runtimes = useRuntimesStore()
 function blocked(p: PageState): boolean {
-  if (p.status === 'running') return false
-  if (p.kind === 'dsh') return !runtimes.dshInstalled
-  if (p.kind === 'openclaw') return !runtimes.openclawInstalled
-  return false
+  return p.runtimeMissing === true
 }
 
 /** Traffic-light / status labels for tooltips, in the active language. */
@@ -165,7 +162,8 @@ defineExpose({ close })
         }}</span>
         <button
           v-if="needsStart(p)"
-          class="row-start"
+          :class="['row-start', { 'is-busy': props.busyPages?.[p.id] }]"
+          :disabled="props.busyPages?.[p.id]"
           :title="props.busyPages?.[p.id] ? t('menu.startingTip') : `${t('menu.start')} ${p.name}`"
           @click="onStart(p)"
         >
@@ -174,8 +172,13 @@ defineExpose({ close })
             <path d="M1.6 0.7 L8 4.5 L1.6 8.3 Z" fill="currentColor" />
           </svg>
         </button>
-        <!-- Traffic light: running=green, error=red, starting=amber, stopped=grey. -->
-        <i class="status-dot" :class="`dot-${p.status}`" :title="statusText(p)" />
+        <!-- Traffic light: running=green, error=red, starting=amber, stopped=grey.
+             A page with no runtime installed never got that far — grey it, don't amber. -->
+        <i
+          class="status-dot"
+          :class="blocked(p) ? 'dot-stopped' : `dot-${p.status}`"
+          :title="blocked(p) ? t('setup.runtimeMissingTag') : statusText(p)"
+        />
       </li>
       <li v-if="!hasPages" class="drop-empty" role="presentation">{{ t('menu.switcherEmpty') }}</li>
     </ul>
@@ -246,10 +249,16 @@ defineExpose({ close })
   text-align: left;
   padding: 5px 9px;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .drop-item:hover {
-  background: var(--surface-2);
+  /* Translucent accent wash + frosted glass, so the hover reads in dark mode
+     without turning into an opaque block. */
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  -webkit-backdrop-filter: blur(8px) saturate(125%);
+  backdrop-filter: blur(8px) saturate(125%);
+  color: var(--accent);
 }
 
 .drop-item.active {
@@ -302,24 +311,37 @@ defineExpose({ close })
   width: 18px;
   height: 18px;
   flex: none;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
   border-radius: 5px;
-  background: var(--surface-2);
+  /* Frosted accent-tinted button: visible in both light and dark. */
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
   color: var(--accent);
   cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.18s ease, background 0.15s ease;
 }
 
 .row-start:hover {
   border-color: var(--accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 38%, transparent);
 }
 
+.row-start.is-busy {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.row-start:disabled {
+  cursor: default;
+}
+
+/* Neon spinner: glowing arc on a faint ring, eased rotation for a smoother feel. */
 .mini-spinner {
-  width: 9px;
-  height: 9px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
-  border: 1.5px solid var(--border);
+  border: 2px solid color-mix(in srgb, var(--accent) 20%, transparent);
   border-top-color: var(--accent);
-  animation: mini-spin 0.7s linear infinite;
+  border-right-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 45%, transparent);
+  animation: mini-spin 0.8s cubic-bezier(0.45, 0.05, 0.3, 0.95) infinite;
 }
 
 @keyframes mini-spin {
@@ -335,6 +357,7 @@ defineExpose({ close })
 }
 
 .status-dot {
+  position: relative;
   width: 9px;
   height: 9px;
   border-radius: 50%;
@@ -349,13 +372,51 @@ defineExpose({ close })
   background: var(--err);
   box-shadow: 0 0 6px var(--err);
 }
+/* Starting: breathing glow + an expanding ripple ring for a clearer "spinning up" feel. */
 .dot-starting {
   background: var(--warn);
-  animation: dot-blink 1s ease-in-out infinite;
+  box-shadow: 0 0 6px var(--warn);
+  animation: dot-pulse 1.3s ease-in-out infinite;
 }
-@keyframes dot-blink {
+.dot-starting::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--warn) 75%, transparent);
+  animation: dot-ripple 1.3s ease-out infinite;
+}
+@keyframes dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 4px var(--warn);
+  }
   50% {
-    opacity: 0.3;
+    box-shadow: 0 0 12px color-mix(in srgb, var(--warn) 85%, transparent);
+  }
+}
+@keyframes dot-ripple {
+  0% {
+    opacity: 0.85;
+    transform: scale(0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.4);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mini-spinner {
+    animation-duration: 1.6s;
+  }
+  .dot-starting,
+  .dot-starting::after {
+    animation: none;
+  }
+  .dot-starting {
+    opacity: 0.7;
+    box-shadow: 0 0 6px var(--warn);
   }
 }
 </style>

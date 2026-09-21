@@ -310,10 +310,15 @@ onBeforeUnmount(() => {
   z-index: 2000;
   display: flex;
   flex-direction: column;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
+  /* frosted dock so the page behind bleeds through */
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  -webkit-backdrop-filter: blur(26px) saturate(135%);
+  backdrop-filter: blur(26px) saturate(135%);
   border-radius: 10px 10px 0 0;
-  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.35);
+  box-shadow:
+    0 -12px 40px rgba(0, 0, 0, 0.35),
+    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset;
   overflow: hidden;
 }
 

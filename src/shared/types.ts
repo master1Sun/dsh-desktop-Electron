@@ -89,6 +89,14 @@ export interface PageState extends PageMeta {
   crashes?: number
   /** epoch ms of the pending auto-restart when the health guard is retrying a crashed page */
   nextRestartAt?: number
+  /**
+   * Hosted dsh/openclaw pages can't run until their on-demand CLI runtime is provisioned into
+   * userData (the slim installer ships none). The main process probes this synchronously on every
+   * list and reports it here so the renderer's badges/guards and the default-view restore share
+   * one race-free source instead of awaiting the async status IPC. Only ever `true` for a stopped
+   * dsh/openclaw page; `undefined` otherwise (plain/terminal/external, or a running page).
+   */
+  runtimeMissing?: boolean
 }
 
 export interface RunningPageInfo {
@@ -196,6 +204,8 @@ export interface UpdateCheckResult {
   packageName?: string
   /** container row: the new asar is already downloaded/staged — only a restart is missing */
   pendingRestart?: boolean
+  /** builtin-page row (action 'none'): the pages/<id> this row manages — reset entry key */
+  pageId?: string
 }
 
 export interface UpdateOutcome {
@@ -393,6 +403,8 @@ export const IPC = {
   InstallPageFromDir: 'container:install-page-dir',
   ChooseDirectory: 'container:choose-directory',
   RemovePage: 'container:remove-page',
+  /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
+  ResetBuiltinPage: 'container:reset-builtin-page',
   SetPagePort: 'container:set-page-port',
   OpenPageExternal: 'container:open-page-external',
   GetSettings: 'container:get-settings',
@@ -426,6 +438,8 @@ export const IPC = {
   RelaunchApp: 'container:relaunch-app',
   ShowWindow: 'container:show-window',
   QuitApp: 'container:quit-app',
+  /** push: main asks the renderer to show a horizontal quit-confirm dialog */
+  OnQuitConfirm: 'container:quit-confirm',
   OnStateChanged: 'container:state-changed',
   DshStatus: 'dsh:status',
   DshListPlugins: 'dsh:list-plugins',

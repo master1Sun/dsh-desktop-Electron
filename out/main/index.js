@@ -1,5 +1,6 @@
 import electron, { app as app$1, nativeTheme, net, ipcMain as ipcMain$1, BrowserWindow, dialog, shell as shell$1, webContents, session, Notification, nativeImage, Tray, Menu } from "electron";
-import fs, { existsSync, mkdirSync, accessSync, constants as constants$1, appendFileSync, statSync, renameSync, readdirSync, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync } from "node:fs";
+import * as fs from "node:fs";
+import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, appendFileSync, statSync, renameSync, readdirSync, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync } from "node:fs";
 import path, { join, delimiter, dirname, sep, extname, basename } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import { EventEmitter } from "node:events";
@@ -16,16 +17,8 @@ import { get as get$1 } from "node:https";
 import { pipeline } from "node:stream/promises";
 import { copyFile, readdir, stat } from "node:fs/promises";
 import { simpleGit } from "simple-git";
-import require$$1$1 from "tty";
-import require$$1$2 from "util";
-import require$$0$1 from "os";
-import require$$0$3 from "fs";
-import require$$0$2 from "buffer";
-import require$$6$1 from "stream";
-import require$$3$2, { join as join$1 } from "path";
-import require$$1$3 from "zlib";
-import require$$4$1 from "events";
 import * as pty from "node-pty";
+import { join as join$1 } from "path";
 import __cjs_mod__ from "node:module";
 const __filename = import.meta.filename;
 const __dirname = import.meta.dirname;
@@ -43,6 +36,8 @@ const IPC = {
   InstallPageFromDir: "container:install-page-dir",
   ChooseDirectory: "container:choose-directory",
   RemovePage: "container:remove-page",
+  /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
+  ResetBuiltinPage: "container:reset-builtin-page",
   SetPagePort: "container:set-page-port",
   OpenPageExternal: "container:open-page-external",
   GetSettings: "container:get-settings",
@@ -76,6 +71,8 @@ const IPC = {
   RelaunchApp: "container:relaunch-app",
   ShowWindow: "container:show-window",
   QuitApp: "container:quit-app",
+  /** push: main asks the renderer to show a horizontal quit-confirm dialog */
+  OnQuitConfirm: "container:quit-confirm",
   OnStateChanged: "container:state-changed",
   DshStatus: "dsh:status",
   DshListPlugins: "dsh:list-plugins",
@@ -642,44 +639,44 @@ const RETRYIFY_OPTIONS = {
 const FS = {
   attempt: {
     /* ASYNC */
-    chmod: attemptifyAsync(promisify(fs.chmod), ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
-    chown: attemptifyAsync(promisify(fs.chown), ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
-    close: attemptifyAsync(promisify(fs.close), ATTEMPTIFY_NOOP_OPTIONS),
-    fsync: attemptifyAsync(promisify(fs.fsync), ATTEMPTIFY_NOOP_OPTIONS),
-    mkdir: attemptifyAsync(promisify(fs.mkdir), ATTEMPTIFY_NOOP_OPTIONS),
-    realpath: attemptifyAsync(promisify(fs.realpath), ATTEMPTIFY_NOOP_OPTIONS),
-    stat: attemptifyAsync(promisify(fs.stat), ATTEMPTIFY_NOOP_OPTIONS),
-    unlink: attemptifyAsync(promisify(fs.unlink), ATTEMPTIFY_NOOP_OPTIONS),
+    chmod: attemptifyAsync(promisify(fs__default.chmod), ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
+    chown: attemptifyAsync(promisify(fs__default.chown), ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
+    close: attemptifyAsync(promisify(fs__default.close), ATTEMPTIFY_NOOP_OPTIONS),
+    fsync: attemptifyAsync(promisify(fs__default.fsync), ATTEMPTIFY_NOOP_OPTIONS),
+    mkdir: attemptifyAsync(promisify(fs__default.mkdir), ATTEMPTIFY_NOOP_OPTIONS),
+    realpath: attemptifyAsync(promisify(fs__default.realpath), ATTEMPTIFY_NOOP_OPTIONS),
+    stat: attemptifyAsync(promisify(fs__default.stat), ATTEMPTIFY_NOOP_OPTIONS),
+    unlink: attemptifyAsync(promisify(fs__default.unlink), ATTEMPTIFY_NOOP_OPTIONS),
     /* SYNC */
-    chmodSync: attemptifySync(fs.chmodSync, ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
-    chownSync: attemptifySync(fs.chownSync, ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
-    closeSync: attemptifySync(fs.closeSync, ATTEMPTIFY_NOOP_OPTIONS),
-    existsSync: attemptifySync(fs.existsSync, ATTEMPTIFY_NOOP_OPTIONS),
-    fsyncSync: attemptifySync(fs.fsync, ATTEMPTIFY_NOOP_OPTIONS),
-    mkdirSync: attemptifySync(fs.mkdirSync, ATTEMPTIFY_NOOP_OPTIONS),
-    realpathSync: attemptifySync(fs.realpathSync, ATTEMPTIFY_NOOP_OPTIONS),
-    statSync: attemptifySync(fs.statSync, ATTEMPTIFY_NOOP_OPTIONS),
-    unlinkSync: attemptifySync(fs.unlinkSync, ATTEMPTIFY_NOOP_OPTIONS)
+    chmodSync: attemptifySync(fs__default.chmodSync, ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
+    chownSync: attemptifySync(fs__default.chownSync, ATTEMPTIFY_CHANGE_ERROR_OPTIONS),
+    closeSync: attemptifySync(fs__default.closeSync, ATTEMPTIFY_NOOP_OPTIONS),
+    existsSync: attemptifySync(fs__default.existsSync, ATTEMPTIFY_NOOP_OPTIONS),
+    fsyncSync: attemptifySync(fs__default.fsync, ATTEMPTIFY_NOOP_OPTIONS),
+    mkdirSync: attemptifySync(fs__default.mkdirSync, ATTEMPTIFY_NOOP_OPTIONS),
+    realpathSync: attemptifySync(fs__default.realpathSync, ATTEMPTIFY_NOOP_OPTIONS),
+    statSync: attemptifySync(fs__default.statSync, ATTEMPTIFY_NOOP_OPTIONS),
+    unlinkSync: attemptifySync(fs__default.unlinkSync, ATTEMPTIFY_NOOP_OPTIONS)
   },
   retry: {
     /* ASYNC */
-    close: retryifyAsync(promisify(fs.close), RETRYIFY_OPTIONS),
-    fsync: retryifyAsync(promisify(fs.fsync), RETRYIFY_OPTIONS),
-    open: retryifyAsync(promisify(fs.open), RETRYIFY_OPTIONS),
-    readFile: retryifyAsync(promisify(fs.readFile), RETRYIFY_OPTIONS),
-    rename: retryifyAsync(promisify(fs.rename), RETRYIFY_OPTIONS),
-    stat: retryifyAsync(promisify(fs.stat), RETRYIFY_OPTIONS),
-    write: retryifyAsync(promisify(fs.write), RETRYIFY_OPTIONS),
-    writeFile: retryifyAsync(promisify(fs.writeFile), RETRYIFY_OPTIONS),
+    close: retryifyAsync(promisify(fs__default.close), RETRYIFY_OPTIONS),
+    fsync: retryifyAsync(promisify(fs__default.fsync), RETRYIFY_OPTIONS),
+    open: retryifyAsync(promisify(fs__default.open), RETRYIFY_OPTIONS),
+    readFile: retryifyAsync(promisify(fs__default.readFile), RETRYIFY_OPTIONS),
+    rename: retryifyAsync(promisify(fs__default.rename), RETRYIFY_OPTIONS),
+    stat: retryifyAsync(promisify(fs__default.stat), RETRYIFY_OPTIONS),
+    write: retryifyAsync(promisify(fs__default.write), RETRYIFY_OPTIONS),
+    writeFile: retryifyAsync(promisify(fs__default.writeFile), RETRYIFY_OPTIONS),
     /* SYNC */
-    closeSync: retryifySync(fs.closeSync, RETRYIFY_OPTIONS),
-    fsyncSync: retryifySync(fs.fsyncSync, RETRYIFY_OPTIONS),
-    openSync: retryifySync(fs.openSync, RETRYIFY_OPTIONS),
-    readFileSync: retryifySync(fs.readFileSync, RETRYIFY_OPTIONS),
-    renameSync: retryifySync(fs.renameSync, RETRYIFY_OPTIONS),
-    statSync: retryifySync(fs.statSync, RETRYIFY_OPTIONS),
-    writeSync: retryifySync(fs.writeSync, RETRYIFY_OPTIONS),
-    writeFileSync: retryifySync(fs.writeFileSync, RETRYIFY_OPTIONS)
+    closeSync: retryifySync(fs__default.closeSync, RETRYIFY_OPTIONS),
+    fsyncSync: retryifySync(fs__default.fsyncSync, RETRYIFY_OPTIONS),
+    openSync: retryifySync(fs__default.openSync, RETRYIFY_OPTIONS),
+    readFileSync: retryifySync(fs__default.readFileSync, RETRYIFY_OPTIONS),
+    renameSync: retryifySync(fs__default.renameSync, RETRYIFY_OPTIONS),
+    statSync: retryifySync(fs__default.statSync, RETRYIFY_OPTIONS),
+    writeSync: retryifySync(fs__default.writeSync, RETRYIFY_OPTIONS),
+    writeFileSync: retryifySync(fs__default.writeFileSync, RETRYIFY_OPTIONS)
   }
 };
 const DEFAULT_ENCODING = "utf8";
@@ -876,7 +873,6 @@ function writeFileSync(filePath, data, options = DEFAULT_WRITE_OPTIONS) {
       Temp.purge(tempPath);
   }
 }
-var commonjsGlobal = typeof globalThis !== "undefined" ? globalThis : typeof window !== "undefined" ? window : typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : {};
 function getDefaultExportFromCjs(x) {
   return x && x.__esModule && Object.prototype.hasOwnProperty.call(x, "default") ? x["default"] : x;
 }
@@ -1698,8 +1694,8 @@ function requireCodegen() {
       endIf() {
         return this._endBlockNode(If, Else);
       }
-      _for(node2, forBody) {
-        this._blockNode(node2);
+      _for(node, forBody) {
+        this._blockNode(node);
         if (forBody)
           this.code(forBody).endFor();
         return this;
@@ -1748,10 +1744,10 @@ function requireCodegen() {
       }
       // `return` statement
       return(value) {
-        const node2 = new Return();
-        this._blockNode(node2);
+        const node = new Return();
+        this._blockNode(node);
         this.code(value);
-        if (node2.nodes.length !== 1)
+        if (node.nodes.length !== 1)
           throw new Error('CodeGen: "return" should have one node');
         return this._endBlockNode(Return);
       }
@@ -1759,16 +1755,16 @@ function requireCodegen() {
       try(tryBody, catchCode, finallyCode) {
         if (!catchCode && !finallyCode)
           throw new Error('CodeGen: "try" without "catch" and "finally"');
-        const node2 = new Try();
-        this._blockNode(node2);
+        const node = new Try();
+        this._blockNode(node);
         this.code(tryBody);
         if (catchCode) {
           const error = this.name("e");
-          this._currNode = node2.catch = new Catch(error);
+          this._currNode = node.catch = new Catch(error);
           catchCode(error);
         }
         if (finallyCode) {
-          this._currNode = node2.finally = new Finally();
+          this._currNode = node.finally = new Finally();
           this.code(finallyCode);
         }
         return this._endBlockNode(Catch, Finally);
@@ -1813,13 +1809,13 @@ function requireCodegen() {
           this._root.optimizeNames(this._root.names, this._constants);
         }
       }
-      _leafNode(node2) {
-        this._currNode.nodes.push(node2);
+      _leafNode(node) {
+        this._currNode.nodes.push(node);
         return this;
       }
-      _blockNode(node2) {
-        this._currNode.nodes.push(node2);
-        this._nodes.push(node2);
+      _blockNode(node) {
+        this._currNode.nodes.push(node);
+        this._nodes.push(node);
       }
       _endBlockNode(N1, N2) {
         const n = this._currNode;
@@ -1829,12 +1825,12 @@ function requireCodegen() {
         }
         throw new Error(`CodeGen: not in block "${N2 ? `${N1.kind}/${N2.kind}` : N1.kind}"`);
       }
-      _elseNode(node2) {
+      _elseNode(node) {
         const n = this._currNode;
         if (!(n instanceof If)) {
           throw new Error('CodeGen: "else" without "if"');
         }
-        this._currNode = n.else = node2;
+        this._currNode = n.else = node;
         return this;
       }
       get _root() {
@@ -1844,9 +1840,9 @@ function requireCodegen() {
         const ns = this._nodes;
         return ns[ns.length - 1];
       }
-      set _currNode(node2) {
+      set _currNode(node) {
         const ns = this._nodes;
-        ns[ns.length - 1] = node2;
+        ns[ns.length - 1] = node;
       }
     }
     exports.CodeGen = CodeGen;
@@ -1936,12 +1932,12 @@ function requireUtil() {
   }
   util.alwaysValidSchema = alwaysValidSchema;
   function checkUnknownRules(it, schema = it.schema) {
-    const { opts, self: self2 } = it;
+    const { opts, self } = it;
     if (!opts.strictSchema)
       return;
     if (typeof schema === "boolean")
       return;
-    const rules2 = self2.RULES.keywords;
+    const rules2 = self.RULES.keywords;
     for (const key in schema) {
       if (!rules2[key])
         checkStrictMode(it, `unknown keyword: "${key}"`);
@@ -2328,8 +2324,8 @@ function requireApplicability() {
   hasRequiredApplicability = 1;
   Object.defineProperty(applicability, "__esModule", { value: true });
   applicability.shouldUseRule = applicability.shouldUseGroup = applicability.schemaHasRulesForType = void 0;
-  function schemaHasRulesForType({ schema, self: self2 }, type2) {
-    const group = self2.RULES.types[type2];
+  function schemaHasRulesForType({ schema, self }, type2) {
+    const group = self.RULES.types[type2];
     return group && group !== true && shouldUseGroup(schema, group);
   }
   applicability.schemaHasRulesForType = schemaHasRulesForType;
@@ -2793,7 +2789,7 @@ function requireKeyword() {
     return !schemaType.length || schemaType.some((st) => st === "array" ? Array.isArray(schema) : st === "object" ? schema && typeof schema == "object" && !Array.isArray(schema) : typeof schema == st || allowUndefined && typeof schema == "undefined");
   }
   keyword.validSchemaType = validSchemaType;
-  function validateKeywordUsage({ schema, opts, self: self2, errSchemaPath }, def, keyword2) {
+  function validateKeywordUsage({ schema, opts, self, errSchemaPath }, def, keyword2) {
     if (Array.isArray(def.keyword) ? !def.keyword.includes(keyword2) : def.keyword !== keyword2) {
       throw new Error("ajv implementation error");
     }
@@ -2804,9 +2800,9 @@ function requireKeyword() {
     if (def.validateSchema) {
       const valid2 = def.validateSchema(schema[keyword2]);
       if (!valid2) {
-        const msg = `keyword "${keyword2}" value is invalid at path "${errSchemaPath}": ` + self2.errorsText(def.validateSchema.errors);
+        const msg = `keyword "${keyword2}" value is invalid at path "${errSchemaPath}": ` + self.errorsText(def.validateSchema.errors);
         if (opts.validateSchema === "log")
-          self2.logger.error(msg);
+          self.logger.error(msg);
         else
           throw new Error(msg);
       }
@@ -3272,11 +3268,11 @@ function requireValidate() {
     }
     (0, boolSchema_1.boolOrEmptySchema)(it, valid2);
   }
-  function schemaCxtHasRules({ schema, self: self2 }) {
+  function schemaCxtHasRules({ schema, self }) {
     if (typeof schema == "boolean")
       return !schema;
     for (const key in schema)
-      if (self2.RULES.all[key])
+      if (self.RULES.all[key])
         return true;
     return false;
   }
@@ -3305,9 +3301,9 @@ function requireValidate() {
     schemaKeywords(it, types2, !checkedTypes, errsCount);
   }
   function checkRefsAndKeywords(it) {
-    const { schema, errSchemaPath, opts, self: self2 } = it;
-    if (schema.$ref && opts.ignoreKeywordsWithRef && (0, util_1.schemaHasRulesButRef)(schema, self2.RULES)) {
-      self2.logger.warn(`$ref: keywords ignored in schema at path "${errSchemaPath}"`);
+    const { schema, errSchemaPath, opts, self } = it;
+    if (schema.$ref && opts.ignoreKeywordsWithRef && (0, util_1.schemaHasRulesButRef)(schema, self.RULES)) {
+      self.logger.warn(`$ref: keywords ignored in schema at path "${errSchemaPath}"`);
     }
   }
   function checkNoDefault(it) {
@@ -3353,8 +3349,8 @@ function requireValidate() {
       gen.assign((0, codegen_1._)`${evaluated}.items`, items2);
   }
   function schemaKeywords(it, types2, typeErrors, errsCount) {
-    const { gen, schema, data, allErrors, opts, self: self2 } = it;
-    const { RULES } = self2;
+    const { gen, schema, data, allErrors, opts, self } = it;
+    const { RULES } = self;
     if (schema.$ref && (opts.ignoreKeywordsWithRef || !(0, util_1.schemaHasRulesButRef)(schema, RULES))) {
       gen.block(() => keywordCode(it, "$ref", RULES.all.$ref.definition));
       return;
@@ -5731,11 +5727,11 @@ function requireRef() {
     schemaType: "string",
     code(cxt) {
       const { gen, schema: $ref, it } = cxt;
-      const { baseId, schemaEnv: env2, validateName, opts, self: self2 } = it;
+      const { baseId, schemaEnv: env2, validateName, opts, self } = it;
       const { root } = env2;
       if (($ref === "#" || $ref === "#/") && baseId === root.baseId)
         return callRootRef();
-      const schOrEnv = compile_1.resolveRef.call(self2, root, baseId, $ref);
+      const schOrEnv = compile_1.resolveRef.call(self, root, baseId, $ref);
       if (schOrEnv === void 0)
         throw new ref_error_1.default(it.opts.uriResolver, baseId, $ref);
       if (schOrEnv instanceof compile_1.SchemaEnv)
@@ -7271,11 +7267,11 @@ function requireDynamicAnchor() {
   }
   dynamicAnchor.dynamicAnchor = dynamicAnchor$1;
   function _getValidate(cxt) {
-    const { schemaEnv, schema, self: self2 } = cxt.it;
+    const { schemaEnv, schema, self } = cxt.it;
     const { root, baseId, localRefs, meta } = schemaEnv.root;
-    const { schemaId } = self2.opts;
+    const { schemaId } = self.opts;
     const sch = new compile_1.SchemaEnv({ schema, schemaId, root, baseId, localRefs, meta });
-    compile_1.compileSchema.call(self2, sch);
+    compile_1.compileSchema.call(self, sch);
     return (0, ref_1.getValidate)(cxt, sch);
   }
   dynamicAnchor.default = def;
@@ -7584,7 +7580,7 @@ function requireFormat$1() {
     error,
     code(cxt, ruleType) {
       const { gen, data, $data, schema, schemaCode, it } = cxt;
-      const { opts, errSchemaPath, schemaEnv, self: self2 } = it;
+      const { opts, errSchemaPath, schemaEnv, self } = it;
       if (!opts.validateFormats)
         return;
       if ($data)
@@ -7593,7 +7589,7 @@ function requireFormat$1() {
         validateFormat();
       function validate$DataFormat() {
         const fmts = gen.scopeValue("formats", {
-          ref: self2.formats,
+          ref: self.formats,
           code: opts.code.formats
         });
         const fDef = gen.const("fDef", (0, codegen_1._)`${fmts}[${schemaCode}]`);
@@ -7613,7 +7609,7 @@ function requireFormat$1() {
         }
       }
       function validateFormat() {
-        const formatDef = self2.formats[schema];
+        const formatDef = self.formats[schema];
         if (!formatDef) {
           unknownFormat();
           return;
@@ -7625,7 +7621,7 @@ function requireFormat$1() {
           cxt.pass(validCondition());
         function unknownFormat() {
           if (opts.strictSchema === false) {
-            self2.logger.warn(unknownMsg());
+            self.logger.warn(unknownMsg());
             return;
           }
           throw new Error(unknownMsg());
@@ -8429,17 +8425,17 @@ function requireLimit() {
       error,
       code(cxt) {
         const { gen, data, schemaCode, keyword: keyword2, it } = cxt;
-        const { opts, self: self2 } = it;
+        const { opts, self } = it;
         if (!opts.validateFormats)
           return;
-        const fCxt = new ajv_1.KeywordCxt(it, self2.RULES.all.format.definition, "format");
+        const fCxt = new ajv_1.KeywordCxt(it, self.RULES.all.format.definition, "format");
         if (fCxt.$data)
           validate$DataFormat();
         else
           validateFormat();
         function validate$DataFormat() {
           const fmts = gen.scopeValue("formats", {
-            ref: self2.formats,
+            ref: self.formats,
             code: opts.code.formats
           });
           const fmt = gen.const("fmt", (0, codegen_1._)`${fmts}[${fCxt.schemaCode}]`);
@@ -8447,7 +8443,7 @@ function requireLimit() {
         }
         function validateFormat() {
           const format2 = fCxt.schema;
-          const fmtDef = self2.formats[format2];
+          const fmtDef = self.formats[format2];
           if (!fmtDef || fmtDef === true)
             return;
           if (typeof fmtDef != "object" || fmtDef instanceof RegExp || typeof fmtDef.compare != "function") {
@@ -8685,7 +8681,7 @@ function requireRe() {
     exports = module.exports = {};
     const re2 = exports.re = [];
     const safeRe = exports.safeRe = [];
-    const src2 = exports.src = [];
+    const src = exports.src = [];
     const safeSrc = exports.safeSrc = [];
     const t = exports.t = {};
     let R = 0;
@@ -8706,7 +8702,7 @@ function requireRe() {
       const index = R++;
       debug(name, index, value);
       t[name] = index;
-      src2[index] = value;
+      src[index] = value;
       safeSrc[index] = safe;
       re2[index] = new RegExp(value, isGlobal ? "g" : void 0);
       safeRe[index] = new RegExp(safe, isGlobal ? "g" : void 0);
@@ -8714,46 +8710,46 @@ function requireRe() {
     createToken("NUMERICIDENTIFIER", "0|[1-9]\\d*");
     createToken("NUMERICIDENTIFIERLOOSE", "\\d+");
     createToken("NONNUMERICIDENTIFIER", `\\d*[a-zA-Z-]${LETTERDASHNUMBER}*`);
-    createToken("MAINVERSION", `(${src2[t.NUMERICIDENTIFIER]})\\.(${src2[t.NUMERICIDENTIFIER]})\\.(${src2[t.NUMERICIDENTIFIER]})`);
-    createToken("MAINVERSIONLOOSE", `(${src2[t.NUMERICIDENTIFIERLOOSE]})\\.(${src2[t.NUMERICIDENTIFIERLOOSE]})\\.(${src2[t.NUMERICIDENTIFIERLOOSE]})`);
-    createToken("PRERELEASEIDENTIFIER", `(?:${src2[t.NONNUMERICIDENTIFIER]}|${src2[t.NUMERICIDENTIFIER]})`);
-    createToken("PRERELEASEIDENTIFIERLOOSE", `(?:${src2[t.NONNUMERICIDENTIFIER]}|${src2[t.NUMERICIDENTIFIERLOOSE]})`);
-    createToken("PRERELEASE", `(?:-(${src2[t.PRERELEASEIDENTIFIER]}(?:\\.${src2[t.PRERELEASEIDENTIFIER]})*))`);
-    createToken("PRERELEASELOOSE", `(?:-?(${src2[t.PRERELEASEIDENTIFIERLOOSE]}(?:\\.${src2[t.PRERELEASEIDENTIFIERLOOSE]})*))`);
+    createToken("MAINVERSION", `(${src[t.NUMERICIDENTIFIER]})\\.(${src[t.NUMERICIDENTIFIER]})\\.(${src[t.NUMERICIDENTIFIER]})`);
+    createToken("MAINVERSIONLOOSE", `(${src[t.NUMERICIDENTIFIERLOOSE]})\\.(${src[t.NUMERICIDENTIFIERLOOSE]})\\.(${src[t.NUMERICIDENTIFIERLOOSE]})`);
+    createToken("PRERELEASEIDENTIFIER", `(?:${src[t.NONNUMERICIDENTIFIER]}|${src[t.NUMERICIDENTIFIER]})`);
+    createToken("PRERELEASEIDENTIFIERLOOSE", `(?:${src[t.NONNUMERICIDENTIFIER]}|${src[t.NUMERICIDENTIFIERLOOSE]})`);
+    createToken("PRERELEASE", `(?:-(${src[t.PRERELEASEIDENTIFIER]}(?:\\.${src[t.PRERELEASEIDENTIFIER]})*))`);
+    createToken("PRERELEASELOOSE", `(?:-?(${src[t.PRERELEASEIDENTIFIERLOOSE]}(?:\\.${src[t.PRERELEASEIDENTIFIERLOOSE]})*))`);
     createToken("BUILDIDENTIFIER", `${LETTERDASHNUMBER}+`);
-    createToken("BUILD", `(?:\\+(${src2[t.BUILDIDENTIFIER]}(?:\\.${src2[t.BUILDIDENTIFIER]})*))`);
-    createToken("FULLPLAIN", `v?${src2[t.MAINVERSION]}${src2[t.PRERELEASE]}?${src2[t.BUILD]}?`);
-    createToken("FULL", `^${src2[t.FULLPLAIN]}$`);
-    createToken("LOOSEPLAIN", `[v=\\s]*${src2[t.MAINVERSIONLOOSE]}${src2[t.PRERELEASELOOSE]}?${src2[t.BUILD]}?`);
-    createToken("LOOSE", `^${src2[t.LOOSEPLAIN]}$`);
+    createToken("BUILD", `(?:\\+(${src[t.BUILDIDENTIFIER]}(?:\\.${src[t.BUILDIDENTIFIER]})*))`);
+    createToken("FULLPLAIN", `v?${src[t.MAINVERSION]}${src[t.PRERELEASE]}?${src[t.BUILD]}?`);
+    createToken("FULL", `^${src[t.FULLPLAIN]}$`);
+    createToken("LOOSEPLAIN", `[v=\\s]*${src[t.MAINVERSIONLOOSE]}${src[t.PRERELEASELOOSE]}?${src[t.BUILD]}?`);
+    createToken("LOOSE", `^${src[t.LOOSEPLAIN]}$`);
     createToken("GTLT", "((?:<|>)?=?)");
-    createToken("XRANGEIDENTIFIERLOOSE", `${src2[t.NUMERICIDENTIFIERLOOSE]}|x|X|\\*`);
-    createToken("XRANGEIDENTIFIER", `${src2[t.NUMERICIDENTIFIER]}|x|X|\\*`);
-    createToken("XRANGEPLAIN", `[v=\\s]*(${src2[t.XRANGEIDENTIFIER]})(?:\\.(${src2[t.XRANGEIDENTIFIER]})(?:\\.(${src2[t.XRANGEIDENTIFIER]})(?:${src2[t.PRERELEASE]})?${src2[t.BUILD]}?)?)?`);
-    createToken("XRANGEPLAINLOOSE", `[v=\\s]*(${src2[t.XRANGEIDENTIFIERLOOSE]})(?:\\.(${src2[t.XRANGEIDENTIFIERLOOSE]})(?:\\.(${src2[t.XRANGEIDENTIFIERLOOSE]})(?:${src2[t.PRERELEASELOOSE]})?${src2[t.BUILD]}?)?)?`);
-    createToken("XRANGE", `^${src2[t.GTLT]}\\s*${src2[t.XRANGEPLAIN]}$`);
-    createToken("XRANGELOOSE", `^${src2[t.GTLT]}\\s*${src2[t.XRANGEPLAINLOOSE]}$`);
+    createToken("XRANGEIDENTIFIERLOOSE", `${src[t.NUMERICIDENTIFIERLOOSE]}|x|X|\\*`);
+    createToken("XRANGEIDENTIFIER", `${src[t.NUMERICIDENTIFIER]}|x|X|\\*`);
+    createToken("XRANGEPLAIN", `[v=\\s]*(${src[t.XRANGEIDENTIFIER]})(?:\\.(${src[t.XRANGEIDENTIFIER]})(?:\\.(${src[t.XRANGEIDENTIFIER]})(?:${src[t.PRERELEASE]})?${src[t.BUILD]}?)?)?`);
+    createToken("XRANGEPLAINLOOSE", `[v=\\s]*(${src[t.XRANGEIDENTIFIERLOOSE]})(?:\\.(${src[t.XRANGEIDENTIFIERLOOSE]})(?:\\.(${src[t.XRANGEIDENTIFIERLOOSE]})(?:${src[t.PRERELEASELOOSE]})?${src[t.BUILD]}?)?)?`);
+    createToken("XRANGE", `^${src[t.GTLT]}\\s*${src[t.XRANGEPLAIN]}$`);
+    createToken("XRANGELOOSE", `^${src[t.GTLT]}\\s*${src[t.XRANGEPLAINLOOSE]}$`);
     createToken("COERCEPLAIN", `${"(^|[^\\d])(\\d{1,"}${MAX_SAFE_COMPONENT_LENGTH}})(?:\\.(\\d{1,${MAX_SAFE_COMPONENT_LENGTH}}))?(?:\\.(\\d{1,${MAX_SAFE_COMPONENT_LENGTH}}))?`);
-    createToken("COERCE", `${src2[t.COERCEPLAIN]}(?:$|[^\\d])`);
-    createToken("COERCEFULL", src2[t.COERCEPLAIN] + `(?:${src2[t.PRERELEASE]})?(?:${src2[t.BUILD]})?(?:$|[^\\d])`);
-    createToken("COERCERTL", src2[t.COERCE], true);
-    createToken("COERCERTLFULL", src2[t.COERCEFULL], true);
+    createToken("COERCE", `${src[t.COERCEPLAIN]}(?:$|[^\\d])`);
+    createToken("COERCEFULL", src[t.COERCEPLAIN] + `(?:${src[t.PRERELEASE]})?(?:${src[t.BUILD]})?(?:$|[^\\d])`);
+    createToken("COERCERTL", src[t.COERCE], true);
+    createToken("COERCERTLFULL", src[t.COERCEFULL], true);
     createToken("LONETILDE", "(?:~>?)");
-    createToken("TILDETRIM", `(\\s*)${src2[t.LONETILDE]}\\s+`, true);
+    createToken("TILDETRIM", `(\\s*)${src[t.LONETILDE]}\\s+`, true);
     exports.tildeTrimReplace = "$1~";
-    createToken("TILDE", `^${src2[t.LONETILDE]}${src2[t.XRANGEPLAIN]}$`);
-    createToken("TILDELOOSE", `^${src2[t.LONETILDE]}${src2[t.XRANGEPLAINLOOSE]}$`);
+    createToken("TILDE", `^${src[t.LONETILDE]}${src[t.XRANGEPLAIN]}$`);
+    createToken("TILDELOOSE", `^${src[t.LONETILDE]}${src[t.XRANGEPLAINLOOSE]}$`);
     createToken("LONECARET", "(?:\\^)");
-    createToken("CARETTRIM", `(\\s*)${src2[t.LONECARET]}\\s+`, true);
+    createToken("CARETTRIM", `(\\s*)${src[t.LONECARET]}\\s+`, true);
     exports.caretTrimReplace = "$1^";
-    createToken("CARET", `^${src2[t.LONECARET]}${src2[t.XRANGEPLAIN]}$`);
-    createToken("CARETLOOSE", `^${src2[t.LONECARET]}${src2[t.XRANGEPLAINLOOSE]}$`);
-    createToken("COMPARATORLOOSE", `^${src2[t.GTLT]}\\s*(${src2[t.LOOSEPLAIN]})$|^$`);
-    createToken("COMPARATOR", `^${src2[t.GTLT]}\\s*(${src2[t.FULLPLAIN]})$|^$`);
-    createToken("COMPARATORTRIM", `(\\s*)${src2[t.GTLT]}\\s*(${src2[t.LOOSEPLAIN]}|${src2[t.XRANGEPLAIN]})`, true);
+    createToken("CARET", `^${src[t.LONECARET]}${src[t.XRANGEPLAIN]}$`);
+    createToken("CARETLOOSE", `^${src[t.LONECARET]}${src[t.XRANGEPLAINLOOSE]}$`);
+    createToken("COMPARATORLOOSE", `^${src[t.GTLT]}\\s*(${src[t.LOOSEPLAIN]})$|^$`);
+    createToken("COMPARATOR", `^${src[t.GTLT]}\\s*(${src[t.FULLPLAIN]})$|^$`);
+    createToken("COMPARATORTRIM", `(\\s*)${src[t.GTLT]}\\s*(${src[t.LOOSEPLAIN]}|${src[t.XRANGEPLAIN]})`, true);
     exports.comparatorTrimReplace = "$1$2$3";
-    createToken("HYPHENRANGE", `^\\s*(${src2[t.XRANGEPLAIN]})\\s+-\\s+(${src2[t.XRANGEPLAIN]})\\s*$`);
-    createToken("HYPHENRANGELOOSE", `^\\s*(${src2[t.XRANGEPLAINLOOSE]})\\s+-\\s+(${src2[t.XRANGEPLAINLOOSE]})\\s*$`);
+    createToken("HYPHENRANGE", `^\\s*(${src[t.XRANGEPLAIN]})\\s+-\\s+(${src[t.XRANGEPLAIN]})\\s*$`);
+    createToken("HYPHENRANGELOOSE", `^\\s*(${src[t.XRANGEPLAINLOOSE]})\\s+-\\s+(${src[t.XRANGEPLAINLOOSE]})\\s*$`);
     createToken("STAR", "(<|>)?=?\\s*\\*");
     createToken("GTE0", "^\\s*>=\\s*0\\.0\\.0\\s*$");
     createToken("GTE0PRE", "^\\s*>=\\s*0\\.0\\.0-0\\s*$");
@@ -9708,14 +9704,14 @@ function requireRange() {
   const SemVer = requireSemver$1();
   const {
     safeRe: re2,
-    src: src2,
+    src,
     t,
     comparatorTrimReplace,
     tildeTrimReplace,
     caretTrimReplace
   } = requireRe();
   const { FLAG_INCLUDE_PRERELEASE, FLAG_LOOSE } = requireConstants();
-  const BUILDSTRIPRE = new RegExp(src2[t.BUILD], "g");
+  const BUILDSTRIPRE = new RegExp(src[t.BUILD], "g");
   const isNullSet = (c) => c.value === "<0.0.0-0";
   const isAny = (c) => c.value === "";
   const isSatisfiable = (comparators, options) => {
@@ -10877,7 +10873,7 @@ class Conf {
       */
   get store() {
     try {
-      const data = fs.readFileSync(this.path, this.#encryptionKey ? null : "utf8");
+      const data = fs__default.readFileSync(this.path, this.#encryptionKey ? null : "utf8");
       const dataString = this._decryptData(data);
       const parseStore = (value) => {
         const deserializedData = this._deserialize(value);
@@ -10911,7 +10907,7 @@ class Conf {
     this._ensureDirectory();
     if (!hasProperty(value, INTERNAL_KEY)) {
       try {
-        const data = fs.readFileSync(this.path, this.#encryptionKey ? null : "utf8");
+        const data = fs__default.readFileSync(this.path, this.#encryptionKey ? null : "utf8");
         const dataString = this._decryptData(data);
         const currentStore = this._deserialize(dataString);
         if (hasProperty(currentStore, INTERNAL_KEY)) {
@@ -10942,7 +10938,7 @@ class Conf {
       this.#watcher = void 0;
     }
     if (this.#watchFile) {
-      fs.unwatchFile(this.path);
+      fs__default.unwatchFile(this.path);
       this.#watchFile = false;
     }
     this.#debouncedChangeHandler = void 0;
@@ -11047,7 +11043,7 @@ class Conf {
     throw new Error("Config schema violation: " + errors2.join("; "));
   }
   _ensureDirectory() {
-    fs.mkdirSync(path.dirname(this.path), { recursive: true });
+    fs__default.mkdirSync(path.dirname(this.path), { recursive: true });
   }
   _write(value) {
     let data = this._serialize(value);
@@ -11064,13 +11060,13 @@ class Conf {
       data = concatUint8Arrays(encryptedParts);
     }
     if (process$1.env.SNAP) {
-      fs.writeFileSync(this.path, data, { mode: this.#options.configFileMode });
+      fs__default.writeFileSync(this.path, data, { mode: this.#options.configFileMode });
     } else {
       try {
         writeFileSync(this.path, data, { mode: this.#options.configFileMode });
       } catch (error) {
         if (error?.code === "EXDEV") {
-          fs.writeFileSync(this.path, data, { mode: this.#options.configFileMode });
+          fs__default.writeFileSync(this.path, data, { mode: this.#options.configFileMode });
           return;
         }
         throw error;
@@ -11079,7 +11075,7 @@ class Conf {
   }
   _watch() {
     this._ensureDirectory();
-    if (!fs.existsSync(this.path)) {
+    if (!fs__default.existsSync(this.path)) {
       this._write(createPlainObject());
     }
     if (process$1.platform === "win32" || process$1.platform === "darwin") {
@@ -11088,7 +11084,7 @@ class Conf {
       }, { wait: 100 });
       const directory = path.dirname(this.path);
       const basename2 = path.basename(this.path);
-      this.#watcher = fs.watch(directory, { persistent: false, encoding: "utf8" }, (_eventType, filename) => {
+      this.#watcher = fs__default.watch(directory, { persistent: false, encoding: "utf8" }, (_eventType, filename) => {
         if (filename && filename !== basename2) {
           return;
         }
@@ -11100,7 +11096,7 @@ class Conf {
       this.#debouncedChangeHandler ??= debounceFunction(() => {
         this.events.dispatchEvent(new Event("change"));
       }, { wait: 1e3 });
-      fs.watchFile(this.path, { persistent: false }, (_current, _previous) => {
+      fs__default.watchFile(this.path, { persistent: false }, (_current, _previous) => {
         if (typeof this.#debouncedChangeHandler === "function") {
           this.#debouncedChangeHandler();
         }
@@ -11620,10 +11616,10 @@ const zh = {
   "tray.show": "显示主界面",
   "tray.stop": "停止 {name}",
   "tray.start": "启动 {name}",
-  "tray.quit": "退出容器（将停止所有 node 进程）",
-  "tray.quitConfirmTitle": "退出容器",
-  "tray.quitConfirm": "退出将停止所有运行中的 node 进程与页面。确定退出吗？",
-  "tray.quitYes": "退出",
+  "tray.quit": "退出控制台",
+  "tray.quitConfirmTitle": "确认退出",
+  "tray.quitConfirm": "确定要退出吗？",
+  "tray.quitYes": "确定",
   "tray.quitNo": "取消",
   "tray.tooltip": "桌面控制台 · {n} 个 page 运行中",
   "dialog.title": "DSH 容器",
@@ -11638,6 +11634,7 @@ const zh = {
   "ipc.unknownTarget": "未知的目标: {target}",
   "ipc.containerRoot": "容器根目录",
   "ipc.guestGone": "内嵌页面已不可用",
+  "ipc.resetNotBuiltin": "只有容器内置页面可以重置",
   "pty.commandNotFound": "找不到命令 “{cmd}”：它不在 PATH 中，也不是可执行文件。请确认该 CLI 已安装或已在设置中提供完整路径。",
   "page.noEntryCommand": "无法推断启动命令：目录缺少 server.js / index.js / package.json(start script)",
   "page.metaParseFail": "container.json 解析失败: {err}",
@@ -11673,6 +11670,8 @@ const zh = {
   "dsh.unavailable": "dsh 不可用",
   "dsh.exitCode": "dsh 退出码 {code}",
   "dsh.pageExists": "pages/{id} 已存在",
+  "dsh.homeLabel": "DSH 配置目录",
+  "dsh.homeDesc": "留空即使用 dsh CLI 的默认目录 ~/.dsh，与终端里的 dsh 共用同一套 profile",
   "dsh.profilePageDesc": "由容器管理的 @deepseek-ai/dsh profile「{profile}」，插件在本机 userData 的 profile 目录内管理",
   "dsh.invalidSpec": "非法包名/地址: {spec}",
   "dsh.gitNeedsUrl": "git 更新需要提供仓库地址",
@@ -11745,10 +11744,10 @@ const en = {
   "tray.show": "Show main window",
   "tray.stop": "Stop {name}",
   "tray.start": "Start {name}",
-  "tray.quit": "Quit container (stops all node processes)",
-  "tray.quitConfirmTitle": "Quit container",
-  "tray.quitConfirm": "Quitting stops all running node processes and pages. Quit anyway?",
-  "tray.quitYes": "Quit",
+  "tray.quit": "Quit container",
+  "tray.quitConfirmTitle": "Confirm Exit",
+  "tray.quitConfirm": "Are you sure you want to quit?",
+  "tray.quitYes": "OK",
   "tray.quitNo": "Cancel",
   "tray.tooltip": "Desktop Console · {n} page(s) running",
   "dialog.title": "DSH Container",
@@ -11763,6 +11762,7 @@ const en = {
   "ipc.unknownTarget": "Unknown target: {target}",
   "ipc.containerRoot": "Container root",
   "ipc.guestGone": "The embedded page is no longer available",
+  "ipc.resetNotBuiltin": "Only container built-in pages can be reset",
   "pty.commandNotFound": "Command not found: “{cmd}” — it is neither on PATH nor an executable file. Make sure the CLI is installed, or set its full path in the settings.",
   "page.noEntryCommand": "Cannot infer a start command: the folder has no server.js / index.js / package.json(start script)",
   "page.metaParseFail": "Failed to parse container.json: {err}",
@@ -11798,6 +11798,8 @@ const en = {
   "dsh.unavailable": "dsh is unavailable",
   "dsh.exitCode": "dsh exited with code {code}",
   "dsh.pageExists": "pages/{id} already exists",
+  "dsh.homeLabel": "DSH config directory",
+  "dsh.homeDesc": "Leave empty to use dsh's default ~/.dsh — the same profile store the CLI uses",
   "dsh.profilePageDesc": 'Container-managed @deepseek-ai/dsh profile "{profile}"; plugins are managed in this machine’s userData profile directory',
   "dsh.invalidSpec": "Invalid package name / URL: {spec}",
   "dsh.gitNeedsUrl": "A git update requires a repository URL",
@@ -12113,6 +12115,12 @@ class PageRegistry extends EventEmitter {
   root;
   entries = /* @__PURE__ */ new Map();
   quitting = false;
+  /**
+   * Cached "is the on-demand CLI present" probe for the hosted runtimes, refreshed by
+   * {@link refreshRuntimePresence} and read synchronously by {@link toState}. `loaded` is false
+   * until the first probe, so an early read fails open (reports present) rather than mis-badging.
+   */
+  runtimePresence = { dsh: false, openclaw: false, loaded: false };
   /** container itself is always listed first so git-update covers it too */
   containerEntry() {
     return {
@@ -12164,6 +12172,7 @@ class PageRegistry extends EventEmitter {
       lastError: e.lastError,
       url,
       launchUrl: withThemeParam(e.launchUrl || url, e.meta.kind),
+      runtimeMissing: (e.meta.kind === "dsh" || e.meta.kind === "openclaw") && e.status !== "running" ? !this.hasRuntime(e.meta.kind) : void 0,
       crashes: e.crashes || void 0,
       nextRestartAt: e.nextRestartAt
     };
@@ -12184,6 +12193,7 @@ class PageRegistry extends EventEmitter {
     try {
       return await this.startAttempt(e, id2);
     } catch (err) {
+      if (e.status === "starting") this.fail(e, err.message);
       const exitedEarly = e.exitCode !== void 0 && e.exitCode !== null && e.exitCode !== 0;
       const retriable = exitedEarly && (e.meta.kind === "dsh" || e.meta.kind === "openclaw");
       if (!retriable) throw err;
@@ -12551,15 +12561,45 @@ class PageRegistry extends EventEmitter {
     await this.stopAndWait(id2);
     return this.start(id2);
   }
+  /**
+   * Re-run the two on-demand CLI presence probes (pure `existsSync` over candidate paths) and
+   * cache them for {@link toState}. The slim installer ships neither dsh nor openclaw — both are
+   * provisioned into userData on demand — so a hosted page whose runtime is absent can never
+   * start. Caching keeps that verdict on `PageState` (a synchronous read), so the list badges,
+   * the switcher and the default-view restore share one race-free source instead of each awaiting
+   * the async status IPC and guessing around an "unknown" window. Dynamic imports keep the module
+   * graph as lean as `startAttempt` already has.
+   */
+  async refreshRuntimePresence() {
+    const [{ isDshInstalled: isDshInstalled2 }, { isOpenclawInstalled: isOpenclawInstalled2 }] = await Promise.all([
+      Promise.resolve().then(() => dsh),
+      Promise.resolve().then(() => openclaw)
+    ]);
+    this.runtimePresence.dsh = isDshInstalled2();
+    this.runtimePresence.openclaw = isOpenclawInstalled2();
+    this.runtimePresence.loaded = true;
+  }
+  /** Sync read of the last probe. Non-hosted kinds are never gated; an unwarmed cache reports
+   *  "present" so callers fail open (attempt the start) rather than block on unknown. */
+  hasRuntime(kind) {
+    if (kind !== "dsh" && kind !== "openclaw") return true;
+    if (!this.runtimePresence.loaded) return true;
+    return kind === "dsh" ? this.runtimePresence.dsh : this.runtimePresence.openclaw;
+  }
   /** auto-start configured pages; failures are logged, never thrown.
       Terminal-kind pages run in the embedded terminal and are opened by the renderer,
       so they are skipped here to avoid a spurious "run in terminal" error. Unknown ids
       (a retired builtin still listed in persisted settings) are skipped silently. */
   async autoStart(ids) {
+    await this.refreshRuntimePresence().catch(() => void 0);
     await Promise.all(
       ids.map(async (id2) => {
         const entry = this.entries.get(id2);
         if (!entry || entry.meta.kind === "terminal") return;
+        if (!this.hasRuntime(entry.meta.kind)) {
+          console.log(`[pages] auto-start ${id2} skipped: ${entry.meta.kind} runtime not installed`);
+          return;
+        }
         try {
           await this.start(id2);
         } catch (err) {
@@ -12667,7 +12707,7 @@ function get(url, timeoutMs = 2e4) {
       fn();
     };
     const req = net.request({ url, method: "GET" });
-    req.setHeader("user-agent", "dsh-desktop-container");
+    req.setHeader("user-agent", "DesktopContainer");
     timer = setTimeout(() => {
       done(() => {
         try {
@@ -12723,7 +12763,7 @@ function download(url, target, version, onProgress) {
   return new Promise((resolve2, reject) => {
     const req = get$1(
       url,
-      { headers: { "user-agent": "dsh-desktop-container" }, timeout: 6e4 },
+      { headers: { "user-agent": "DesktopContainer" }, timeout: 6e4 },
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
@@ -12788,7 +12828,7 @@ async function downloadZip(urls, target, version, onProgress) {
   }
   throw new Error(m("node.downloadFail", { err: lastErr }));
 }
-function extractZip$1(zip, dest) {
+function extractZip(zip, dest) {
   return new Promise((resolve2, reject) => {
     const q = (p) => `'${p.replace(/'/g, "''")}'`;
     const script = `Expand-Archive -LiteralPath ${q(zip)} -DestinationPath ${q(dest)} -Force`;
@@ -12831,7 +12871,7 @@ async function updateNodeRuntime(version, onProgress) {
     onProgress
   );
   onProgress({ name: "Node", phase: "extract", message: m("node.extracting") });
-  await extractZip$1(zip, extracted);
+  await extractZip(zip, extracted);
   const nested = readdirSync(extracted).find((d) => d.startsWith(`node-${want}-win-x64`));
   const srcRoot = nested ? join(extracted, nested) : extracted;
   mkdirSync(staging, { recursive: true });
@@ -13188,2505 +13228,13 @@ function removePage(pagesDir, id2) {
   const { [id2]: _dropped, ...pagePorts } = getSettings().pagePorts ?? {};
   updateSettings({ pagePorts });
 }
-var src = { exports: {} };
-var browser = { exports: {} };
-var ms;
-var hasRequiredMs;
-function requireMs() {
-  if (hasRequiredMs) return ms;
-  hasRequiredMs = 1;
-  var s = 1e3;
-  var m2 = s * 60;
-  var h = m2 * 60;
-  var d = h * 24;
-  var w = d * 7;
-  var y = d * 365.25;
-  ms = function(val, options) {
-    options = options || {};
-    var type2 = typeof val;
-    if (type2 === "string" && val.length > 0) {
-      return parse(val);
-    } else if (type2 === "number" && isFinite(val)) {
-      return options.long ? fmtLong(val) : fmtShort(val);
-    }
-    throw new Error(
-      "val is not a non-empty string or a valid number. val=" + JSON.stringify(val)
-    );
-  };
-  function parse(str) {
-    str = String(str);
-    if (str.length > 100) {
-      return;
-    }
-    var match = /^(-?(?:\d+)?\.?\d+) *(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)?$/i.exec(
-      str
-    );
-    if (!match) {
-      return;
-    }
-    var n = parseFloat(match[1]);
-    var type2 = (match[2] || "ms").toLowerCase();
-    switch (type2) {
-      case "years":
-      case "year":
-      case "yrs":
-      case "yr":
-      case "y":
-        return n * y;
-      case "weeks":
-      case "week":
-      case "w":
-        return n * w;
-      case "days":
-      case "day":
-      case "d":
-        return n * d;
-      case "hours":
-      case "hour":
-      case "hrs":
-      case "hr":
-      case "h":
-        return n * h;
-      case "minutes":
-      case "minute":
-      case "mins":
-      case "min":
-      case "m":
-        return n * m2;
-      case "seconds":
-      case "second":
-      case "secs":
-      case "sec":
-      case "s":
-        return n * s;
-      case "milliseconds":
-      case "millisecond":
-      case "msecs":
-      case "msec":
-      case "ms":
-        return n;
-      default:
-        return void 0;
-    }
-  }
-  function fmtShort(ms2) {
-    var msAbs = Math.abs(ms2);
-    if (msAbs >= d) {
-      return Math.round(ms2 / d) + "d";
-    }
-    if (msAbs >= h) {
-      return Math.round(ms2 / h) + "h";
-    }
-    if (msAbs >= m2) {
-      return Math.round(ms2 / m2) + "m";
-    }
-    if (msAbs >= s) {
-      return Math.round(ms2 / s) + "s";
-    }
-    return ms2 + "ms";
-  }
-  function fmtLong(ms2) {
-    var msAbs = Math.abs(ms2);
-    if (msAbs >= d) {
-      return plural(ms2, msAbs, d, "day");
-    }
-    if (msAbs >= h) {
-      return plural(ms2, msAbs, h, "hour");
-    }
-    if (msAbs >= m2) {
-      return plural(ms2, msAbs, m2, "minute");
-    }
-    if (msAbs >= s) {
-      return plural(ms2, msAbs, s, "second");
-    }
-    return ms2 + " ms";
-  }
-  function plural(ms2, msAbs, n, name) {
-    var isPlural = msAbs >= n * 1.5;
-    return Math.round(ms2 / n) + " " + name + (isPlural ? "s" : "");
-  }
-  return ms;
-}
-var common;
-var hasRequiredCommon;
-function requireCommon() {
-  if (hasRequiredCommon) return common;
-  hasRequiredCommon = 1;
-  function setup(env2) {
-    createDebug.debug = createDebug;
-    createDebug.default = createDebug;
-    createDebug.coerce = coerce;
-    createDebug.disable = disable;
-    createDebug.enable = enable;
-    createDebug.enabled = enabled;
-    createDebug.humanize = requireMs();
-    createDebug.destroy = destroy;
-    Object.keys(env2).forEach((key) => {
-      createDebug[key] = env2[key];
-    });
-    createDebug.names = [];
-    createDebug.skips = [];
-    createDebug.formatters = {};
-    function selectColor(namespace) {
-      let hash = 0;
-      for (let i = 0; i < namespace.length; i++) {
-        hash = (hash << 5) - hash + namespace.charCodeAt(i);
-        hash |= 0;
-      }
-      return createDebug.colors[Math.abs(hash) % createDebug.colors.length];
-    }
-    createDebug.selectColor = selectColor;
-    function createDebug(namespace) {
-      let prevTime;
-      let enableOverride = null;
-      let namespacesCache;
-      let enabledCache;
-      function debug(...args) {
-        if (!debug.enabled) {
-          return;
-        }
-        const self2 = debug;
-        const curr = Number(/* @__PURE__ */ new Date());
-        const ms2 = curr - (prevTime || curr);
-        self2.diff = ms2;
-        self2.prev = prevTime;
-        self2.curr = curr;
-        prevTime = curr;
-        args[0] = createDebug.coerce(args[0]);
-        if (typeof args[0] !== "string") {
-          args.unshift("%O");
-        }
-        let index = 0;
-        args[0] = args[0].replace(/%([a-zA-Z%])/g, (match, format2) => {
-          if (match === "%%") {
-            return "%";
-          }
-          index++;
-          const formatter = createDebug.formatters[format2];
-          if (typeof formatter === "function") {
-            const val = args[index];
-            match = formatter.call(self2, val);
-            args.splice(index, 1);
-            index--;
-          }
-          return match;
-        });
-        createDebug.formatArgs.call(self2, args);
-        const logFn = self2.log || createDebug.log;
-        logFn.apply(self2, args);
-      }
-      debug.namespace = namespace;
-      debug.useColors = createDebug.useColors();
-      debug.color = createDebug.selectColor(namespace);
-      debug.extend = extend;
-      debug.destroy = createDebug.destroy;
-      Object.defineProperty(debug, "enabled", {
-        enumerable: true,
-        configurable: false,
-        get: () => {
-          if (enableOverride !== null) {
-            return enableOverride;
-          }
-          if (namespacesCache !== createDebug.namespaces) {
-            namespacesCache = createDebug.namespaces;
-            enabledCache = createDebug.enabled(namespace);
-          }
-          return enabledCache;
-        },
-        set: (v) => {
-          enableOverride = v;
-        }
-      });
-      if (typeof createDebug.init === "function") {
-        createDebug.init(debug);
-      }
-      return debug;
-    }
-    function extend(namespace, delimiter2) {
-      const newDebug = createDebug(this.namespace + (typeof delimiter2 === "undefined" ? ":" : delimiter2) + namespace);
-      newDebug.log = this.log;
-      return newDebug;
-    }
-    function enable(namespaces) {
-      createDebug.save(namespaces);
-      createDebug.namespaces = namespaces;
-      createDebug.names = [];
-      createDebug.skips = [];
-      const split = (typeof namespaces === "string" ? namespaces : "").trim().replace(/\s+/g, ",").split(",").filter(Boolean);
-      for (const ns of split) {
-        if (ns[0] === "-") {
-          createDebug.skips.push(ns.slice(1));
-        } else {
-          createDebug.names.push(ns);
-        }
-      }
-    }
-    function matchesTemplate(search, template) {
-      let searchIndex = 0;
-      let templateIndex = 0;
-      let starIndex = -1;
-      let matchIndex = 0;
-      while (searchIndex < search.length) {
-        if (templateIndex < template.length && (template[templateIndex] === search[searchIndex] || template[templateIndex] === "*")) {
-          if (template[templateIndex] === "*") {
-            starIndex = templateIndex;
-            matchIndex = searchIndex;
-            templateIndex++;
-          } else {
-            searchIndex++;
-            templateIndex++;
-          }
-        } else if (starIndex !== -1) {
-          templateIndex = starIndex + 1;
-          matchIndex++;
-          searchIndex = matchIndex;
-        } else {
-          return false;
-        }
-      }
-      while (templateIndex < template.length && template[templateIndex] === "*") {
-        templateIndex++;
-      }
-      return templateIndex === template.length;
-    }
-    function disable() {
-      const namespaces = [
-        ...createDebug.names,
-        ...createDebug.skips.map((namespace) => "-" + namespace)
-      ].join(",");
-      createDebug.enable("");
-      return namespaces;
-    }
-    function enabled(name) {
-      for (const skip of createDebug.skips) {
-        if (matchesTemplate(name, skip)) {
-          return false;
-        }
-      }
-      for (const ns of createDebug.names) {
-        if (matchesTemplate(name, ns)) {
-          return true;
-        }
-      }
-      return false;
-    }
-    function coerce(val) {
-      if (val instanceof Error) {
-        return val.stack || val.message;
-      }
-      return val;
-    }
-    function destroy() {
-      console.warn("Instance method `debug.destroy()` is deprecated and no longer does anything. It will be removed in the next major version of `debug`.");
-    }
-    createDebug.enable(createDebug.load());
-    return createDebug;
-  }
-  common = setup;
-  return common;
-}
-var hasRequiredBrowser;
-function requireBrowser() {
-  if (hasRequiredBrowser) return browser.exports;
-  hasRequiredBrowser = 1;
-  (function(module, exports) {
-    exports.formatArgs = formatArgs;
-    exports.save = save;
-    exports.load = load;
-    exports.useColors = useColors;
-    exports.storage = localstorage();
-    exports.destroy = /* @__PURE__ */ (() => {
-      let warned = false;
-      return () => {
-        if (!warned) {
-          warned = true;
-          console.warn("Instance method `debug.destroy()` is deprecated and no longer does anything. It will be removed in the next major version of `debug`.");
-        }
-      };
-    })();
-    exports.colors = [
-      "#0000CC",
-      "#0000FF",
-      "#0033CC",
-      "#0033FF",
-      "#0066CC",
-      "#0066FF",
-      "#0099CC",
-      "#0099FF",
-      "#00CC00",
-      "#00CC33",
-      "#00CC66",
-      "#00CC99",
-      "#00CCCC",
-      "#00CCFF",
-      "#3300CC",
-      "#3300FF",
-      "#3333CC",
-      "#3333FF",
-      "#3366CC",
-      "#3366FF",
-      "#3399CC",
-      "#3399FF",
-      "#33CC00",
-      "#33CC33",
-      "#33CC66",
-      "#33CC99",
-      "#33CCCC",
-      "#33CCFF",
-      "#6600CC",
-      "#6600FF",
-      "#6633CC",
-      "#6633FF",
-      "#66CC00",
-      "#66CC33",
-      "#9900CC",
-      "#9900FF",
-      "#9933CC",
-      "#9933FF",
-      "#99CC00",
-      "#99CC33",
-      "#CC0000",
-      "#CC0033",
-      "#CC0066",
-      "#CC0099",
-      "#CC00CC",
-      "#CC00FF",
-      "#CC3300",
-      "#CC3333",
-      "#CC3366",
-      "#CC3399",
-      "#CC33CC",
-      "#CC33FF",
-      "#CC6600",
-      "#CC6633",
-      "#CC9900",
-      "#CC9933",
-      "#CCCC00",
-      "#CCCC33",
-      "#FF0000",
-      "#FF0033",
-      "#FF0066",
-      "#FF0099",
-      "#FF00CC",
-      "#FF00FF",
-      "#FF3300",
-      "#FF3333",
-      "#FF3366",
-      "#FF3399",
-      "#FF33CC",
-      "#FF33FF",
-      "#FF6600",
-      "#FF6633",
-      "#FF9900",
-      "#FF9933",
-      "#FFCC00",
-      "#FFCC33"
-    ];
-    function useColors() {
-      if (typeof window !== "undefined" && window.process && (window.process.type === "renderer" || window.process.__nwjs)) {
-        return true;
-      }
-      if (typeof navigator !== "undefined" && navigator.userAgent && navigator.userAgent.toLowerCase().match(/(edge|trident)\/(\d+)/)) {
-        return false;
-      }
-      let m2;
-      return typeof document !== "undefined" && document.documentElement && document.documentElement.style && document.documentElement.style.WebkitAppearance || // Is firebug? http://stackoverflow.com/a/398120/376773
-      typeof window !== "undefined" && window.console && (window.console.firebug || window.console.exception && window.console.table) || // Is firefox >= v31?
-      // https://developer.mozilla.org/en-US/docs/Tools/Web_Console#Styling_messages
-      typeof navigator !== "undefined" && navigator.userAgent && (m2 = navigator.userAgent.toLowerCase().match(/firefox\/(\d+)/)) && parseInt(m2[1], 10) >= 31 || // Double check webkit in userAgent just in case we are in a worker
-      typeof navigator !== "undefined" && navigator.userAgent && navigator.userAgent.toLowerCase().match(/applewebkit\/(\d+)/);
-    }
-    function formatArgs(args) {
-      args[0] = (this.useColors ? "%c" : "") + this.namespace + (this.useColors ? " %c" : " ") + args[0] + (this.useColors ? "%c " : " ") + "+" + module.exports.humanize(this.diff);
-      if (!this.useColors) {
-        return;
-      }
-      const c = "color: " + this.color;
-      args.splice(1, 0, c, "color: inherit");
-      let index = 0;
-      let lastC = 0;
-      args[0].replace(/%[a-zA-Z%]/g, (match) => {
-        if (match === "%%") {
-          return;
-        }
-        index++;
-        if (match === "%c") {
-          lastC = index;
-        }
-      });
-      args.splice(lastC, 0, c);
-    }
-    exports.log = console.debug || console.log || (() => {
-    });
-    function save(namespaces) {
-      try {
-        if (namespaces) {
-          exports.storage.setItem("debug", namespaces);
-        } else {
-          exports.storage.removeItem("debug");
-        }
-      } catch (error) {
-      }
-    }
-    function load() {
-      let r;
-      try {
-        r = exports.storage.getItem("debug") || exports.storage.getItem("DEBUG");
-      } catch (error) {
-      }
-      if (!r && typeof process !== "undefined" && "env" in process) {
-        r = process.env.DEBUG;
-      }
-      return r;
-    }
-    function localstorage() {
-      try {
-        return localStorage;
-      } catch (error) {
-      }
-    }
-    module.exports = requireCommon()(exports);
-    const { formatters } = module.exports;
-    formatters.j = function(v) {
-      try {
-        return JSON.stringify(v);
-      } catch (error) {
-        return "[UnexpectedJSONParseError]: " + error.message;
-      }
-    };
-  })(browser, browser.exports);
-  return browser.exports;
-}
-var node = { exports: {} };
-var hasFlag;
-var hasRequiredHasFlag;
-function requireHasFlag() {
-  if (hasRequiredHasFlag) return hasFlag;
-  hasRequiredHasFlag = 1;
-  hasFlag = (flag, argv = process.argv) => {
-    const prefix = flag.startsWith("-") ? "" : flag.length === 1 ? "-" : "--";
-    const position = argv.indexOf(prefix + flag);
-    const terminatorPosition = argv.indexOf("--");
-    return position !== -1 && (terminatorPosition === -1 || position < terminatorPosition);
-  };
-  return hasFlag;
-}
-var supportsColor_1;
-var hasRequiredSupportsColor;
-function requireSupportsColor() {
-  if (hasRequiredSupportsColor) return supportsColor_1;
-  hasRequiredSupportsColor = 1;
-  const os2 = require$$0$1;
-  const tty = require$$1$1;
-  const hasFlag2 = requireHasFlag();
-  const { env: env2 } = process;
-  let forceColor;
-  if (hasFlag2("no-color") || hasFlag2("no-colors") || hasFlag2("color=false") || hasFlag2("color=never")) {
-    forceColor = 0;
-  } else if (hasFlag2("color") || hasFlag2("colors") || hasFlag2("color=true") || hasFlag2("color=always")) {
-    forceColor = 1;
-  }
-  if ("FORCE_COLOR" in env2) {
-    if (env2.FORCE_COLOR === "true") {
-      forceColor = 1;
-    } else if (env2.FORCE_COLOR === "false") {
-      forceColor = 0;
-    } else {
-      forceColor = env2.FORCE_COLOR.length === 0 ? 1 : Math.min(parseInt(env2.FORCE_COLOR, 10), 3);
-    }
-  }
-  function translateLevel(level) {
-    if (level === 0) {
-      return false;
-    }
-    return {
-      level,
-      hasBasic: true,
-      has256: level >= 2,
-      has16m: level >= 3
-    };
-  }
-  function supportsColor(haveStream, streamIsTTY) {
-    if (forceColor === 0) {
-      return 0;
-    }
-    if (hasFlag2("color=16m") || hasFlag2("color=full") || hasFlag2("color=truecolor")) {
-      return 3;
-    }
-    if (hasFlag2("color=256")) {
-      return 2;
-    }
-    if (haveStream && !streamIsTTY && forceColor === void 0) {
-      return 0;
-    }
-    const min = forceColor || 0;
-    if (env2.TERM === "dumb") {
-      return min;
-    }
-    if (process.platform === "win32") {
-      const osRelease = os2.release().split(".");
-      if (Number(osRelease[0]) >= 10 && Number(osRelease[2]) >= 10586) {
-        return Number(osRelease[2]) >= 14931 ? 3 : 2;
-      }
-      return 1;
-    }
-    if ("CI" in env2) {
-      if (["TRAVIS", "CIRCLECI", "APPVEYOR", "GITLAB_CI", "GITHUB_ACTIONS", "BUILDKITE"].some((sign) => sign in env2) || env2.CI_NAME === "codeship") {
-        return 1;
-      }
-      return min;
-    }
-    if ("TEAMCITY_VERSION" in env2) {
-      return /^(9\.(0*[1-9]\d*)\.|\d{2,}\.)/.test(env2.TEAMCITY_VERSION) ? 1 : 0;
-    }
-    if (env2.COLORTERM === "truecolor") {
-      return 3;
-    }
-    if ("TERM_PROGRAM" in env2) {
-      const version = parseInt((env2.TERM_PROGRAM_VERSION || "").split(".")[0], 10);
-      switch (env2.TERM_PROGRAM) {
-        case "iTerm.app":
-          return version >= 3 ? 3 : 2;
-        case "Apple_Terminal":
-          return 2;
-      }
-    }
-    if (/-256(color)?$/i.test(env2.TERM)) {
-      return 2;
-    }
-    if (/^screen|^xterm|^vt100|^vt220|^rxvt|color|ansi|cygwin|linux/i.test(env2.TERM)) {
-      return 1;
-    }
-    if ("COLORTERM" in env2) {
-      return 1;
-    }
-    return min;
-  }
-  function getSupportLevel(stream) {
-    const level = supportsColor(stream, stream && stream.isTTY);
-    return translateLevel(level);
-  }
-  supportsColor_1 = {
-    supportsColor: getSupportLevel,
-    stdout: translateLevel(supportsColor(true, tty.isatty(1))),
-    stderr: translateLevel(supportsColor(true, tty.isatty(2)))
-  };
-  return supportsColor_1;
-}
-var hasRequiredNode;
-function requireNode() {
-  if (hasRequiredNode) return node.exports;
-  hasRequiredNode = 1;
-  (function(module, exports) {
-    const tty = require$$1$1;
-    const util2 = require$$1$2;
-    exports.init = init;
-    exports.log = log;
-    exports.formatArgs = formatArgs;
-    exports.save = save;
-    exports.load = load;
-    exports.useColors = useColors;
-    exports.destroy = util2.deprecate(
-      () => {
-      },
-      "Instance method `debug.destroy()` is deprecated and no longer does anything. It will be removed in the next major version of `debug`."
-    );
-    exports.colors = [6, 2, 3, 4, 5, 1];
-    try {
-      const supportsColor = requireSupportsColor();
-      if (supportsColor && (supportsColor.stderr || supportsColor).level >= 2) {
-        exports.colors = [
-          20,
-          21,
-          26,
-          27,
-          32,
-          33,
-          38,
-          39,
-          40,
-          41,
-          42,
-          43,
-          44,
-          45,
-          56,
-          57,
-          62,
-          63,
-          68,
-          69,
-          74,
-          75,
-          76,
-          77,
-          78,
-          79,
-          80,
-          81,
-          92,
-          93,
-          98,
-          99,
-          112,
-          113,
-          128,
-          129,
-          134,
-          135,
-          148,
-          149,
-          160,
-          161,
-          162,
-          163,
-          164,
-          165,
-          166,
-          167,
-          168,
-          169,
-          170,
-          171,
-          172,
-          173,
-          178,
-          179,
-          184,
-          185,
-          196,
-          197,
-          198,
-          199,
-          200,
-          201,
-          202,
-          203,
-          204,
-          205,
-          206,
-          207,
-          208,
-          209,
-          214,
-          215,
-          220,
-          221
-        ];
-      }
-    } catch (error) {
-    }
-    exports.inspectOpts = Object.keys(process.env).filter((key) => {
-      return /^debug_/i.test(key);
-    }).reduce((obj, key) => {
-      const prop = key.substring(6).toLowerCase().replace(/_([a-z])/g, (_, k) => {
-        return k.toUpperCase();
-      });
-      let val = process.env[key];
-      if (/^(yes|on|true|enabled)$/i.test(val)) {
-        val = true;
-      } else if (/^(no|off|false|disabled)$/i.test(val)) {
-        val = false;
-      } else if (val === "null") {
-        val = null;
-      } else {
-        val = Number(val);
-      }
-      obj[prop] = val;
-      return obj;
-    }, {});
-    function useColors() {
-      return "colors" in exports.inspectOpts ? Boolean(exports.inspectOpts.colors) : tty.isatty(process.stderr.fd);
-    }
-    function formatArgs(args) {
-      const { namespace: name, useColors: useColors2 } = this;
-      if (useColors2) {
-        const c = this.color;
-        const colorCode = "\x1B[3" + (c < 8 ? c : "8;5;" + c);
-        const prefix = `  ${colorCode};1m${name} \x1B[0m`;
-        args[0] = prefix + args[0].split("\n").join("\n" + prefix);
-        args.push(colorCode + "m+" + module.exports.humanize(this.diff) + "\x1B[0m");
-      } else {
-        args[0] = getDate() + name + " " + args[0];
-      }
-    }
-    function getDate() {
-      if (exports.inspectOpts.hideDate) {
-        return "";
-      }
-      return (/* @__PURE__ */ new Date()).toISOString() + " ";
-    }
-    function log(...args) {
-      return process.stderr.write(util2.formatWithOptions(exports.inspectOpts, ...args) + "\n");
-    }
-    function save(namespaces) {
-      if (namespaces) {
-        process.env.DEBUG = namespaces;
-      } else {
-        delete process.env.DEBUG;
-      }
-    }
-    function load() {
-      return process.env.DEBUG;
-    }
-    function init(debug) {
-      debug.inspectOpts = {};
-      const keys = Object.keys(exports.inspectOpts);
-      for (let i = 0; i < keys.length; i++) {
-        debug.inspectOpts[keys[i]] = exports.inspectOpts[keys[i]];
-      }
-    }
-    module.exports = requireCommon()(exports);
-    const { formatters } = module.exports;
-    formatters.o = function(v) {
-      this.inspectOpts.colors = this.useColors;
-      return util2.inspect(v, this.inspectOpts).split("\n").map((str) => str.trim()).join(" ");
-    };
-    formatters.O = function(v) {
-      this.inspectOpts.colors = this.useColors;
-      return util2.inspect(v, this.inspectOpts);
-    };
-  })(node, node.exports);
-  return node.exports;
-}
-var hasRequiredSrc;
-function requireSrc() {
-  if (hasRequiredSrc) return src.exports;
-  hasRequiredSrc = 1;
-  if (typeof process === "undefined" || process.type === "renderer" || process.browser === true || process.__nwjs) {
-    src.exports = requireBrowser();
-  } else {
-    src.exports = requireNode();
-  }
-  return src.exports;
-}
-var getStream = { exports: {} };
-var once = { exports: {} };
-var wrappy_1;
-var hasRequiredWrappy;
-function requireWrappy() {
-  if (hasRequiredWrappy) return wrappy_1;
-  hasRequiredWrappy = 1;
-  wrappy_1 = wrappy;
-  function wrappy(fn, cb) {
-    if (fn && cb) return wrappy(fn)(cb);
-    if (typeof fn !== "function")
-      throw new TypeError("need wrapper function");
-    Object.keys(fn).forEach(function(k) {
-      wrapper[k] = fn[k];
-    });
-    return wrapper;
-    function wrapper() {
-      var args = new Array(arguments.length);
-      for (var i = 0; i < args.length; i++) {
-        args[i] = arguments[i];
-      }
-      var ret = fn.apply(this, args);
-      var cb2 = args[args.length - 1];
-      if (typeof ret === "function" && ret !== cb2) {
-        Object.keys(cb2).forEach(function(k) {
-          ret[k] = cb2[k];
-        });
-      }
-      return ret;
-    }
-  }
-  return wrappy_1;
-}
-var hasRequiredOnce;
-function requireOnce() {
-  if (hasRequiredOnce) return once.exports;
-  hasRequiredOnce = 1;
-  var wrappy = requireWrappy();
-  once.exports = wrappy(once$1);
-  once.exports.strict = wrappy(onceStrict);
-  once$1.proto = once$1(function() {
-    Object.defineProperty(Function.prototype, "once", {
-      value: function() {
-        return once$1(this);
-      },
-      configurable: true
-    });
-    Object.defineProperty(Function.prototype, "onceStrict", {
-      value: function() {
-        return onceStrict(this);
-      },
-      configurable: true
-    });
-  });
-  function once$1(fn) {
-    var f = function() {
-      if (f.called) return f.value;
-      f.called = true;
-      return f.value = fn.apply(this, arguments);
-    };
-    f.called = false;
-    return f;
-  }
-  function onceStrict(fn) {
-    var f = function() {
-      if (f.called)
-        throw new Error(f.onceError);
-      f.called = true;
-      return f.value = fn.apply(this, arguments);
-    };
-    var name = fn.name || "Function wrapped with `once`";
-    f.onceError = name + " shouldn't be called more than once";
-    f.called = false;
-    return f;
-  }
-  return once.exports;
-}
-var endOfStream;
-var hasRequiredEndOfStream;
-function requireEndOfStream() {
-  if (hasRequiredEndOfStream) return endOfStream;
-  hasRequiredEndOfStream = 1;
-  var once2 = requireOnce();
-  var noop = function() {
-  };
-  var qnt = commonjsGlobal.Bare ? queueMicrotask : process.nextTick.bind(process);
-  var isRequest = function(stream) {
-    return stream.setHeader && typeof stream.abort === "function";
-  };
-  var isChildProcess = function(stream) {
-    return stream.stdio && Array.isArray(stream.stdio) && stream.stdio.length === 3;
-  };
-  var eos = function(stream, opts, callback) {
-    if (typeof opts === "function") return eos(stream, null, opts);
-    if (!opts) opts = {};
-    callback = once2(callback || noop);
-    var ws = stream._writableState;
-    var rs = stream._readableState;
-    var readable = opts.readable || opts.readable !== false && stream.readable;
-    var writable = opts.writable || opts.writable !== false && stream.writable;
-    var cancelled = false;
-    var onlegacyfinish = function() {
-      if (!stream.writable) onfinish();
-    };
-    var onfinish = function() {
-      writable = false;
-      if (!readable) callback.call(stream);
-    };
-    var onend = function() {
-      readable = false;
-      if (!writable) callback.call(stream);
-    };
-    var onexit = function(exitCode) {
-      callback.call(stream, exitCode ? new Error("exited with error code: " + exitCode) : null);
-    };
-    var onerror = function(err) {
-      callback.call(stream, err);
-    };
-    var onclose = function() {
-      qnt(onclosenexttick);
-    };
-    var onclosenexttick = function() {
-      if (cancelled) return;
-      if (readable && !(rs && (rs.ended && !rs.destroyed))) return callback.call(stream, new Error("premature close"));
-      if (writable && !(ws && (ws.ended && !ws.destroyed))) return callback.call(stream, new Error("premature close"));
-    };
-    var onrequest = function() {
-      stream.req.on("finish", onfinish);
-    };
-    if (isRequest(stream)) {
-      stream.on("complete", onfinish);
-      stream.on("abort", onclose);
-      if (stream.req) onrequest();
-      else stream.on("request", onrequest);
-    } else if (writable && !ws) {
-      stream.on("end", onlegacyfinish);
-      stream.on("close", onlegacyfinish);
-    }
-    if (isChildProcess(stream)) stream.on("exit", onexit);
-    stream.on("end", onend);
-    stream.on("finish", onfinish);
-    if (opts.error !== false) stream.on("error", onerror);
-    stream.on("close", onclose);
-    return function() {
-      cancelled = true;
-      stream.removeListener("complete", onfinish);
-      stream.removeListener("abort", onclose);
-      stream.removeListener("request", onrequest);
-      if (stream.req) stream.req.removeListener("finish", onfinish);
-      stream.removeListener("end", onlegacyfinish);
-      stream.removeListener("close", onlegacyfinish);
-      stream.removeListener("finish", onfinish);
-      stream.removeListener("exit", onexit);
-      stream.removeListener("end", onend);
-      stream.removeListener("error", onerror);
-      stream.removeListener("close", onclose);
-    };
-  };
-  endOfStream = eos;
-  return endOfStream;
-}
-var pump_1;
-var hasRequiredPump;
-function requirePump() {
-  if (hasRequiredPump) return pump_1;
-  hasRequiredPump = 1;
-  var once2 = requireOnce();
-  var eos = requireEndOfStream();
-  var fs2;
+const ofs = (() => {
   try {
-    fs2 = require2("fs");
-  } catch (e) {
+    if (typeof require2 === "function") return require2("original-fs");
+  } catch {
   }
-  var noop = function() {
-  };
-  var ancient = typeof process === "undefined" ? false : /^v?\.0/.test(process.version);
-  var isFn = function(fn) {
-    return typeof fn === "function";
-  };
-  var isFS = function(stream) {
-    if (!ancient) return false;
-    if (!fs2) return false;
-    return (stream instanceof (fs2.ReadStream || noop) || stream instanceof (fs2.WriteStream || noop)) && isFn(stream.close);
-  };
-  var isRequest = function(stream) {
-    return stream.setHeader && isFn(stream.abort);
-  };
-  var destroyer = function(stream, reading, writing, callback) {
-    callback = once2(callback);
-    var closed = false;
-    stream.on("close", function() {
-      closed = true;
-    });
-    eos(stream, { readable: reading, writable: writing }, function(err) {
-      if (err) return callback(err);
-      closed = true;
-      callback();
-    });
-    var destroyed = false;
-    return function(err) {
-      if (closed) return;
-      if (destroyed) return;
-      destroyed = true;
-      if (isFS(stream)) return stream.close(noop);
-      if (isRequest(stream)) return stream.abort();
-      if (isFn(stream.destroy)) return stream.destroy();
-      callback(err || new Error("stream was destroyed"));
-    };
-  };
-  var call = function(fn) {
-    fn();
-  };
-  var pipe = function(from, to) {
-    return from.pipe(to);
-  };
-  var pump = function() {
-    var streams = Array.prototype.slice.call(arguments);
-    var callback = isFn(streams[streams.length - 1] || noop) && streams.pop() || noop;
-    if (Array.isArray(streams[0])) streams = streams[0];
-    if (streams.length < 2) throw new Error("pump requires two streams per minimum");
-    var error;
-    var destroys = streams.map(function(stream, i) {
-      var reading = i < streams.length - 1;
-      var writing = i > 0;
-      return destroyer(stream, reading, writing, function(err) {
-        if (!error) error = err;
-        if (err) destroys.forEach(call);
-        if (reading) return;
-        destroys.forEach(call);
-        callback(error);
-      });
-    });
-    return streams.reduce(pipe);
-  };
-  pump_1 = pump;
-  return pump_1;
-}
-var bufferStream;
-var hasRequiredBufferStream;
-function requireBufferStream() {
-  if (hasRequiredBufferStream) return bufferStream;
-  hasRequiredBufferStream = 1;
-  const { PassThrough: PassThroughStream } = require$$6$1;
-  bufferStream = (options) => {
-    options = { ...options };
-    const { array } = options;
-    let { encoding } = options;
-    const isBuffer = encoding === "buffer";
-    let objectMode = false;
-    if (array) {
-      objectMode = !(encoding || isBuffer);
-    } else {
-      encoding = encoding || "utf8";
-    }
-    if (isBuffer) {
-      encoding = null;
-    }
-    const stream = new PassThroughStream({ objectMode });
-    if (encoding) {
-      stream.setEncoding(encoding);
-    }
-    let length = 0;
-    const chunks = [];
-    stream.on("data", (chunk) => {
-      chunks.push(chunk);
-      if (objectMode) {
-        length = chunks.length;
-      } else {
-        length += chunk.length;
-      }
-    });
-    stream.getBufferedValue = () => {
-      if (array) {
-        return chunks;
-      }
-      return isBuffer ? Buffer.concat(chunks, length) : chunks.join("");
-    };
-    stream.getBufferedLength = () => length;
-    return stream;
-  };
-  return bufferStream;
-}
-var hasRequiredGetStream;
-function requireGetStream() {
-  if (hasRequiredGetStream) return getStream.exports;
-  hasRequiredGetStream = 1;
-  const { constants: BufferConstants } = require$$0$2;
-  const pump = requirePump();
-  const bufferStream2 = requireBufferStream();
-  class MaxBufferError extends Error {
-    constructor() {
-      super("maxBuffer exceeded");
-      this.name = "MaxBufferError";
-    }
-  }
-  async function getStream$1(inputStream, options) {
-    if (!inputStream) {
-      return Promise.reject(new Error("Expected a stream"));
-    }
-    options = {
-      maxBuffer: Infinity,
-      ...options
-    };
-    const { maxBuffer } = options;
-    let stream;
-    await new Promise((resolve2, reject) => {
-      const rejectPromise = (error) => {
-        if (error && stream.getBufferedLength() <= BufferConstants.MAX_LENGTH) {
-          error.bufferedData = stream.getBufferedValue();
-        }
-        reject(error);
-      };
-      stream = pump(inputStream, bufferStream2(options), (error) => {
-        if (error) {
-          rejectPromise(error);
-          return;
-        }
-        resolve2();
-      });
-      stream.on("data", () => {
-        if (stream.getBufferedLength() > maxBuffer) {
-          rejectPromise(new MaxBufferError());
-        }
-      });
-    });
-    return stream.getBufferedValue();
-  }
-  getStream.exports = getStream$1;
-  getStream.exports.default = getStream$1;
-  getStream.exports.buffer = (stream, options) => getStream$1(stream, { ...options, encoding: "buffer" });
-  getStream.exports.array = (stream, options) => getStream$1(stream, { ...options, array: true });
-  getStream.exports.MaxBufferError = MaxBufferError;
-  return getStream.exports;
-}
-var yauzl = {};
-var fdSlicer = {};
-var pend;
-var hasRequiredPend;
-function requirePend() {
-  if (hasRequiredPend) return pend;
-  hasRequiredPend = 1;
-  pend = Pend;
-  function Pend() {
-    this.pending = 0;
-    this.max = Infinity;
-    this.listeners = [];
-    this.waiting = [];
-    this.error = null;
-  }
-  Pend.prototype.go = function(fn) {
-    if (this.pending < this.max) {
-      pendGo(this, fn);
-    } else {
-      this.waiting.push(fn);
-    }
-  };
-  Pend.prototype.wait = function(cb) {
-    if (this.pending === 0) {
-      cb(this.error);
-    } else {
-      this.listeners.push(cb);
-    }
-  };
-  Pend.prototype.hold = function() {
-    return pendHold(this);
-  };
-  function pendHold(self2) {
-    self2.pending += 1;
-    var called = false;
-    return onCb;
-    function onCb(err) {
-      if (called) throw new Error("callback called twice");
-      called = true;
-      self2.error = self2.error || err;
-      self2.pending -= 1;
-      if (self2.waiting.length > 0 && self2.pending < self2.max) {
-        pendGo(self2, self2.waiting.shift());
-      } else if (self2.pending === 0) {
-        var listeners = self2.listeners;
-        self2.listeners = [];
-        listeners.forEach(cbListener);
-      }
-    }
-    function cbListener(listener) {
-      listener(self2.error);
-    }
-  }
-  function pendGo(self2, fn) {
-    fn(pendHold(self2));
-  }
-  return pend;
-}
-var hasRequiredFdSlicer;
-function requireFdSlicer() {
-  if (hasRequiredFdSlicer) return fdSlicer;
-  hasRequiredFdSlicer = 1;
-  var fs2 = require$$0$3;
-  var util2 = require$$1$2;
-  var stream = require$$6$1;
-  var Readable = stream.Readable;
-  var Writable = stream.Writable;
-  var PassThrough = stream.PassThrough;
-  var Pend = requirePend();
-  var EventEmitter2 = require$$4$1.EventEmitter;
-  fdSlicer.createFromBuffer = createFromBuffer;
-  fdSlicer.createFromFd = createFromFd;
-  fdSlicer.BufferSlicer = BufferSlicer;
-  fdSlicer.FdSlicer = FdSlicer;
-  util2.inherits(FdSlicer, EventEmitter2);
-  function FdSlicer(fd, options) {
-    options = options || {};
-    EventEmitter2.call(this);
-    this.fd = fd;
-    this.pend = new Pend();
-    this.pend.max = 1;
-    this.refCount = 0;
-    this.autoClose = !!options.autoClose;
-  }
-  FdSlicer.prototype.read = function(buffer, offset, length, position, callback) {
-    var self2 = this;
-    self2.pend.go(function(cb) {
-      fs2.read(self2.fd, buffer, offset, length, position, function(err, bytesRead, buffer2) {
-        cb();
-        callback(err, bytesRead, buffer2);
-      });
-    });
-  };
-  FdSlicer.prototype.write = function(buffer, offset, length, position, callback) {
-    var self2 = this;
-    self2.pend.go(function(cb) {
-      fs2.write(self2.fd, buffer, offset, length, position, function(err, written, buffer2) {
-        cb();
-        callback(err, written, buffer2);
-      });
-    });
-  };
-  FdSlicer.prototype.createReadStream = function(options) {
-    return new ReadStream(this, options);
-  };
-  FdSlicer.prototype.createWriteStream = function(options) {
-    return new WriteStream(this, options);
-  };
-  FdSlicer.prototype.ref = function() {
-    this.refCount += 1;
-  };
-  FdSlicer.prototype.unref = function() {
-    var self2 = this;
-    self2.refCount -= 1;
-    if (self2.refCount > 0) return;
-    if (self2.refCount < 0) throw new Error("invalid unref");
-    if (self2.autoClose) {
-      fs2.close(self2.fd, onCloseDone);
-    }
-    function onCloseDone(err) {
-      if (err) {
-        self2.emit("error", err);
-      } else {
-        self2.emit("close");
-      }
-    }
-  };
-  util2.inherits(ReadStream, Readable);
-  function ReadStream(context, options) {
-    options = options || {};
-    Readable.call(this, options);
-    this.context = context;
-    this.context.ref();
-    this.start = options.start || 0;
-    this.endOffset = options.end;
-    this.pos = this.start;
-    this.destroyed = false;
-  }
-  ReadStream.prototype._read = function(n) {
-    var self2 = this;
-    if (self2.destroyed) return;
-    var toRead = Math.min(self2._readableState.highWaterMark, n);
-    if (self2.endOffset != null) {
-      toRead = Math.min(toRead, self2.endOffset - self2.pos);
-    }
-    if (toRead <= 0) {
-      self2.destroyed = true;
-      self2.push(null);
-      self2.context.unref();
-      return;
-    }
-    self2.context.pend.go(function(cb) {
-      if (self2.destroyed) return cb();
-      var buffer = new Buffer(toRead);
-      fs2.read(self2.context.fd, buffer, 0, toRead, self2.pos, function(err, bytesRead) {
-        if (err) {
-          self2.destroy(err);
-        } else if (bytesRead === 0) {
-          self2.destroyed = true;
-          self2.push(null);
-          self2.context.unref();
-        } else {
-          self2.pos += bytesRead;
-          self2.push(buffer.slice(0, bytesRead));
-        }
-        cb();
-      });
-    });
-  };
-  ReadStream.prototype.destroy = function(err) {
-    if (this.destroyed) return;
-    err = err || new Error("stream destroyed");
-    this.destroyed = true;
-    this.emit("error", err);
-    this.context.unref();
-  };
-  util2.inherits(WriteStream, Writable);
-  function WriteStream(context, options) {
-    options = options || {};
-    Writable.call(this, options);
-    this.context = context;
-    this.context.ref();
-    this.start = options.start || 0;
-    this.endOffset = options.end == null ? Infinity : +options.end;
-    this.bytesWritten = 0;
-    this.pos = this.start;
-    this.destroyed = false;
-    this.on("finish", this.destroy.bind(this));
-  }
-  WriteStream.prototype._write = function(buffer, encoding, callback) {
-    var self2 = this;
-    if (self2.destroyed) return;
-    if (self2.pos + buffer.length > self2.endOffset) {
-      var err = new Error("maximum file length exceeded");
-      err.code = "ETOOBIG";
-      self2.destroy();
-      callback(err);
-      return;
-    }
-    self2.context.pend.go(function(cb) {
-      if (self2.destroyed) return cb();
-      fs2.write(self2.context.fd, buffer, 0, buffer.length, self2.pos, function(err2, bytes) {
-        if (err2) {
-          self2.destroy();
-          cb();
-          callback(err2);
-        } else {
-          self2.bytesWritten += bytes;
-          self2.pos += bytes;
-          self2.emit("progress");
-          cb();
-          callback();
-        }
-      });
-    });
-  };
-  WriteStream.prototype.destroy = function() {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    this.context.unref();
-  };
-  util2.inherits(BufferSlicer, EventEmitter2);
-  function BufferSlicer(buffer, options) {
-    EventEmitter2.call(this);
-    options = options || {};
-    this.refCount = 0;
-    this.buffer = buffer;
-    this.maxChunkSize = options.maxChunkSize || Number.MAX_SAFE_INTEGER;
-  }
-  BufferSlicer.prototype.read = function(buffer, offset, length, position, callback) {
-    var end = position + length;
-    var delta = end - this.buffer.length;
-    var written = delta > 0 ? delta : length;
-    this.buffer.copy(buffer, offset, position, end);
-    setImmediate(function() {
-      callback(null, written);
-    });
-  };
-  BufferSlicer.prototype.write = function(buffer, offset, length, position, callback) {
-    buffer.copy(this.buffer, position, offset, offset + length);
-    setImmediate(function() {
-      callback(null, length, buffer);
-    });
-  };
-  BufferSlicer.prototype.createReadStream = function(options) {
-    options = options || {};
-    var readStream = new PassThrough(options);
-    readStream.destroyed = false;
-    readStream.start = options.start || 0;
-    readStream.endOffset = options.end;
-    readStream.pos = readStream.endOffset || this.buffer.length;
-    var entireSlice = this.buffer.slice(readStream.start, readStream.pos);
-    var offset = 0;
-    while (true) {
-      var nextOffset = offset + this.maxChunkSize;
-      if (nextOffset >= entireSlice.length) {
-        if (offset < entireSlice.length) {
-          readStream.write(entireSlice.slice(offset, entireSlice.length));
-        }
-        break;
-      }
-      readStream.write(entireSlice.slice(offset, nextOffset));
-      offset = nextOffset;
-    }
-    readStream.end();
-    readStream.destroy = function() {
-      readStream.destroyed = true;
-    };
-    return readStream;
-  };
-  BufferSlicer.prototype.createWriteStream = function(options) {
-    var bufferSlicer = this;
-    options = options || {};
-    var writeStream = new Writable(options);
-    writeStream.start = options.start || 0;
-    writeStream.endOffset = options.end == null ? this.buffer.length : +options.end;
-    writeStream.bytesWritten = 0;
-    writeStream.pos = writeStream.start;
-    writeStream.destroyed = false;
-    writeStream._write = function(buffer, encoding, callback) {
-      if (writeStream.destroyed) return;
-      var end = writeStream.pos + buffer.length;
-      if (end > writeStream.endOffset) {
-        var err = new Error("maximum file length exceeded");
-        err.code = "ETOOBIG";
-        writeStream.destroyed = true;
-        callback(err);
-        return;
-      }
-      buffer.copy(bufferSlicer.buffer, writeStream.pos, 0, buffer.length);
-      writeStream.bytesWritten += buffer.length;
-      writeStream.pos = end;
-      writeStream.emit("progress");
-      callback();
-    };
-    writeStream.destroy = function() {
-      writeStream.destroyed = true;
-    };
-    return writeStream;
-  };
-  BufferSlicer.prototype.ref = function() {
-    this.refCount += 1;
-  };
-  BufferSlicer.prototype.unref = function() {
-    this.refCount -= 1;
-    if (this.refCount < 0) {
-      throw new Error("invalid unref");
-    }
-  };
-  function createFromBuffer(buffer, options) {
-    return new BufferSlicer(buffer, options);
-  }
-  function createFromFd(fd, options) {
-    return new FdSlicer(fd, options);
-  }
-  return fdSlicer;
-}
-var bufferCrc32;
-var hasRequiredBufferCrc32;
-function requireBufferCrc32() {
-  if (hasRequiredBufferCrc32) return bufferCrc32;
-  hasRequiredBufferCrc32 = 1;
-  var Buffer2 = require$$0$2.Buffer;
-  var CRC_TABLE = [
-    0,
-    1996959894,
-    3993919788,
-    2567524794,
-    124634137,
-    1886057615,
-    3915621685,
-    2657392035,
-    249268274,
-    2044508324,
-    3772115230,
-    2547177864,
-    162941995,
-    2125561021,
-    3887607047,
-    2428444049,
-    498536548,
-    1789927666,
-    4089016648,
-    2227061214,
-    450548861,
-    1843258603,
-    4107580753,
-    2211677639,
-    325883990,
-    1684777152,
-    4251122042,
-    2321926636,
-    335633487,
-    1661365465,
-    4195302755,
-    2366115317,
-    997073096,
-    1281953886,
-    3579855332,
-    2724688242,
-    1006888145,
-    1258607687,
-    3524101629,
-    2768942443,
-    901097722,
-    1119000684,
-    3686517206,
-    2898065728,
-    853044451,
-    1172266101,
-    3705015759,
-    2882616665,
-    651767980,
-    1373503546,
-    3369554304,
-    3218104598,
-    565507253,
-    1454621731,
-    3485111705,
-    3099436303,
-    671266974,
-    1594198024,
-    3322730930,
-    2970347812,
-    795835527,
-    1483230225,
-    3244367275,
-    3060149565,
-    1994146192,
-    31158534,
-    2563907772,
-    4023717930,
-    1907459465,
-    112637215,
-    2680153253,
-    3904427059,
-    2013776290,
-    251722036,
-    2517215374,
-    3775830040,
-    2137656763,
-    141376813,
-    2439277719,
-    3865271297,
-    1802195444,
-    476864866,
-    2238001368,
-    4066508878,
-    1812370925,
-    453092731,
-    2181625025,
-    4111451223,
-    1706088902,
-    314042704,
-    2344532202,
-    4240017532,
-    1658658271,
-    366619977,
-    2362670323,
-    4224994405,
-    1303535960,
-    984961486,
-    2747007092,
-    3569037538,
-    1256170817,
-    1037604311,
-    2765210733,
-    3554079995,
-    1131014506,
-    879679996,
-    2909243462,
-    3663771856,
-    1141124467,
-    855842277,
-    2852801631,
-    3708648649,
-    1342533948,
-    654459306,
-    3188396048,
-    3373015174,
-    1466479909,
-    544179635,
-    3110523913,
-    3462522015,
-    1591671054,
-    702138776,
-    2966460450,
-    3352799412,
-    1504918807,
-    783551873,
-    3082640443,
-    3233442989,
-    3988292384,
-    2596254646,
-    62317068,
-    1957810842,
-    3939845945,
-    2647816111,
-    81470997,
-    1943803523,
-    3814918930,
-    2489596804,
-    225274430,
-    2053790376,
-    3826175755,
-    2466906013,
-    167816743,
-    2097651377,
-    4027552580,
-    2265490386,
-    503444072,
-    1762050814,
-    4150417245,
-    2154129355,
-    426522225,
-    1852507879,
-    4275313526,
-    2312317920,
-    282753626,
-    1742555852,
-    4189708143,
-    2394877945,
-    397917763,
-    1622183637,
-    3604390888,
-    2714866558,
-    953729732,
-    1340076626,
-    3518719985,
-    2797360999,
-    1068828381,
-    1219638859,
-    3624741850,
-    2936675148,
-    906185462,
-    1090812512,
-    3747672003,
-    2825379669,
-    829329135,
-    1181335161,
-    3412177804,
-    3160834842,
-    628085408,
-    1382605366,
-    3423369109,
-    3138078467,
-    570562233,
-    1426400815,
-    3317316542,
-    2998733608,
-    733239954,
-    1555261956,
-    3268935591,
-    3050360625,
-    752459403,
-    1541320221,
-    2607071920,
-    3965973030,
-    1969922972,
-    40735498,
-    2617837225,
-    3943577151,
-    1913087877,
-    83908371,
-    2512341634,
-    3803740692,
-    2075208622,
-    213261112,
-    2463272603,
-    3855990285,
-    2094854071,
-    198958881,
-    2262029012,
-    4057260610,
-    1759359992,
-    534414190,
-    2176718541,
-    4139329115,
-    1873836001,
-    414664567,
-    2282248934,
-    4279200368,
-    1711684554,
-    285281116,
-    2405801727,
-    4167216745,
-    1634467795,
-    376229701,
-    2685067896,
-    3608007406,
-    1308918612,
-    956543938,
-    2808555105,
-    3495958263,
-    1231636301,
-    1047427035,
-    2932959818,
-    3654703836,
-    1088359270,
-    936918e3,
-    2847714899,
-    3736837829,
-    1202900863,
-    817233897,
-    3183342108,
-    3401237130,
-    1404277552,
-    615818150,
-    3134207493,
-    3453421203,
-    1423857449,
-    601450431,
-    3009837614,
-    3294710456,
-    1567103746,
-    711928724,
-    3020668471,
-    3272380065,
-    1510334235,
-    755167117
-  ];
-  if (typeof Int32Array !== "undefined") {
-    CRC_TABLE = new Int32Array(CRC_TABLE);
-  }
-  function ensureBuffer(input) {
-    if (Buffer2.isBuffer(input)) {
-      return input;
-    }
-    var hasNewBufferAPI = typeof Buffer2.alloc === "function" && typeof Buffer2.from === "function";
-    if (typeof input === "number") {
-      return hasNewBufferAPI ? Buffer2.alloc(input) : new Buffer2(input);
-    } else if (typeof input === "string") {
-      return hasNewBufferAPI ? Buffer2.from(input) : new Buffer2(input);
-    } else {
-      throw new Error("input must be buffer, number, or string, received " + typeof input);
-    }
-  }
-  function bufferizeInt(num) {
-    var tmp = ensureBuffer(4);
-    tmp.writeInt32BE(num, 0);
-    return tmp;
-  }
-  function _crc32(buf, previous) {
-    buf = ensureBuffer(buf);
-    if (Buffer2.isBuffer(previous)) {
-      previous = previous.readUInt32BE(0);
-    }
-    var crc = ~~previous ^ -1;
-    for (var n = 0; n < buf.length; n++) {
-      crc = CRC_TABLE[(crc ^ buf[n]) & 255] ^ crc >>> 8;
-    }
-    return crc ^ -1;
-  }
-  function crc32() {
-    return bufferizeInt(_crc32.apply(null, arguments));
-  }
-  crc32.signed = function() {
-    return _crc32.apply(null, arguments);
-  };
-  crc32.unsigned = function() {
-    return _crc32.apply(null, arguments) >>> 0;
-  };
-  bufferCrc32 = crc32;
-  return bufferCrc32;
-}
-var hasRequiredYauzl;
-function requireYauzl() {
-  if (hasRequiredYauzl) return yauzl;
-  hasRequiredYauzl = 1;
-  var fs2 = require$$0$3;
-  var zlib = require$$1$3;
-  var fd_slicer = requireFdSlicer();
-  var crc32 = requireBufferCrc32();
-  var util2 = require$$1$2;
-  var EventEmitter2 = require$$4$1.EventEmitter;
-  var Transform2 = require$$6$1.Transform;
-  var PassThrough = require$$6$1.PassThrough;
-  var Writable = require$$6$1.Writable;
-  yauzl.open = open;
-  yauzl.fromFd = fromFd;
-  yauzl.fromBuffer = fromBuffer;
-  yauzl.fromRandomAccessReader = fromRandomAccessReader;
-  yauzl.dosDateTimeToDate = dosDateTimeToDate;
-  yauzl.validateFileName = validateFileName;
-  yauzl.ZipFile = ZipFile;
-  yauzl.Entry = Entry;
-  yauzl.RandomAccessReader = RandomAccessReader;
-  function open(path2, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = null;
-    }
-    if (options == null) options = {};
-    if (options.autoClose == null) options.autoClose = true;
-    if (options.lazyEntries == null) options.lazyEntries = false;
-    if (options.decodeStrings == null) options.decodeStrings = true;
-    if (options.validateEntrySizes == null) options.validateEntrySizes = true;
-    if (options.strictFileNames == null) options.strictFileNames = false;
-    if (callback == null) callback = defaultCallback;
-    fs2.open(path2, "r", function(err, fd) {
-      if (err) return callback(err);
-      fromFd(fd, options, function(err2, zipfile) {
-        if (err2) fs2.close(fd, defaultCallback);
-        callback(err2, zipfile);
-      });
-    });
-  }
-  function fromFd(fd, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = null;
-    }
-    if (options == null) options = {};
-    if (options.autoClose == null) options.autoClose = false;
-    if (options.lazyEntries == null) options.lazyEntries = false;
-    if (options.decodeStrings == null) options.decodeStrings = true;
-    if (options.validateEntrySizes == null) options.validateEntrySizes = true;
-    if (options.strictFileNames == null) options.strictFileNames = false;
-    if (callback == null) callback = defaultCallback;
-    fs2.fstat(fd, function(err, stats) {
-      if (err) return callback(err);
-      var reader = fd_slicer.createFromFd(fd, { autoClose: true });
-      fromRandomAccessReader(reader, stats.size, options, callback);
-    });
-  }
-  function fromBuffer(buffer, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = null;
-    }
-    if (options == null) options = {};
-    options.autoClose = false;
-    if (options.lazyEntries == null) options.lazyEntries = false;
-    if (options.decodeStrings == null) options.decodeStrings = true;
-    if (options.validateEntrySizes == null) options.validateEntrySizes = true;
-    if (options.strictFileNames == null) options.strictFileNames = false;
-    var reader = fd_slicer.createFromBuffer(buffer, { maxChunkSize: 65536 });
-    fromRandomAccessReader(reader, buffer.length, options, callback);
-  }
-  function fromRandomAccessReader(reader, totalSize, options, callback) {
-    if (typeof options === "function") {
-      callback = options;
-      options = null;
-    }
-    if (options == null) options = {};
-    if (options.autoClose == null) options.autoClose = true;
-    if (options.lazyEntries == null) options.lazyEntries = false;
-    if (options.decodeStrings == null) options.decodeStrings = true;
-    var decodeStrings = !!options.decodeStrings;
-    if (options.validateEntrySizes == null) options.validateEntrySizes = true;
-    if (options.strictFileNames == null) options.strictFileNames = false;
-    if (callback == null) callback = defaultCallback;
-    if (typeof totalSize !== "number") throw new Error("expected totalSize parameter to be a number");
-    if (totalSize > Number.MAX_SAFE_INTEGER) {
-      throw new Error("zip file too large. only file sizes up to 2^52 are supported due to JavaScript's Number type being an IEEE 754 double.");
-    }
-    reader.ref();
-    var eocdrWithoutCommentSize = 22;
-    var maxCommentSize = 65535;
-    var bufferSize = Math.min(eocdrWithoutCommentSize + maxCommentSize, totalSize);
-    var buffer = newBuffer(bufferSize);
-    var bufferReadStart = totalSize - buffer.length;
-    readAndAssertNoEof(reader, buffer, 0, bufferSize, bufferReadStart, function(err) {
-      if (err) return callback(err);
-      for (var i = bufferSize - eocdrWithoutCommentSize; i >= 0; i -= 1) {
-        if (buffer.readUInt32LE(i) !== 101010256) continue;
-        var eocdrBuffer = buffer.slice(i);
-        var diskNumber = eocdrBuffer.readUInt16LE(4);
-        if (diskNumber !== 0) {
-          return callback(new Error("multi-disk zip files are not supported: found disk number: " + diskNumber));
-        }
-        var entryCount = eocdrBuffer.readUInt16LE(10);
-        var centralDirectoryOffset = eocdrBuffer.readUInt32LE(16);
-        var commentLength = eocdrBuffer.readUInt16LE(20);
-        var expectedCommentLength = eocdrBuffer.length - eocdrWithoutCommentSize;
-        if (commentLength !== expectedCommentLength) {
-          return callback(new Error("invalid comment length. expected: " + expectedCommentLength + ". found: " + commentLength));
-        }
-        var comment = decodeStrings ? decodeBuffer(eocdrBuffer, 22, eocdrBuffer.length, false) : eocdrBuffer.slice(22);
-        if (!(entryCount === 65535 || centralDirectoryOffset === 4294967295)) {
-          return callback(null, new ZipFile(reader, centralDirectoryOffset, totalSize, entryCount, comment, options.autoClose, options.lazyEntries, decodeStrings, options.validateEntrySizes, options.strictFileNames));
-        }
-        var zip64EocdlBuffer = newBuffer(20);
-        var zip64EocdlOffset = bufferReadStart + i - zip64EocdlBuffer.length;
-        readAndAssertNoEof(reader, zip64EocdlBuffer, 0, zip64EocdlBuffer.length, zip64EocdlOffset, function(err2) {
-          if (err2) return callback(err2);
-          if (zip64EocdlBuffer.readUInt32LE(0) !== 117853008) {
-            return callback(new Error("invalid zip64 end of central directory locator signature"));
-          }
-          var zip64EocdrOffset = readUInt64LE(zip64EocdlBuffer, 8);
-          var zip64EocdrBuffer = newBuffer(56);
-          readAndAssertNoEof(reader, zip64EocdrBuffer, 0, zip64EocdrBuffer.length, zip64EocdrOffset, function(err3) {
-            if (err3) return callback(err3);
-            if (zip64EocdrBuffer.readUInt32LE(0) !== 101075792) {
-              return callback(new Error("invalid zip64 end of central directory record signature"));
-            }
-            entryCount = readUInt64LE(zip64EocdrBuffer, 32);
-            centralDirectoryOffset = readUInt64LE(zip64EocdrBuffer, 48);
-            return callback(null, new ZipFile(reader, centralDirectoryOffset, totalSize, entryCount, comment, options.autoClose, options.lazyEntries, decodeStrings, options.validateEntrySizes, options.strictFileNames));
-          });
-        });
-        return;
-      }
-      callback(new Error("end of central directory record signature not found"));
-    });
-  }
-  util2.inherits(ZipFile, EventEmitter2);
-  function ZipFile(reader, centralDirectoryOffset, fileSize, entryCount, comment, autoClose, lazyEntries, decodeStrings, validateEntrySizes, strictFileNames) {
-    var self2 = this;
-    EventEmitter2.call(self2);
-    self2.reader = reader;
-    self2.reader.on("error", function(err) {
-      emitError(self2, err);
-    });
-    self2.reader.once("close", function() {
-      self2.emit("close");
-    });
-    self2.readEntryCursor = centralDirectoryOffset;
-    self2.fileSize = fileSize;
-    self2.entryCount = entryCount;
-    self2.comment = comment;
-    self2.entriesRead = 0;
-    self2.autoClose = !!autoClose;
-    self2.lazyEntries = !!lazyEntries;
-    self2.decodeStrings = !!decodeStrings;
-    self2.validateEntrySizes = !!validateEntrySizes;
-    self2.strictFileNames = !!strictFileNames;
-    self2.isOpen = true;
-    self2.emittedError = false;
-    if (!self2.lazyEntries) self2._readEntry();
-  }
-  ZipFile.prototype.close = function() {
-    if (!this.isOpen) return;
-    this.isOpen = false;
-    this.reader.unref();
-  };
-  function emitErrorAndAutoClose(self2, err) {
-    if (self2.autoClose) self2.close();
-    emitError(self2, err);
-  }
-  function emitError(self2, err) {
-    if (self2.emittedError) return;
-    self2.emittedError = true;
-    self2.emit("error", err);
-  }
-  ZipFile.prototype.readEntry = function() {
-    if (!this.lazyEntries) throw new Error("readEntry() called without lazyEntries:true");
-    this._readEntry();
-  };
-  ZipFile.prototype._readEntry = function() {
-    var self2 = this;
-    if (self2.entryCount === self2.entriesRead) {
-      setImmediate(function() {
-        if (self2.autoClose) self2.close();
-        if (self2.emittedError) return;
-        self2.emit("end");
-      });
-      return;
-    }
-    if (self2.emittedError) return;
-    var buffer = newBuffer(46);
-    readAndAssertNoEof(self2.reader, buffer, 0, buffer.length, self2.readEntryCursor, function(err) {
-      if (err) return emitErrorAndAutoClose(self2, err);
-      if (self2.emittedError) return;
-      var entry = new Entry();
-      var signature = buffer.readUInt32LE(0);
-      if (signature !== 33639248) return emitErrorAndAutoClose(self2, new Error("invalid central directory file header signature: 0x" + signature.toString(16)));
-      entry.versionMadeBy = buffer.readUInt16LE(4);
-      entry.versionNeededToExtract = buffer.readUInt16LE(6);
-      entry.generalPurposeBitFlag = buffer.readUInt16LE(8);
-      entry.compressionMethod = buffer.readUInt16LE(10);
-      entry.lastModFileTime = buffer.readUInt16LE(12);
-      entry.lastModFileDate = buffer.readUInt16LE(14);
-      entry.crc32 = buffer.readUInt32LE(16);
-      entry.compressedSize = buffer.readUInt32LE(20);
-      entry.uncompressedSize = buffer.readUInt32LE(24);
-      entry.fileNameLength = buffer.readUInt16LE(28);
-      entry.extraFieldLength = buffer.readUInt16LE(30);
-      entry.fileCommentLength = buffer.readUInt16LE(32);
-      entry.internalFileAttributes = buffer.readUInt16LE(36);
-      entry.externalFileAttributes = buffer.readUInt32LE(38);
-      entry.relativeOffsetOfLocalHeader = buffer.readUInt32LE(42);
-      if (entry.generalPurposeBitFlag & 64) return emitErrorAndAutoClose(self2, new Error("strong encryption is not supported"));
-      self2.readEntryCursor += 46;
-      buffer = newBuffer(entry.fileNameLength + entry.extraFieldLength + entry.fileCommentLength);
-      readAndAssertNoEof(self2.reader, buffer, 0, buffer.length, self2.readEntryCursor, function(err2) {
-        if (err2) return emitErrorAndAutoClose(self2, err2);
-        if (self2.emittedError) return;
-        var isUtf8 = (entry.generalPurposeBitFlag & 2048) !== 0;
-        entry.fileName = self2.decodeStrings ? decodeBuffer(buffer, 0, entry.fileNameLength, isUtf8) : buffer.slice(0, entry.fileNameLength);
-        var fileCommentStart = entry.fileNameLength + entry.extraFieldLength;
-        var extraFieldBuffer = buffer.slice(entry.fileNameLength, fileCommentStart);
-        entry.extraFields = [];
-        var i = 0;
-        while (i < extraFieldBuffer.length - 3) {
-          var headerId = extraFieldBuffer.readUInt16LE(i + 0);
-          var dataSize = extraFieldBuffer.readUInt16LE(i + 2);
-          var dataStart = i + 4;
-          var dataEnd = dataStart + dataSize;
-          if (dataEnd > extraFieldBuffer.length) return emitErrorAndAutoClose(self2, new Error("extra field length exceeds extra field buffer size"));
-          var dataBuffer = newBuffer(dataSize);
-          extraFieldBuffer.copy(dataBuffer, 0, dataStart, dataEnd);
-          entry.extraFields.push({
-            id: headerId,
-            data: dataBuffer
-          });
-          i = dataEnd;
-        }
-        entry.fileComment = self2.decodeStrings ? decodeBuffer(buffer, fileCommentStart, fileCommentStart + entry.fileCommentLength, isUtf8) : buffer.slice(fileCommentStart, fileCommentStart + entry.fileCommentLength);
-        entry.comment = entry.fileComment;
-        self2.readEntryCursor += buffer.length;
-        self2.entriesRead += 1;
-        if (entry.uncompressedSize === 4294967295 || entry.compressedSize === 4294967295 || entry.relativeOffsetOfLocalHeader === 4294967295) {
-          var zip64EiefBuffer = null;
-          for (var i = 0; i < entry.extraFields.length; i++) {
-            var extraField = entry.extraFields[i];
-            if (extraField.id === 1) {
-              zip64EiefBuffer = extraField.data;
-              break;
-            }
-          }
-          if (zip64EiefBuffer == null) {
-            return emitErrorAndAutoClose(self2, new Error("expected zip64 extended information extra field"));
-          }
-          var index = 0;
-          if (entry.uncompressedSize === 4294967295) {
-            if (index + 8 > zip64EiefBuffer.length) {
-              return emitErrorAndAutoClose(self2, new Error("zip64 extended information extra field does not include uncompressed size"));
-            }
-            entry.uncompressedSize = readUInt64LE(zip64EiefBuffer, index);
-            index += 8;
-          }
-          if (entry.compressedSize === 4294967295) {
-            if (index + 8 > zip64EiefBuffer.length) {
-              return emitErrorAndAutoClose(self2, new Error("zip64 extended information extra field does not include compressed size"));
-            }
-            entry.compressedSize = readUInt64LE(zip64EiefBuffer, index);
-            index += 8;
-          }
-          if (entry.relativeOffsetOfLocalHeader === 4294967295) {
-            if (index + 8 > zip64EiefBuffer.length) {
-              return emitErrorAndAutoClose(self2, new Error("zip64 extended information extra field does not include relative header offset"));
-            }
-            entry.relativeOffsetOfLocalHeader = readUInt64LE(zip64EiefBuffer, index);
-            index += 8;
-          }
-        }
-        if (self2.decodeStrings) {
-          for (var i = 0; i < entry.extraFields.length; i++) {
-            var extraField = entry.extraFields[i];
-            if (extraField.id === 28789) {
-              if (extraField.data.length < 6) {
-                continue;
-              }
-              if (extraField.data.readUInt8(0) !== 1) {
-                continue;
-              }
-              var oldNameCrc32 = extraField.data.readUInt32LE(1);
-              if (crc32.unsigned(buffer.slice(0, entry.fileNameLength)) !== oldNameCrc32) {
-                continue;
-              }
-              entry.fileName = decodeBuffer(extraField.data, 5, extraField.data.length, true);
-              break;
-            }
-          }
-        }
-        if (self2.validateEntrySizes && entry.compressionMethod === 0) {
-          var expectedCompressedSize = entry.uncompressedSize;
-          if (entry.isEncrypted()) {
-            expectedCompressedSize += 12;
-          }
-          if (entry.compressedSize !== expectedCompressedSize) {
-            var msg = "compressed/uncompressed size mismatch for stored file: " + entry.compressedSize + " != " + entry.uncompressedSize;
-            return emitErrorAndAutoClose(self2, new Error(msg));
-          }
-        }
-        if (self2.decodeStrings) {
-          if (!self2.strictFileNames) {
-            entry.fileName = entry.fileName.replace(/\\/g, "/");
-          }
-          var errorMessage = validateFileName(entry.fileName, self2.validateFileNameOptions);
-          if (errorMessage != null) return emitErrorAndAutoClose(self2, new Error(errorMessage));
-        }
-        self2.emit("entry", entry);
-        if (!self2.lazyEntries) self2._readEntry();
-      });
-    });
-  };
-  ZipFile.prototype.openReadStream = function(entry, options, callback) {
-    var self2 = this;
-    var relativeStart = 0;
-    var relativeEnd = entry.compressedSize;
-    if (callback == null) {
-      callback = options;
-      options = {};
-    } else {
-      if (options.decrypt != null) {
-        if (!entry.isEncrypted()) {
-          throw new Error("options.decrypt can only be specified for encrypted entries");
-        }
-        if (options.decrypt !== false) throw new Error("invalid options.decrypt value: " + options.decrypt);
-        if (entry.isCompressed()) {
-          if (options.decompress !== false) throw new Error("entry is encrypted and compressed, and options.decompress !== false");
-        }
-      }
-      if (options.decompress != null) {
-        if (!entry.isCompressed()) {
-          throw new Error("options.decompress can only be specified for compressed entries");
-        }
-        if (!(options.decompress === false || options.decompress === true)) {
-          throw new Error("invalid options.decompress value: " + options.decompress);
-        }
-      }
-      if (options.start != null || options.end != null) {
-        if (entry.isCompressed() && options.decompress !== false) {
-          throw new Error("start/end range not allowed for compressed entry without options.decompress === false");
-        }
-        if (entry.isEncrypted() && options.decrypt !== false) {
-          throw new Error("start/end range not allowed for encrypted entry without options.decrypt === false");
-        }
-      }
-      if (options.start != null) {
-        relativeStart = options.start;
-        if (relativeStart < 0) throw new Error("options.start < 0");
-        if (relativeStart > entry.compressedSize) throw new Error("options.start > entry.compressedSize");
-      }
-      if (options.end != null) {
-        relativeEnd = options.end;
-        if (relativeEnd < 0) throw new Error("options.end < 0");
-        if (relativeEnd > entry.compressedSize) throw new Error("options.end > entry.compressedSize");
-        if (relativeEnd < relativeStart) throw new Error("options.end < options.start");
-      }
-    }
-    if (!self2.isOpen) return callback(new Error("closed"));
-    if (entry.isEncrypted()) {
-      if (options.decrypt !== false) return callback(new Error("entry is encrypted, and options.decrypt !== false"));
-    }
-    self2.reader.ref();
-    var buffer = newBuffer(30);
-    readAndAssertNoEof(self2.reader, buffer, 0, buffer.length, entry.relativeOffsetOfLocalHeader, function(err) {
-      try {
-        if (err) return callback(err);
-        var signature = buffer.readUInt32LE(0);
-        if (signature !== 67324752) {
-          return callback(new Error("invalid local file header signature: 0x" + signature.toString(16)));
-        }
-        var fileNameLength = buffer.readUInt16LE(26);
-        var extraFieldLength = buffer.readUInt16LE(28);
-        var localFileHeaderEnd = entry.relativeOffsetOfLocalHeader + buffer.length + fileNameLength + extraFieldLength;
-        var decompress;
-        if (entry.compressionMethod === 0) {
-          decompress = false;
-        } else if (entry.compressionMethod === 8) {
-          decompress = options.decompress != null ? options.decompress : true;
-        } else {
-          return callback(new Error("unsupported compression method: " + entry.compressionMethod));
-        }
-        var fileDataStart = localFileHeaderEnd;
-        var fileDataEnd = fileDataStart + entry.compressedSize;
-        if (entry.compressedSize !== 0) {
-          if (fileDataEnd > self2.fileSize) {
-            return callback(new Error("file data overflows file bounds: " + fileDataStart + " + " + entry.compressedSize + " > " + self2.fileSize));
-          }
-        }
-        var readStream = self2.reader.createReadStream({
-          start: fileDataStart + relativeStart,
-          end: fileDataStart + relativeEnd
-        });
-        var endpointStream = readStream;
-        if (decompress) {
-          var destroyed = false;
-          var inflateFilter = zlib.createInflateRaw();
-          readStream.on("error", function(err2) {
-            setImmediate(function() {
-              if (!destroyed) inflateFilter.emit("error", err2);
-            });
-          });
-          readStream.pipe(inflateFilter);
-          if (self2.validateEntrySizes) {
-            endpointStream = new AssertByteCountStream(entry.uncompressedSize);
-            inflateFilter.on("error", function(err2) {
-              setImmediate(function() {
-                if (!destroyed) endpointStream.emit("error", err2);
-              });
-            });
-            inflateFilter.pipe(endpointStream);
-          } else {
-            endpointStream = inflateFilter;
-          }
-          endpointStream.destroy = function() {
-            destroyed = true;
-            if (inflateFilter !== endpointStream) inflateFilter.unpipe(endpointStream);
-            readStream.unpipe(inflateFilter);
-            readStream.destroy();
-          };
-        }
-        callback(null, endpointStream);
-      } finally {
-        self2.reader.unref();
-      }
-    });
-  };
-  function Entry() {
-  }
-  Entry.prototype.getLastModDate = function() {
-    return dosDateTimeToDate(this.lastModFileDate, this.lastModFileTime);
-  };
-  Entry.prototype.isEncrypted = function() {
-    return (this.generalPurposeBitFlag & 1) !== 0;
-  };
-  Entry.prototype.isCompressed = function() {
-    return this.compressionMethod === 8;
-  };
-  function dosDateTimeToDate(date, time) {
-    var day = date & 31;
-    var month = (date >> 5 & 15) - 1;
-    var year = (date >> 9 & 127) + 1980;
-    var millisecond = 0;
-    var second = (time & 31) * 2;
-    var minute = time >> 5 & 63;
-    var hour = time >> 11 & 31;
-    return new Date(year, month, day, hour, minute, second, millisecond);
-  }
-  function validateFileName(fileName) {
-    if (fileName.indexOf("\\") !== -1) {
-      return "invalid characters in fileName: " + fileName;
-    }
-    if (/^[a-zA-Z]:/.test(fileName) || /^\//.test(fileName)) {
-      return "absolute path: " + fileName;
-    }
-    if (fileName.split("/").indexOf("..") !== -1) {
-      return "invalid relative path: " + fileName;
-    }
-    return null;
-  }
-  function readAndAssertNoEof(reader, buffer, offset, length, position, callback) {
-    if (length === 0) {
-      return setImmediate(function() {
-        callback(null, newBuffer(0));
-      });
-    }
-    reader.read(buffer, offset, length, position, function(err, bytesRead) {
-      if (err) return callback(err);
-      if (bytesRead < length) {
-        return callback(new Error("unexpected EOF"));
-      }
-      callback();
-    });
-  }
-  util2.inherits(AssertByteCountStream, Transform2);
-  function AssertByteCountStream(byteCount) {
-    Transform2.call(this);
-    this.actualByteCount = 0;
-    this.expectedByteCount = byteCount;
-  }
-  AssertByteCountStream.prototype._transform = function(chunk, encoding, cb) {
-    this.actualByteCount += chunk.length;
-    if (this.actualByteCount > this.expectedByteCount) {
-      var msg = "too many bytes in the stream. expected " + this.expectedByteCount + ". got at least " + this.actualByteCount;
-      return cb(new Error(msg));
-    }
-    cb(null, chunk);
-  };
-  AssertByteCountStream.prototype._flush = function(cb) {
-    if (this.actualByteCount < this.expectedByteCount) {
-      var msg = "not enough bytes in the stream. expected " + this.expectedByteCount + ". got only " + this.actualByteCount;
-      return cb(new Error(msg));
-    }
-    cb();
-  };
-  util2.inherits(RandomAccessReader, EventEmitter2);
-  function RandomAccessReader() {
-    EventEmitter2.call(this);
-    this.refCount = 0;
-  }
-  RandomAccessReader.prototype.ref = function() {
-    this.refCount += 1;
-  };
-  RandomAccessReader.prototype.unref = function() {
-    var self2 = this;
-    self2.refCount -= 1;
-    if (self2.refCount > 0) return;
-    if (self2.refCount < 0) throw new Error("invalid unref");
-    self2.close(onCloseDone);
-    function onCloseDone(err) {
-      if (err) return self2.emit("error", err);
-      self2.emit("close");
-    }
-  };
-  RandomAccessReader.prototype.createReadStream = function(options) {
-    var start = options.start;
-    var end = options.end;
-    if (start === end) {
-      var emptyStream = new PassThrough();
-      setImmediate(function() {
-        emptyStream.end();
-      });
-      return emptyStream;
-    }
-    var stream = this._readStreamForRange(start, end);
-    var destroyed = false;
-    var refUnrefFilter = new RefUnrefFilter(this);
-    stream.on("error", function(err) {
-      setImmediate(function() {
-        if (!destroyed) refUnrefFilter.emit("error", err);
-      });
-    });
-    refUnrefFilter.destroy = function() {
-      stream.unpipe(refUnrefFilter);
-      refUnrefFilter.unref();
-      stream.destroy();
-    };
-    var byteCounter = new AssertByteCountStream(end - start);
-    refUnrefFilter.on("error", function(err) {
-      setImmediate(function() {
-        if (!destroyed) byteCounter.emit("error", err);
-      });
-    });
-    byteCounter.destroy = function() {
-      destroyed = true;
-      refUnrefFilter.unpipe(byteCounter);
-      refUnrefFilter.destroy();
-    };
-    return stream.pipe(refUnrefFilter).pipe(byteCounter);
-  };
-  RandomAccessReader.prototype._readStreamForRange = function(start, end) {
-    throw new Error("not implemented");
-  };
-  RandomAccessReader.prototype.read = function(buffer, offset, length, position, callback) {
-    var readStream = this.createReadStream({ start: position, end: position + length });
-    var writeStream = new Writable();
-    var written = 0;
-    writeStream._write = function(chunk, encoding, cb) {
-      chunk.copy(buffer, offset + written, 0, chunk.length);
-      written += chunk.length;
-      cb();
-    };
-    writeStream.on("finish", callback);
-    readStream.on("error", function(error) {
-      callback(error);
-    });
-    readStream.pipe(writeStream);
-  };
-  RandomAccessReader.prototype.close = function(callback) {
-    setImmediate(callback);
-  };
-  util2.inherits(RefUnrefFilter, PassThrough);
-  function RefUnrefFilter(context) {
-    PassThrough.call(this);
-    this.context = context;
-    this.context.ref();
-    this.unreffedYet = false;
-  }
-  RefUnrefFilter.prototype._flush = function(cb) {
-    this.unref();
-    cb();
-  };
-  RefUnrefFilter.prototype.unref = function(cb) {
-    if (this.unreffedYet) return;
-    this.unreffedYet = true;
-    this.context.unref();
-  };
-  var cp437 = "\0☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼ !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~⌂ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ";
-  function decodeBuffer(buffer, start, end, isUtf8) {
-    if (isUtf8) {
-      return buffer.toString("utf8", start, end);
-    } else {
-      var result = "";
-      for (var i = start; i < end; i++) {
-        result += cp437[buffer[i]];
-      }
-      return result;
-    }
-  }
-  function readUInt64LE(buffer, offset) {
-    var lower32 = buffer.readUInt32LE(offset);
-    var upper32 = buffer.readUInt32LE(offset + 4);
-    return upper32 * 4294967296 + lower32;
-  }
-  var newBuffer;
-  if (typeof Buffer.allocUnsafe === "function") {
-    newBuffer = function(len) {
-      return Buffer.allocUnsafe(len);
-    };
-  } else {
-    newBuffer = function(len) {
-      return new Buffer(len);
-    };
-  }
-  function defaultCallback(err) {
-    if (err) throw err;
-  }
-  return yauzl;
-}
-var extractZip;
-var hasRequiredExtractZip;
-function requireExtractZip() {
-  if (hasRequiredExtractZip) return extractZip;
-  hasRequiredExtractZip = 1;
-  const debug = requireSrc()("extract-zip");
-  const { createWriteStream: createWriteStream2, promises: fs2 } = require$$0$3;
-  const getStream2 = requireGetStream();
-  const path2 = require$$3$2;
-  const { promisify: promisify2 } = require$$1$2;
-  const stream = require$$6$1;
-  const yauzl2 = requireYauzl();
-  const openZip = promisify2(yauzl2.open);
-  const pipeline2 = promisify2(stream.pipeline);
-  class Extractor {
-    constructor(zipPath, opts) {
-      this.zipPath = zipPath;
-      this.opts = opts;
-    }
-    async extract() {
-      debug("opening", this.zipPath, "with opts", this.opts);
-      this.zipfile = await openZip(this.zipPath, { lazyEntries: true });
-      this.canceled = false;
-      return new Promise((resolve2, reject) => {
-        this.zipfile.on("error", (err) => {
-          this.canceled = true;
-          reject(err);
-        });
-        this.zipfile.readEntry();
-        this.zipfile.on("close", () => {
-          if (!this.canceled) {
-            debug("zip extraction complete");
-            resolve2();
-          }
-        });
-        this.zipfile.on("entry", async (entry) => {
-          if (this.canceled) {
-            debug("skipping entry", entry.fileName, { cancelled: this.canceled });
-            return;
-          }
-          debug("zipfile entry", entry.fileName);
-          if (entry.fileName.startsWith("__MACOSX/")) {
-            this.zipfile.readEntry();
-            return;
-          }
-          const destDir = path2.dirname(path2.join(this.opts.dir, entry.fileName));
-          try {
-            await fs2.mkdir(destDir, { recursive: true });
-            const canonicalDestDir = await fs2.realpath(destDir);
-            const relativeDestDir = path2.relative(this.opts.dir, canonicalDestDir);
-            if (relativeDestDir.split(path2.sep).includes("..")) {
-              throw new Error(`Out of bound path "${canonicalDestDir}" found while processing file ${entry.fileName}`);
-            }
-            await this.extractEntry(entry);
-            debug("finished processing", entry.fileName);
-            this.zipfile.readEntry();
-          } catch (err) {
-            this.canceled = true;
-            this.zipfile.close();
-            reject(err);
-          }
-        });
-      });
-    }
-    async extractEntry(entry) {
-      if (this.canceled) {
-        debug("skipping entry extraction", entry.fileName, { cancelled: this.canceled });
-        return;
-      }
-      if (this.opts.onEntry) {
-        this.opts.onEntry(entry, this.zipfile);
-      }
-      const dest = path2.join(this.opts.dir, entry.fileName);
-      const mode = entry.externalFileAttributes >> 16 & 65535;
-      const IFMT = 61440;
-      const IFDIR = 16384;
-      const IFLNK = 40960;
-      const symlink = (mode & IFMT) === IFLNK;
-      let isDir = (mode & IFMT) === IFDIR;
-      if (!isDir && entry.fileName.endsWith("/")) {
-        isDir = true;
-      }
-      const madeBy = entry.versionMadeBy >> 8;
-      if (!isDir) isDir = madeBy === 0 && entry.externalFileAttributes === 16;
-      debug("extracting entry", { filename: entry.fileName, isDir, isSymlink: symlink });
-      const procMode = this.getExtractedMode(mode, isDir) & 511;
-      const destDir = isDir ? dest : path2.dirname(dest);
-      const mkdirOptions = { recursive: true };
-      if (isDir) {
-        mkdirOptions.mode = procMode;
-      }
-      debug("mkdir", { dir: destDir, ...mkdirOptions });
-      await fs2.mkdir(destDir, mkdirOptions);
-      if (isDir) return;
-      debug("opening read stream", dest);
-      const readStream = await promisify2(this.zipfile.openReadStream.bind(this.zipfile))(entry);
-      if (symlink) {
-        const link = await getStream2(readStream);
-        debug("creating symlink", link, dest);
-        await fs2.symlink(link, dest);
-      } else {
-        await pipeline2(readStream, createWriteStream2(dest, { mode: procMode }));
-      }
-    }
-    getExtractedMode(entryMode, isDir) {
-      let mode = entryMode;
-      if (mode === 0) {
-        if (isDir) {
-          if (this.opts.defaultDirMode) {
-            mode = parseInt(this.opts.defaultDirMode, 10);
-          }
-          if (!mode) {
-            mode = 493;
-          }
-        } else {
-          if (this.opts.defaultFileMode) {
-            mode = parseInt(this.opts.defaultFileMode, 10);
-          }
-          if (!mode) {
-            mode = 420;
-          }
-        }
-      }
-      return mode;
-    }
-  }
-  extractZip = async function(zipPath, opts) {
-    debug("creating target directory", opts.dir);
-    if (!path2.isAbsolute(opts.dir)) {
-      throw new Error("Target directory is expected to be absolute");
-    }
-    await fs2.mkdir(opts.dir, { recursive: true });
-    opts.dir = await fs2.realpath(opts.dir);
-    return new Extractor(zipPath, opts).extract();
-  };
-  return extractZip;
-}
-var extractZipExports = requireExtractZip();
-const extract = /* @__PURE__ */ getDefaultExportFromCjs(extractZipExports);
+  return fs;
+})();
 const RELEASE_BRANCH = "release";
 const PROGRESS_INTERVAL_MS = 150;
 const MIN_ASAR_BYTES = 1024 * 1024;
@@ -15702,7 +13250,7 @@ function readStagedUpdate() {
   const pending = join(updatesRoot(), meta.pendingAsar);
   let size = 0;
   try {
-    size = statSync(pending).size;
+    size = ofs.statSync(pending).size;
   } catch {
     size = 0;
   }
@@ -15891,9 +13439,11 @@ async function downloadAsar(tip, name, onProgress) {
   rmSync(zipPath, { force: true });
   renameSync(part, zipPath);
   onProgress?.({ name, phase: "extract", percent: 100, message: m("git.zipUnpacking") });
-  await extract(zipPath, { dir });
+  console.log(`[update] extracting ${zipPath} -> ${dir}`);
+  await extractZip(zipPath, dir);
+  console.log(`[update] extract finished: ${dir}`);
   const stagedAsar = join(dir, "app.asar");
-  if (!existsSync(stagedAsar) || statSync(stagedAsar).size < MIN_ASAR_BYTES)
+  if (!ofs.existsSync(stagedAsar) || ofs.statSync(stagedAsar).size < MIN_ASAR_BYTES)
     throw new Error(m("git.asarExtractFailed"));
   const metaFile = join(root, "update-meta.json");
   let prev = {};
@@ -15967,7 +13517,9 @@ async function checkAsarUpdate(name, dir) {
 async function applyAsarUpdate(name, onProgress) {
   try {
     const tip = await fetchTip(name, onProgress);
+    console.log(`[update] ${name}: release tip ${tip.version} (${tip.commit.slice(0, 8)})`);
     await downloadAsar(tip, name, onProgress);
+    console.log(`[update] ${name}: staged ${tip.version}, restart to apply`);
     return {
       name,
       ok: true,
@@ -15975,7 +13527,100 @@ async function applyAsarUpdate(name, onProgress) {
       message: m("git.asarDownloaded", { version: tip.version })
     };
   } catch (err) {
+    console.error(`[update] ${name}: apply failed:`, err);
     return { name, ok: false, updated: false, error: err.message };
+  }
+}
+function psStr(s) {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+function relaunchToApplyStaged() {
+  if (!app$1.isPackaged) return false;
+  const metaFile = join(updatesRoot(), "update-meta.json");
+  let meta = null;
+  try {
+    meta = JSON.parse(readFileSync(metaFile, "utf-8"));
+  } catch {
+    meta = null;
+  }
+  const pending = meta?.pendingAsar;
+  if (!pending) return false;
+  const stagedAsar = join(updatesRoot(), pending);
+  let size = 0;
+  try {
+    size = ofs.statSync(stagedAsar).size;
+  } catch {
+    size = 0;
+  }
+  if (size < MIN_ASAR_BYTES) return false;
+  const stagedDir = dirname(stagedAsar);
+  const resourcesDir = dirname(updatesRoot());
+  const targetAsar = join(resourcesDir, "app.asar");
+  const stagedUnpacked = join(stagedDir, "app.asar.unpacked");
+  const targetUnpacked = join(resourcesDir, "app.asar.unpacked");
+  const exe = app$1.getPath("exe");
+  const noise = /* @__PURE__ */ new Set([
+    "--autostart",
+    "--dsh-relaunched",
+    "--dsh-boot-retry",
+    "--dsh-asar-launched"
+  ]);
+  const relaunchArgs = process.argv.slice(1).filter((a) => !noise.has(a) && !a.startsWith("--app-path=")).concat("--dsh-relaunched");
+  const ps1 = join(updatesRoot(), "apply-update.ps1");
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$appPid = ${process.pid}`,
+    `$exe = ${psStr(exe)}`,
+    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(", ")})`,
+    `$srcAsar = ${psStr(stagedAsar)}`,
+    `$dstAsar = ${psStr(targetAsar)}`,
+    `$srcUnpacked = ${psStr(stagedUnpacked)}`,
+    `$dstUnpacked = ${psStr(targetUnpacked)}`,
+    `$metaFile = ${psStr(metaFile)}`,
+    // Wait for the app to actually exit (this PID gone), then a short grace for the OS to free
+    // the asar / native handles.
+    "while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }",
+    "Start-Sleep -Milliseconds 800",
+    // Keep a single rollback copy of the version we are replacing.
+    'if (Test-Path $dstAsar) { Copy-Item $dstAsar "$dstAsar.bak" -Force }',
+    // Retry the copy while a lingering AV/defender handle releases (up to ~10s).
+    "for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $srcAsar $dstAsar -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }",
+    // node-pty's natives live beside the asar; mirror them too (robocopy /MIR returns 0-7 on ok).
+    "if (Test-Path $srcUnpacked) { robocopy $srcUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }",
+    // Clear pending so a later plain launch does not re-apply; record what is now current.
+    // WriteAllText (not Set-Content -Encoding UTF8) so PowerShell 5.1 emits no BOM — the main
+    // process JSON.parses this file and a leading \uFEFF would make it throw and mis-report "none".
+    "try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.currentAsar = $m.pendingAsar; $m.pendingAsar = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}",
+    "Start-Process -FilePath $exe -ArgumentList $relaunchArgs"
+  ].join("\r\n");
+  try {
+    mkdirSync(updatesRoot(), { recursive: true });
+    writeFileSync$1(ps1, script, "utf-8");
+    const helper = spawn(
+      "cmd.exe",
+      [
+        "/c",
+        "start",
+        "",
+        "/min",
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+        ps1
+      ],
+      { detached: true, stdio: "ignore", windowsHide: true }
+    );
+    helper.on("error", (err) => console.error("[update] swap helper spawn failed:", err));
+    helper.unref();
+    console.log(`[update] scheduled in-place swap of ${pending} into ${targetAsar}`);
+    return true;
+  } catch (err) {
+    console.error("[update] failed to schedule staged asar swap:", err);
+    return false;
   }
 }
 const DEFAULT_PROFILE = "web";
@@ -16104,6 +13749,9 @@ function validateProfileName(profile) {
   }
   if (p.toLowerCase() === "desktop") throw new Error(m("dsh.reservedProfile"));
   return p;
+}
+function isDshInstalled() {
+  return dshBinCandidates().some((p) => existsSync(p));
 }
 async function getDshStatus(profile = DEFAULT_PROFILE) {
   const safe = validateProfileName(profile);
@@ -16421,6 +14069,7 @@ const dsh = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty(
   dshSpawnCommand,
   getDshStatus,
   installDshPlugin,
+  isDshInstalled,
   listDshPlugins,
   pnpmBinDirs,
   repairPnpmCmd,
@@ -16464,6 +14113,9 @@ function resolveOpenclawCommand() {
 }
 function openclawEnv(extra = {}) {
   return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...extra });
+}
+function isOpenclawInstalled() {
+  return openclawEntryCandidates().some((p) => existsSync(p));
 }
 function openclawVersion() {
   const roots = [
@@ -16569,21 +14221,50 @@ function ensureDefaultOpenclawPage() {
   } catch {
   }
 }
+function createDshWebPage() {
+  const dir = join(resolvePagesDir(), "dsh-web");
+  mkdirSync(dir, { recursive: true });
+  const manifest = {
+    name: "DSH (web)",
+    description: {
+      zh: msgIn("zh", "dsh.profilePageDesc", { profile: "web" }),
+      en: msgIn("en", "dsh.profilePageDesc", { profile: "web" })
+    },
+    kind: "dsh",
+    dsh: { profile: "web", port: 8899 },
+    envVars: [
+      {
+        key: "DSH_HOME",
+        label: {
+          zh: msgIn("zh", "dsh.homeLabel"),
+          en: msgIn("en", "dsh.homeLabel")
+        },
+        defaultPath: "~/.dsh",
+        description: {
+          zh: msgIn("zh", "dsh.homeDesc"),
+          en: msgIn("en", "dsh.homeDesc")
+        }
+      }
+    ]
+  };
+  writeFileSync$1(join(dir, "container.json"), JSON.stringify(manifest, null, 2));
+}
 function ensureBuiltinPages() {
   removeLegacyBuiltinPages();
   const destRoot = resolvePagesDir();
   const srcRoot = app$1.isPackaged ? join(process.resourcesPath || "", "pages") : destRoot;
   for (const id2 of ["dsh-web"]) {
-    const src2 = join(srcRoot, id2);
+    const src = join(srcRoot, id2);
     const dest = join(destRoot, id2);
-    if (!existsSync(src2)) continue;
+    if (!existsSync(src)) continue;
     if (existsSync(join(dest, "container.json"))) continue;
     try {
       mkdirSync(dest, { recursive: true });
-      cpSync(src2, dest, { recursive: true });
+      cpSync(src, dest, { recursive: true });
     } catch {
     }
   }
+  if (!existsSync(join(destRoot, "dsh-web", "container.json"))) createDshWebPage();
   try {
     const s = getSettings();
     const alive = (pageId) => existsSync(join(destRoot, pageId, "container.json"));
@@ -16624,6 +14305,11 @@ function openclawSpawnSpec(port) {
   mkdirSync(home, { recursive: true });
   const p = Number(port) > 0 ? Number(port) : OPENCLAW_DEFAULT_PORT;
   ensureOpenclawConfig(home, p);
+  try {
+    initializeOpenclawToken();
+  } catch (err) {
+    console.warn("[openclaw] durable gateway token seed failed:", err.message);
+  }
   return {
     cmd: resolved.cmd,
     // `gateway` is a command group; the foreground runner is `gateway run`. Bare
@@ -16688,7 +14374,9 @@ function initializeOpenclawToken(rotate = false) {
         cfg = parsed;
       }
     } catch (err) {
-      throw new Error(m("openclaw.configUnreadable", { path: cfgPath, err: err.message }));
+      throw new Error(
+        m("openclaw.configUnreadable", { path: cfgPath, err: err.message })
+      );
     }
   }
   const gateway = cfg.gateway && typeof cfg.gateway === "object" ? cfg.gateway : {};
@@ -16724,6 +14412,7 @@ const openclaw = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   getOpenclawGatewayToken,
   getOpenclawStatus,
   initializeOpenclawToken,
+  isOpenclawInstalled,
   openclawSpawnSpec,
   openclawVersion,
   resolveOpenclawLaunchUrl
@@ -16779,7 +14468,9 @@ async function checkPage(p) {
       hasUpdate: false,
       source: "builtin",
       action: "none",
-      canAutoUpdate: false
+      canAutoUpdate: false,
+      // lets the panel offer 重置 (re-seed pages/<id> from the bundled original)
+      pageId: p.id
     };
   }
   const gitRes = await checkOne(p.name, p.dir, false);
@@ -16838,8 +14529,8 @@ async function computeAll(pages) {
   return Promise.all([
     // Both packaged and dev detect the container's own update the same way: compare the
     // running version against the `release` branch tip (over-the-air app.asar channel).
-    // A packaged install swaps the asar at boot; a dev checkout downloads/stages it but
-    // boot.cjs is not on its launch path, so applying takes effect only once packaged.
+    // On relaunch, relaunchToApplyStaged swaps a staged asar into resources/ in place
+    // (packaged only — a dev checkout just stages the download, since out/ isn't the running asar).
     checkAsarUpdate(name, resolveInstallDir()),
     ...pages.filter((p) => !p.id.startsWith("__")).map(checkPage),
     checkBuiltin(
@@ -16901,11 +14592,11 @@ async function updateDshSelf() {
     mkdirSync(root, { recursive: true });
     writeFileSync$1(join(root, ".npmrc"), `registry=${REGISTRY}
 `);
-    const node2 = getNodeExePath();
+    const node = getNodeExePath();
     const npmCli = bundledNpmCli();
     if (!existsSync(npmCli)) throw new Error(m("upd.npmMissing", { npm: npmCli }));
     await runNpm(
-      node2,
+      node,
       [
         npmCli,
         "install",
@@ -16921,7 +14612,7 @@ async function updateDshSelf() {
     );
     if (!existsSync(join(root, "pnpm.cmd")))
       await runNpm(
-        node2,
+        node,
         [
           npmCli,
           "install",
@@ -16958,11 +14649,11 @@ async function reprovisionOpenclaw() {
     mkdirSync(root, { recursive: true });
     writeFileSync$1(join(root, ".npmrc"), `registry=${REGISTRY}
 `);
-    const node2 = getNodeExePath();
+    const node = getNodeExePath();
     const npmCli = bundledNpmCli();
     if (!existsSync(npmCli)) throw new Error(m("upd.npmMissing", { npm: npmCli }));
     await runNpm(
-      node2,
+      node,
       [
         npmCli,
         "install",
@@ -16991,7 +14682,20 @@ async function reprovisionOpenclaw() {
 async function provisionBuiltin(kind) {
   return kind === "dsh" ? updateDshSelf() : reprovisionOpenclaw();
 }
-async function performUpdate(target, onProgress) {
+const inFlightUpdates = /* @__PURE__ */ new Map();
+function performUpdate(target, onProgress) {
+  const running = inFlightUpdates.get(target.name);
+  if (running) {
+    console.log(`[update] ${target.name}: update already in flight, joining`);
+    return running;
+  }
+  const done = runUpdate(target, onProgress).finally(() => {
+    inFlightUpdates.delete(target.name);
+  });
+  inFlightUpdates.set(target.name, done);
+  return done;
+}
+async function runUpdate(target, onProgress) {
   switch (target.action) {
     case "pull":
       return performUpdate$1({ name: target.name, dir: target.dir });
@@ -17242,6 +14946,7 @@ function registerIpc(registry2) {
     try {
       const res = await provisionBuiltin(kind);
       clearUpdateCache();
+      registry2.emitChanged();
       return ok(res);
     } catch (err) {
       return fail(err);
@@ -17249,6 +14954,7 @@ function registerIpc(registry2) {
   });
   ipcMain$1.handle(IPC.ListPages, async () => {
     registry2.reconcile();
+    await registry2.refreshRuntimePresence().catch(() => void 0);
     return ok(registry2.list());
   });
   ipcMain$1.handle(IPC.StartPage, async (_e, id2) => {
@@ -17278,7 +14984,14 @@ function registerIpc(registry2) {
         if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p);
       };
       try {
-        const dirName = await installFromGit(resolvePagesDir(), repoUrl, name, port, void 0, onProgress);
+        const dirName = await installFromGit(
+          resolvePagesDir(),
+          repoUrl,
+          name,
+          port,
+          void 0,
+          onProgress
+        );
         registry2.reconcile();
         clearUpdateCache();
         return ok(dirName);
@@ -17339,6 +15052,23 @@ function registerIpc(registry2) {
         updateSettings({ autoStartPages: s.autoStartPages.filter((x) => x !== id2) });
       if (s.defaultView.kind === "page" && s.defaultView.pageId === id2)
         setDefaultView({ kind: "none" });
+      return ok(true);
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ResetBuiltinPage, (_e, id2) => {
+    try {
+      if (!BUILTIN_PAGE_IDS.has(id2)) return fail(new Error(m("ipc.resetNotBuiltin")));
+      const wasRunning = registry2.get(id2)?.status === "running";
+      registry2.stop(id2);
+      rmSync(join(resolvePagesDir(), id2), { recursive: true, force: true });
+      ensureDefaultOpenclawPage();
+      ensureBuiltinPages();
+      registry2.reconcile();
+      if (wasRunning) {
+        registry2.start(id2).catch((err) => console.error(`[page:${id2}] reset auto-start failed:`, err));
+      }
       return ok(true);
     } catch (err) {
       return fail(err);
@@ -17447,9 +15177,17 @@ function registerIpc(registry2) {
     }
   });
   ipcMain$1.handle(IPC.RelaunchApp, () => {
+    if (relaunchToApplyStaged()) {
+      setTimeout(() => app$1.exit(0), 700);
+      return ok(true);
+    }
     const args = process.argv.slice(1).filter((a) => a !== "--autostart");
     app$1.relaunch({ args: [...args, "--dsh-relaunched"] });
     app$1.exit(0);
+    return ok(true);
+  });
+  ipcMain$1.handle(IPC.QuitApp, () => {
+    app$1.quit();
     return ok(true);
   });
   const ptyManager = new PtyManager();
@@ -17669,22 +15407,25 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
-  ipcMain$1.handle(IPC.OpenclawInitToken, (_e, rotate) => {
-    try {
-      const { token, created } = initializeOpenclawToken(Boolean(rotate));
-      let restarted = false;
-      const page = registry2.get("openclaw");
-      if (page && page.status === "running") {
-        restarted = true;
-        registry2.restart("openclaw").catch((err) => {
-          console.warn("[openclaw] token restart failed (ignored):", err.message);
-        });
+  ipcMain$1.handle(
+    IPC.OpenclawInitToken,
+    (_e, rotate) => {
+      try {
+        const { token, created } = initializeOpenclawToken(Boolean(rotate));
+        let restarted = false;
+        const page = registry2.get("openclaw");
+        if (page && page.status === "running") {
+          restarted = true;
+          registry2.restart("openclaw").catch((err) => {
+            console.warn("[openclaw] token restart failed (ignored):", err.message);
+          });
+        }
+        return ok({ token, created, restarted });
+      } catch (err) {
+        return fail(err);
       }
-      return ok({ token, created, restarted });
-    } catch (err) {
-      return fail(err);
     }
-  });
+  );
 }
 let sequence = 0;
 function nextId() {
@@ -17770,7 +15511,7 @@ function registerDownloadHandling() {
 }
 const icon = join$1(import.meta.dirname, "../../resources/icon.png");
 function ensureAsciiUserData() {
-  const asciiLeaf = "dsh-desktop-container";
+  const asciiLeaf = "DesktopContainer";
   try {
     const current = app$1.getPath("userData");
     if (!/[^\x20-\x7e]/.test(current)) return;
@@ -17838,9 +15579,9 @@ function ensureUnpackedForUpdate() {
     const resources = join(dirname(app$1.getPath("exe")), "resources");
     const appPath = app$1.getAppPath();
     if (!appPath.startsWith(join(resources, "updates"))) return;
-    const src2 = join(resources, "app.asar.unpacked");
+    const src = join(resources, "app.asar.unpacked");
     const dst = join(dirname(appPath), "app.asar.unpacked");
-    if (existsSync(src2) && !existsSync(dst)) cpSync(src2, dst, { recursive: true });
+    if (existsSync(src) && !existsSync(dst)) cpSync(src, dst, { recursive: true });
   } catch (err) {
     console.warn("[container] unpacked-copy for update failed (ignored):", err.message);
   }
@@ -17878,9 +15619,13 @@ function createWindow() {
     return { action: "deny" };
   });
   mainWindow.on("close", (e) => {
-    if (!isQuitting && getSettings().minimizeToTray) {
+    if (isQuitting) return;
+    if (getSettings().minimizeToTray) {
       e.preventDefault();
       mainWindow?.hide();
+    } else {
+      e.preventDefault();
+      confirmAndQuit();
     }
   });
   if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
@@ -17903,6 +15648,15 @@ function showWindow() {
     mainWindow.focus();
   }
 }
+function confirmAndQuit() {
+  if (!mainWindow) {
+    isQuitting = true;
+    app$1.quit();
+    return;
+  }
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.webContents.send(IPC.OnQuitConfirm);
+}
 function rebuildTrayMenu() {
   if (!tray || !registry) return;
   const running = registry.running();
@@ -17923,23 +15677,7 @@ function rebuildTrayMenu() {
     { type: "separator" },
     {
       label: m("tray.quit"),
-      click: () => {
-        const running2 = registry?.running().length ?? 0;
-        dialog.showMessageBox({
-          type: "warning",
-          title: m("tray.quitConfirmTitle"),
-          message: m("tray.quitConfirm"),
-          detail: running2 ? `Running pages: ${running2}` : void 0,
-          buttons: [m("tray.quitYes"), m("tray.quitNo")],
-          defaultId: 1,
-          // Enter lands on Cancel — quitting is the destructive branch
-          cancelId: 1
-        }).then(({ response }) => {
-          if (response !== 0) return;
-          isQuitting = true;
-          app$1.quit();
-        }).catch(() => void 0);
-      }
+      click: () => confirmAndQuit()
     }
   ];
   tray.setToolTip(m("tray.tooltip", { n: running.length }));
@@ -17985,7 +15723,7 @@ if (!gotLock) {
     markBootOk();
     startHidden = process.argv.includes("--autostart") || app$1.getLoginItemSettings().wasOpenedAtLogin;
     applyLaunchAtStartup(getSettings().launchAtStartup);
-    app$1.on("browser-window-created", (_, window2) => optimizer.watchWindowShortcuts(window2));
+    app$1.on("browser-window-created", (_, window) => optimizer.watchWindowShortcuts(window));
     app$1.on("web-contents-created", (_e, contents) => {
       if (contents.getType() === "webview") {
         contents.setWindowOpenHandler(({ url }) => {

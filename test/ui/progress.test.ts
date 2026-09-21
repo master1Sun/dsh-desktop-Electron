@@ -47,6 +47,7 @@ function makeContainerMock(): Record<string, unknown> {
     onNativeTheme: () => () => undefined,
     getIsMaximized: () => Promise.resolve(ok(false)),
     onMaximizedChanged: () => () => undefined,
+    onQuitConfirm: () => () => undefined,
     onStateChanged: () => () => undefined,
     onOpenTerminalPage: () => () => undefined,
     onPageProgress: () => () => undefined,

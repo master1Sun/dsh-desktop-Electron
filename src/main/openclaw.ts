@@ -80,6 +80,15 @@ function openclawEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...extra })
 }
 
+/**
+ * Cheap synchronous "is the openclaw CLI provisioned" check, for the same page auto-start
+ * guard that `isDshInstalled` serves: a missing entry makes `openclawSpawnSpec` throw, which
+ * would only log a failed start on every launch.
+ */
+export function isOpenclawInstalled(): boolean {
+  return openclawEntryCandidates().some((p) => existsSync(p))
+}
+
 /** Sync version read for the update table — the async CLI probe can't run there. */
 export function openclawVersion(): string | undefined {
   const roots = [
@@ -193,9 +202,7 @@ export function ensureDefaultOpenclawPage(): void {
     // metas with the old {envRoot} default also need refreshing (home now defaults to ~/.openclaw).
     try {
       const raw = JSON.parse(readFileSync(metaFile, 'utf-8')) as Record<string, unknown>
-      const vars = Array.isArray(raw.envVars)
-        ? (raw.envVars as Array<Record<string, unknown>>)
-        : []
+      const vars = Array.isArray(raw.envVars) ? (raw.envVars as Array<Record<string, unknown>>) : []
       const stale =
         !vars.length ||
         vars.some((v) => v?.key === 'OPENCLAW_HOME' && v?.defaultPath === '{envRoot}/openclaw')
@@ -212,6 +219,42 @@ export function ensureDefaultOpenclawPage(): void {
   } catch {
     /* best-effort; a writable pages/ dir may be absent in odd setups */
   }
+}
+
+/**
+ * Code-side seed for the builtin dsh-web manifest — the dsh twin of createOpenclawPage, kept
+ * in sync with pages/dsh-web/container.json. Normally the page is file-copied from
+ * resources/pages (packaged) or already lives in the repo's pages/ (dev), but dev seeds FROM
+ * the same folder it seeds INTO, so a 重置 (delete + re-seed) there would leave nothing to
+ * copy — this writer guarantees the builtin page always comes back in both modes.
+ */
+function createDshWebPage(): void {
+  const dir = join(resolvePagesDir(), 'dsh-web')
+  mkdirSync(dir, { recursive: true })
+  const manifest: ContainerManifest = {
+    name: 'DSH (web)',
+    description: {
+      zh: msgIn('zh', 'dsh.profilePageDesc', { profile: 'web' }),
+      en: msgIn('en', 'dsh.profilePageDesc', { profile: 'web' })
+    },
+    kind: 'dsh',
+    dsh: { profile: 'web', port: 8899 },
+    envVars: [
+      {
+        key: 'DSH_HOME',
+        label: {
+          zh: msgIn('zh', 'dsh.homeLabel'),
+          en: msgIn('en', 'dsh.homeLabel')
+        },
+        defaultPath: '~/.dsh',
+        description: {
+          zh: msgIn('zh', 'dsh.homeDesc'),
+          en: msgIn('en', 'dsh.homeDesc')
+        }
+      }
+    ]
+  }
+  writeFileSync(join(dir, 'container.json'), JSON.stringify(manifest, null, 2))
 }
 
 /**
@@ -238,6 +281,9 @@ export function ensureBuiltinPages(): void {
       /* best-effort: a missing builtin page simply won't appear until manually added */
     }
   }
+  // Dev's copy-source IS the destination (a 重置 just deleted both) — fall back to the
+  // code-side manifest so the builtin page can never vanish from the list.
+  if (!existsSync(join(destRoot, 'dsh-web', 'container.json'))) createDshWebPage()
   // A persisted default view / auto-start pointing at a page that no longer exists would
   // leave the shell on an empty market screen with no hint — drop the dead references.
   try {
@@ -300,6 +346,18 @@ export function openclawSpawnSpec(port: number): {
   mkdirSync(home, { recursive: true })
   const p = Number(port) > 0 ? Number(port) : OPENCLAW_DEFAULT_PORT
   ensureOpenclawConfig(home, p)
+  // Pin a durable shared token BEFORE booting. With `gateway.auth` empty, openclaw mints a
+  // fresh runtime token on every launch, so each restart silently invalidates whatever the
+  // embedded Control UI paired with — the user then hits "Gateway 密钥被拒绝" and has to paste
+  // a new one. Idempotent: an existing token (the user's own, or one we wrote earlier) is
+  // left untouched, and unrelated keys (mode/port/channels) are preserved.
+  try {
+    initializeOpenclawToken()
+  } catch (err) {
+    // A config we can't parse must not block the gateway: openclaw falls back to its own
+    // runtime token and the panel still reveals it, so this is only a logged degradation.
+    console.warn('[openclaw] durable gateway token seed failed:', (err as Error).message)
+  }
   return {
     cmd: resolved.cmd,
     // `gateway` is a command group; the foreground runner is `gateway run`. Bare
@@ -355,8 +413,7 @@ export async function resolveOpenclawLaunchUrl(): Promise<string | null> {
  */
 function openclawConfigPath(): string {
   return (
-    (process.env.OPENCLAW_CONFIG_PATH || '').trim() ||
-    join(resolveOpenclawHome(), 'openclaw.json')
+    (process.env.OPENCLAW_CONFIG_PATH || '').trim() || join(resolveOpenclawHome(), 'openclaw.json')
   )
 }
 
@@ -401,9 +458,7 @@ export function getOpenclawGatewayToken(): { token: string; source: 'config' | '
  * Idempotent: with a token already present and `rotate` false it returns the existing one
  * untouched. `rotate` mints a fresh token and overwrites the old.
  */
-export function initializeOpenclawToken(
-  rotate = false
-): { token: string; created: boolean } {
+export function initializeOpenclawToken(rotate = false): { token: string; created: boolean } {
   const cfgPath = openclawConfigPath()
   let cfg: Record<string, unknown> = {}
   if (existsSync(cfgPath)) {
@@ -414,15 +469,19 @@ export function initializeOpenclawToken(
       }
     } catch (err) {
       // Never overwrite a config we can't understand (e.g. JSON5/comments) — surface it instead.
-      throw new Error(m('openclaw.configUnreadable', { path: cfgPath, err: (err as Error).message }))
+      throw new Error(
+        m('openclaw.configUnreadable', { path: cfgPath, err: (err as Error).message })
+      )
     }
   }
-  const gateway = (cfg.gateway && typeof cfg.gateway === 'object'
-    ? cfg.gateway
-    : {}) as Record<string, unknown>
-  const auth = (gateway.auth && typeof gateway.auth === 'object'
-    ? gateway.auth
-    : {}) as Record<string, unknown>
+  const gateway = (cfg.gateway && typeof cfg.gateway === 'object' ? cfg.gateway : {}) as Record<
+    string,
+    unknown
+  >
+  const auth = (gateway.auth && typeof gateway.auth === 'object' ? gateway.auth : {}) as Record<
+    string,
+    unknown
+  >
   const existing = typeof auth.token === 'string' ? auth.token.trim() : ''
   if (existing && !rotate) return { token: existing, created: false }
   const token = randomBytes(32).toString('base64url')

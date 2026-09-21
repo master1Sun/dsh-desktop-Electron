@@ -165,12 +165,17 @@ const singlePercent = computed(() => single.value?.percent ?? null)
 .tb-item {
   padding: 6px 8px;
   border-radius: 7px;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .tb-item + .tb-item {
   margin-top: 2px;
 }
 .tb-item:hover {
-  background: var(--surface-2);
+  /* Translucent accent wash + frosted glass: visible in dark mode, no opaque block. */
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  -webkit-backdrop-filter: blur(8px) saturate(125%);
+  backdrop-filter: blur(8px) saturate(125%);
+  color: var(--accent);
 }
 .tb-item-head {
   display: flex;

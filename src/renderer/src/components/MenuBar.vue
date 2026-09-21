@@ -469,8 +469,11 @@ onBeforeUnmount(() => {
   height: 38px;
   flex: none;
   padding: 0 4px 0 10px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  /* Frosted top bar: lets the ambient aurora bleed through instead of a flat fill. */
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  -webkit-backdrop-filter: blur(26px) saturate(140%);
+  backdrop-filter: blur(26px) saturate(140%);
   -webkit-app-region: drag;
   user-select: none;
   z-index: 60;
@@ -548,7 +551,9 @@ onBeforeUnmount(() => {
 }
 
 .group-trigger:hover {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  -webkit-backdrop-filter: blur(6px) saturate(125%);
+  backdrop-filter: blur(6px) saturate(125%);
 }
 
 .group-trigger.active {
@@ -600,7 +605,9 @@ onBeforeUnmount(() => {
 }
 
 .act-btn:hover:not(:disabled) {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  -webkit-backdrop-filter: blur(6px) saturate(125%);
+  backdrop-filter: blur(6px) saturate(125%);
 }
 
 .act-btn:disabled {
@@ -614,12 +621,15 @@ onBeforeUnmount(() => {
   top: calc(100% + 4px);
   left: 0;
   min-width: 180px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
   border-radius: 10px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow), 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset;
+  -webkit-backdrop-filter: blur(26px) saturate(140%);
+  backdrop-filter: blur(26px) saturate(140%);
   padding: 4px;
   z-index: 80;
+  animation: reveal-up 0.4s ease both;
 }
 
 .drop-item {
@@ -639,7 +649,10 @@ onBeforeUnmount(() => {
 }
 
 .drop-item:hover {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  -webkit-backdrop-filter: blur(8px) saturate(125%);
+  backdrop-filter: blur(8px) saturate(125%);
+  color: var(--text);
 }
 
 .drop-item:disabled {
@@ -698,10 +711,19 @@ onBeforeUnmount(() => {
   max-height: calc(100vh - 52px);
   display: flex;
   flex-direction: column;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
+  /* Frosted floating surface with a faint top glow so it reads as lit. */
+  background:
+    radial-gradient(120% 70% at 50% -12%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
+    color-mix(in srgb, var(--surface) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: 14px;
+  -webkit-backdrop-filter: blur(32px) saturate(145%);
+  backdrop-filter: blur(32px) saturate(145%);
+  box-shadow:
+    var(--shadow),
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent) inset,
+    0 18px 60px color-mix(in srgb, var(--accent) 16%, transparent);
+  animation: reveal-up 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
 }
 
 .panel-head {
@@ -715,8 +737,9 @@ onBeforeUnmount(() => {
 
 .panel-title {
   font-size: 12.5px;
-  font-weight: 650;
-  color: var(--text-dim);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--accent);
 }
 
 .panel-close {

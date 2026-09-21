@@ -395,6 +395,12 @@ export function expandStartCommand(cmd: string): string {
 export class PageRegistry extends EventEmitter {
   private entries = new Map<string, RuntimeEntry>()
   private quitting = false
+  /**
+   * Cached "is the on-demand CLI present" probe for the hosted runtimes, refreshed by
+   * {@link refreshRuntimePresence} and read synchronously by {@link toState}. `loaded` is false
+   * until the first probe, so an early read fails open (reports present) rather than mis-badging.
+   */
+  private runtimePresence = { dsh: false, openclaw: false, loaded: false }
 
   constructor(private root: PagesRoot) {
     super()
@@ -457,6 +463,10 @@ export class PageRegistry extends EventEmitter {
       lastError: e.lastError,
       url,
       launchUrl: withThemeParam(e.launchUrl || url, e.meta.kind),
+      runtimeMissing:
+        (e.meta.kind === 'dsh' || e.meta.kind === 'openclaw') && e.status !== 'running'
+          ? !this.hasRuntime(e.meta.kind)
+          : undefined,
       crashes: e.crashes || undefined,
       nextRestartAt: e.nextRestartAt
     }
@@ -489,6 +499,11 @@ export class PageRegistry extends EventEmitter {
     try {
       return await this.startAttempt(e, id)
     } catch (err) {
+      // A throw that never produced a child process — e.g. the runtime CLI is missing, so the
+      // spawn spec can't even be built (`startAttempt` resolves it OUTSIDE its own try) — left
+      // the row pinned at 启动中 forever: no close event ever fires to flip it, so the panel
+      // spinner and the boot overlay both hang. Fail it here so the status reads honestly.
+      if (e.status === 'starting') this.fail(e, (err as Error).message)
       const exitedEarly = e.exitCode !== undefined && e.exitCode !== null && e.exitCode !== 0
       const retriable = exitedEarly && (e.meta.kind === 'dsh' || e.meta.kind === 'openclaw')
       if (!retriable) throw err
@@ -924,11 +939,42 @@ export class PageRegistry extends EventEmitter {
     return this.start(id)
   }
 
+  /**
+   * Re-run the two on-demand CLI presence probes (pure `existsSync` over candidate paths) and
+   * cache them for {@link toState}. The slim installer ships neither dsh nor openclaw — both are
+   * provisioned into userData on demand — so a hosted page whose runtime is absent can never
+   * start. Caching keeps that verdict on `PageState` (a synchronous read), so the list badges,
+   * the switcher and the default-view restore share one race-free source instead of each awaiting
+   * the async status IPC and guessing around an "unknown" window. Dynamic imports keep the module
+   * graph as lean as `startAttempt` already has.
+   */
+  async refreshRuntimePresence(): Promise<void> {
+    const [{ isDshInstalled }, { isOpenclawInstalled }] = await Promise.all([
+      import('./dsh'),
+      import('./openclaw')
+    ])
+    this.runtimePresence.dsh = isDshInstalled()
+    this.runtimePresence.openclaw = isOpenclawInstalled()
+    this.runtimePresence.loaded = true
+  }
+
+  /** Sync read of the last probe. Non-hosted kinds are never gated; an unwarmed cache reports
+   *  "present" so callers fail open (attempt the start) rather than block on unknown. */
+  private hasRuntime(kind?: PageKind): boolean {
+    if (kind !== 'dsh' && kind !== 'openclaw') return true
+    if (!this.runtimePresence.loaded) return true
+    return kind === 'dsh' ? this.runtimePresence.dsh : this.runtimePresence.openclaw
+  }
+
   /** auto-start configured pages; failures are logged, never thrown.
       Terminal-kind pages run in the embedded terminal and are opened by the renderer,
       so they are skipped here to avoid a spurious "run in terminal" error. Unknown ids
       (a retired builtin still listed in persisted settings) are skipped silently. */
   async autoStart(ids: string[]): Promise<void> {
+    // Fresh probe before the spawn loop: a missing runtime is skipped below, and the same cache
+    // backs `toState`'s `runtimeMissing`, so warming here keeps the skip decision and the badge
+    // the renderer draws in lockstep. Best-effort — on probe failure `hasRuntime` fails open.
+    await this.refreshRuntimePresence().catch(() => undefined)
     // Concurrent: each page boots its own child, so serializing just stacks their
     // (already slow) first-boot latencies. start() is self-guarding against a duplicate
     // in-flight call, and per-page failures are logged rather than aborting the batch.
@@ -936,6 +982,12 @@ export class PageRegistry extends EventEmitter {
       ids.map(async (id): Promise<void> => {
         const entry = this.entries.get(id)
         if (!entry || entry.meta.kind === 'terminal') return
+        // Skip quietly: the Pages list and the switcher already badge 未安装 and route the
+        // user to the install guide, so a spawn attempt adds noise without informing anyone.
+        if (!this.hasRuntime(entry.meta.kind)) {
+          console.log(`[pages] auto-start ${id} skipped: ${entry.meta.kind} runtime not installed`)
+          return
+        }
         try {
           await this.start(id)
         } catch (err) {

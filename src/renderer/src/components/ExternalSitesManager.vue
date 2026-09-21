@@ -101,7 +101,7 @@ function preview(site: ExternalSite): void {
 <template>
   <div class="ext-manager">
     <div class="head">
-      <span class="title">{{
+      <span class="title neon">{{
         t('extMgr.title', { n: settingsStore.settings.externalSites.length })
       }}</span>
       <el-button size="small" text @click="openAdd">
@@ -137,10 +137,14 @@ function preview(site: ExternalSite): void {
       </div>
     </div>
 
+    <!-- append-to-body: the menu panel card carries a backdrop-filter, which becomes the
+         containing block of fixed-position descendants — an in-place dialog would be trapped
+         (and clipped) inside the panel instead of covering the window. -->
     <el-dialog
       v-model="formVisible"
       :title="editingId ? t('extMgr.dialogTitleEdit') : t('extMgr.dialogTitleAdd')"
       width="480px"
+      append-to-body
     >
       <el-form label-position="top" @submit.prevent="submit">
         <el-form-item :label="t('extMgr.labelName')">
@@ -183,13 +187,22 @@ function preview(site: ExternalSite): void {
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
   border-radius: var(--radius-md);
-  background: var(--surface);
-  transition: background 0.15s ease;
+  /* frosted glass row */
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+    -webkit-backdrop-filter: blur(14px) saturate(125%);
+    backdrop-filter: blur(14px) saturate(125%);
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.18s ease;
 }
 .row:hover {
-  background: var(--surface-2);
+  /* Translucent accent wash + frosted glass: reads clearly in dark mode, stays glassy. */
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(125%);
+  backdrop-filter: blur(10px) saturate(125%);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent) inset,
+    0 0 16px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 .meta {
   flex: 1;

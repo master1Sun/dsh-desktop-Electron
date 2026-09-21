@@ -282,6 +282,14 @@ async function restoreDefaultView(): Promise<boolean> {
   }
   const page = pagesStore.pages.find((p) => p.id === dv.pageId)
   if (!page) return false
+  // The default view can name a hosted page whose runtime the slim installer never shipped.
+  // Without this the launch would spawn a doomed process and toast an error every single start
+  // (the async runtimes probe isn't awaited here, so the store flags could still be stale) —
+  // `runtimeBlocked` now reads the list-loaded verdict, so route straight to the install guide.
+  if (runtimeBlocked(page)) {
+    guideToInstall(page)
+    return false
+  }
   // A CLI page owns the surface as soon as it is activated — no port to wait for.
   if (page.kind === 'terminal') {
     showInWebview(page)
@@ -387,13 +395,12 @@ function backToWorkbench(): void {
  * A hosted dsh/openclaw page cannot run until its runtime is installed — the slim installer
  * ships none, so they are provisioned on demand into userData. Clicking such a page before its
  * runtime exists would only spawn a doomed process; bounce the user to the setup guide instead.
- * A page already running is by definition unblocked (its runtime is present).
+ * The main process owns this verdict on `PageState.runtimeMissing` (a synchronous probe it re-runs
+ * on every list, already reporting a running page as unblocked), so this guard is race-free against
+ * the async install-status IPC the runtimes store still uses for the first-run guide.
  */
 function runtimeBlocked(page: PageState | undefined): boolean {
-  if (!page || page.status === 'running') return false
-  if (page.kind === 'dsh') return !runtimes.dshInstalled
-  if (page.kind === 'openclaw') return !runtimes.openclawInstalled
-  return false
+  return page?.runtimeMissing === true
 }
 
 /** Route a blocked page interaction back to the first-run install guide. */
@@ -589,6 +596,8 @@ function onKeydown(ev: KeyboardEvent): void {
 let disposeNativeTheme: (() => void) | null = null
 let disposeMaximized: (() => void) | null = null
 let disposeOpenTerminal: (() => void) | null = null
+let disposeQuitConfirm: (() => void) | null = null
+let quitDialogOpen = false
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
@@ -612,6 +621,19 @@ onMounted(async () => {
     if (maxRes?.ok) isMaximized.value = Boolean(maxRes.data)
     disposeMaximized = window.container.onMaximizedChanged((v) => {
       isMaximized.value = v
+    })
+    disposeQuitConfirm = window.container.onQuitConfirm(() => {
+      if (quitDialogOpen) return
+      quitDialogOpen = true
+      ElMessageBox.confirm(t('app.quitConfirmMsg'), t('app.quitConfirmTitle'), {
+        confirmButtonText: t('app.quitConfirmOk'),
+        cancelButtonText: t('app.quitConfirmCancel')
+      })
+        .then(() => window.container?.quitApp())
+        .catch(() => undefined)
+        .finally(() => {
+          quitDialogOpen = false
+        })
     })
   }
   await pagesStore.refresh().catch(() => undefined)
@@ -642,11 +664,14 @@ onBeforeUnmount(() => {
   disposeNativeTheme?.()
   disposeMaximized?.()
   disposeOpenTerminal?.()
+  disposeQuitConfirm?.()
 })
 
 watch(activePanel, (panel) => {
   if (panel === 'pages' || panel === 'settings') pagesStore.refresh().catch(() => undefined)
-  // Install status can change from these panels (provision / upgrade) — keep the guard fresh.
+  // Install status can change from these panels (provision / upgrade) — keep the guide's probe
+  // fresh. The Pages list badge no longer needs this: it reads `PageState.runtimeMissing`, which
+  // the `pagesStore.refresh()` above re-fetches, so we skip the expensive async status IPC here.
   if (panel === 'dsh' || panel === 'openclaw' || panel === 'help')
     runtimes.refresh().catch(() => undefined)
   if (panel === 'help' && !updatesStore.results.length) {
@@ -660,6 +685,12 @@ watch(
   () => pagesStore.pages.find((p) => p.id === activePageId.value)?.launchUrl,
   (url) => {
     if (!url || activeTerminalPage.value) return
+    // A restart clears the boot-time launchUrl, so main hands back the bare
+    // `http://127.0.0.1:<port>` until the new token-bearing one is announced. Pointing a
+    // still-mounted openclaw guest at that bare URL lands the user on the gateway's token
+    // screen, so only follow a URL while the page is actually up.
+    const page = pagesStore.pages.find((p) => p.id === activePageId.value)
+    if (page && page.status !== 'running') return
     const s = webviewSessions.value.find((x) => x.id === activePageId.value)
     if (s && s.url !== url) {
       s.url = url
@@ -712,6 +743,13 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
 <template>
   <el-config-provider :locale="currentEpLocale">
     <div class="shell">
+      <!-- Ambient aurora: fixed, non-interactive; glass chrome bleeds it through. -->
+      <div class="aurora" aria-hidden="true">
+        <span class="blob b1" />
+        <span class="blob b2" />
+        <span class="blob b3" />
+      </div>
+
       <MenuBar
         :current="activePanel"
         :running-count="runningCount"
@@ -841,6 +879,7 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
           @nav-state="onNavState"
           @guest-stop-loading="webviewLoading = false"
           @install-pages="activePanel = 'pages'"
+          @open-panel="(k: string) => (activePanel = k)"
           @cancel-start="cancelStart"
         />
       </main>
@@ -878,6 +917,10 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
 .content {
   flex: 1;
   min-height: 0;
+  /* Lift the webview above the fixed aurora (z-index:0) so the ambient blobs never
+     tint the embedded page; glass chrome (menubar / panels) still sits above it. */
+  position: relative;
+  z-index: 1;
 }
 
 /* The embedded page owns the whole content area — flush to every window edge. */

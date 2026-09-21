@@ -85,6 +85,7 @@ function makeContainerMock(): Record<string, unknown> {
     closeWindow: () => Promise.resolve(ok(true)),
     getIsMaximized: () => Promise.resolve(ok(false)),
     onMaximizedChanged: () => () => undefined,
+    onQuitConfirm: () => () => undefined,
     onStateChanged: () => () => undefined,
     onOpenTerminalPage: () => () => undefined,
     toggleDevTools: () => Promise.resolve(ok({})),
@@ -295,6 +296,33 @@ describe('shell chrome theme + layout', () => {
     expect(document.querySelector('.panel-card')).not.toBeNull()
     expect(document.querySelector('.panel-body')?.textContent).toContain('示例站')
     persistedSettings.externalSites = []
+  })
+
+  it('external add dialog teleports out of the frosted panel card', async () => {
+    await mountApp()
+    const viewTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
+      b.textContent?.includes('视图')
+    )
+    await click(viewTrigger ?? null)
+    const rows = [...document.querySelectorAll('.drop-list .drop-item')]
+    const extRow = rows.find((b) => b.textContent?.includes('外部地址'))
+    await click(extRow ?? null)
+    const addBtn = [...document.querySelectorAll('.panel-card button')].find((b) =>
+      b.textContent?.includes('新增')
+    )
+    await click(addBtn ?? null)
+    // The panel card's backdrop-filter is a containing block for fixed descendants: an in-place
+    // overlay would render (and clip) inside the card. append-to-body must put it on <body>.
+    expect(document.querySelector('.panel-card .el-overlay')).toBeNull()
+    expect(document.querySelector('body > .el-overlay')).not.toBeNull()
+    expect(document.querySelector('.el-dialog')?.textContent).toContain('新增外部地址')
+    const cancel = [...document.querySelectorAll('.el-dialog__footer button')].find((b) =>
+      b.textContent?.includes('取消')
+    )
+    await click(cancel ?? null)
+    expect((document.querySelector('.el-overlay') as HTMLElement | null)?.style.display).toBe(
+      'none'
+    )
   })
 
   it('manageAsApp pages get a 设置… row in 视图 that opens AppManager', async () => {

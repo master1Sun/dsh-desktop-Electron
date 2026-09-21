@@ -111,6 +111,6 @@ describe('shipped page manifests', () => {
     expect(resolveText(manifest.name as LocalizableText | undefined)).toBe('OpenClaw Gateway')
     expect(resolveText(label)).toBe('OPENCLAW 配置目录')
     lang = 'en'
-    expect(resolveText(label)).toBe('OPENCLAW config directory')
+    expect(resolveText(label)).toBe('OPENCLAW config dir')
   })
 })

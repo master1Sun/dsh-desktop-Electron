@@ -24,7 +24,7 @@ import icon from '../../resources/icon.png?asset'
  * user-visible (window title, shortcuts); existing data is renamed across so settings survive.
  */
 function ensureAsciiUserData(): void {
-  const asciiLeaf = 'dsh-desktop-container'
+  const asciiLeaf = 'DesktopContainer'
   try {
     const current = app.getPath('userData')
     // Non-ASCII = control/extended chars outside printable 7-bit ASCII.
@@ -176,11 +176,16 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  // close button -> hide to tray unless really quitting
+  // close button -> hide to tray or confirm quit depending on settings
   mainWindow.on('close', (e) => {
-    if (!isQuitting && getSettings().minimizeToTray) {
+    if (isQuitting) return // allow the real quit through
+    if (getSettings().minimizeToTray) {
       e.preventDefault()
       mainWindow?.hide()
+    } else {
+      // Not minimizing to tray: treat X as an exit request — ask first.
+      e.preventDefault()
+      confirmAndQuit()
     }
   })
 
@@ -207,6 +212,18 @@ function showWindow(): void {
   }
 }
 
+/** Ask the renderer to show a horizontal quit-confirm dialog (ElMessageBox). */
+function confirmAndQuit(): void {
+  if (!mainWindow) {
+    // No window at all (edge case) — just quit.
+    isQuitting = true
+    app.quit()
+    return
+  }
+  if (!mainWindow.isVisible()) mainWindow.show()
+  mainWindow.webContents.send(IPC.OnQuitConfirm)
+}
+
 function rebuildTrayMenu(): void {
   if (!tray || !registry) return
   const running = registry.running()
@@ -227,27 +244,7 @@ function rebuildTrayMenu(): void {
     { type: 'separator' },
     {
       label: m('tray.quit'),
-      click: () => {
-        // Quitting kills every hosted node process — worth one native confirmation,
-        // and the tray is the only path that does this without closing a window.
-        const running = registry?.running().length ?? 0
-        dialog
-          .showMessageBox({
-            type: 'warning',
-            title: m('tray.quitConfirmTitle'),
-            message: m('tray.quitConfirm'),
-            detail: running ? `Running pages: ${running}` : undefined,
-            buttons: [m('tray.quitYes'), m('tray.quitNo')],
-            defaultId: 1, // Enter lands on Cancel — quitting is the destructive branch
-            cancelId: 1
-          })
-          .then(({ response }) => {
-            if (response !== 0) return
-            isQuitting = true
-            app.quit()
-          })
-          .catch(() => undefined)
-      }
+      click: () => confirmAndQuit()
     }
   ]
   tray.setToolTip(m('tray.tooltip', { n: running.length }))
@@ -283,7 +280,9 @@ async function verifyNodeRuntime(): Promise<void> {
 }
 
 function dialogWarn(msg: string): void {
-  dialog.showMessageBox({ type: 'warning', title: m('dialog.title'), message: msg }).catch(() => undefined)
+  dialog
+    .showMessageBox({ type: 'warning', title: m('dialog.title'), message: msg })
+    .catch(() => undefined)
 }
 
 // A relaunch right after a container self-update must not be treated as a second instance:
@@ -307,7 +306,8 @@ if (!gotLock) {
     // Detect a boot-triggered launch before the window is created so it can come up hidden,
     // and re-assert the OS registration so it always matches the persisted setting (a manual
     // registry edit or an update that reset the login item self-heals on the next start).
-    startHidden = process.argv.includes('--autostart') || app.getLoginItemSettings().wasOpenedAtLogin
+    startHidden =
+      process.argv.includes('--autostart') || app.getLoginItemSettings().wasOpenedAtLogin
     applyLaunchAtStartup(getSettings().launchAtStartup)
     app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 

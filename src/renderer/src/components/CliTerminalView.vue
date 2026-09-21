@@ -196,7 +196,7 @@ onBeforeUnmount(stopPty)
     <div ref="containerEl" class="cli-term-surface" />
     <div v-if="state === 'starting'" class="cli-term-overlay">
       <span class="status-dot starting" />
-      {{ t('cliView.launching', { name: props.page?.name || t('cliView.process') }) }}
+      <span class="neon">{{ t('cliView.launching', { name: props.page?.name || t('cliView.process') }) }}</span>
     </div>
     <div v-else-if="state === 'exited'" class="cli-term-overlay">
       <div class="cli-term-exited">
@@ -243,16 +243,29 @@ onBeforeUnmount(stopPty)
   color: var(--text-dim);
   /* Kept translucent: when a CLI aborts (bad config, missing dir) its own error is
      the only clue, and it is printed on the terminal underneath this overlay. */
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
   z-index: 5;
 }
 
 .cli-term-exited {
   display: grid;
   justify-items: center;
-  gap: 4px;
+  gap: 6px;
   text-align: center;
   font-size: 14px;
+  padding: 18px 22px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
+  backdrop-filter: blur(20px) saturate(130%);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 14px;
+  box-shadow: var(--shadow), 0 0 18px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.cli-term-exited p {
+  margin: 0;
+  color: var(--text);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .cli-term-actions {

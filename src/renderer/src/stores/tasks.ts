@@ -3,6 +3,8 @@ import { defineStore } from 'pinia'
 import { ElMessage } from 'element-plus'
 import type { BuiltinKind, UpdateOutcome, UpdateProgress } from '@shared/types'
 import { t } from '../i18n'
+import { usePagesStore } from './pages'
+import { useRuntimesStore } from './runtimes'
 
 /**
  * One row in the window-level progress surface. Percent is `null` for an inherently
@@ -136,6 +138,18 @@ export const useTasksStore = defineStore('tasks', () => {
       if (!out.ok) ElMessage.warning(out.error || t('updates.incomplete', { name: label }))
       else if (out.message) ElMessage.success(out.message)
       else if (out.updated) ElMessage.success(t('updates.updated', { name: label }))
+      if (out.ok) {
+        // An install/upgrade changes what several surfaces render at once: the page list's
+        // runtime-missing flags, the first-run gate, CLI views' installed-version chip. Refresh
+        // the shared stores here — the single entry point — so every open panel re-renders
+        // without the user hunting for a re-check. Silent: failures keep the last known state.
+        usePagesStore()
+          .refresh()
+          .catch(() => undefined)
+        useRuntimesStore()
+          .refresh()
+          .catch(() => undefined)
+      }
       return out
     } catch (err) {
       ElMessage.error((err as Error).message)

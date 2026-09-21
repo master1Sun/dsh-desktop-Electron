@@ -32,6 +32,7 @@ const api = {
     ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port, originUrl),
   chooseDirectory: (title?: string) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id: string) => ipcRenderer.invoke(IPC.RemovePage, id),
+  resetBuiltinPage: (id: string) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),
   setPagePort: (id: string, port?: number) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
   openExternal: (url: string) => ipcRenderer.invoke(IPC.OpenPageExternal, url),
   getSettings: () => ipcRenderer.invoke(IPC.GetSettings),
@@ -69,6 +70,12 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.OnDownloadProgress, listener)
   },
   relaunchApp: () => ipcRenderer.invoke(IPC.RelaunchApp),
+  quitApp: () => ipcRenderer.invoke(IPC.QuitApp),
+  onQuitConfirm: (cb: () => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(IPC.OnQuitConfirm, listener)
+    return () => ipcRenderer.removeListener(IPC.OnQuitConfirm, listener)
+  },
   dshStatus: (profile?: string) => ipcRenderer.invoke(IPC.DshStatus, profile),
   dshListPlugins: (profile?: string) => ipcRenderer.invoke(IPC.DshListPlugins, profile),
   dshCheckUpdates: (profile?: string) => ipcRenderer.invoke(IPC.DshPluginUpdates, profile),

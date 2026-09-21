@@ -32,6 +32,7 @@ const emit = defineEmits<{
   'guest-stop-loading': []
   'install-pages': []
   'cancel-start': []
+  'open-panel': [panel: string]
   /** Webview history state, pushed to App so the top-bar back / forward buttons enable. */
   'nav-state': [state: { back: boolean; forward: boolean }]
 }>()
@@ -255,6 +256,7 @@ defineExpose({
       v-if="!props.startingText && (props.marketActive || !activeUrl)"
       class="market-layer"
       @install-pages="emit('install-pages')"
+      @open-panel="(k: string) => emit('open-panel', k)"
     />
   </div>
 </template>
@@ -418,7 +420,8 @@ defineExpose({
 
 .boot-text {
   font-size: 13px;
-  color: var(--text);
+  color: var(--accent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .boot-phase {

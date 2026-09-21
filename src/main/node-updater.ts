@@ -55,7 +55,7 @@ function get(url: string, timeoutMs = 20000): Promise<{ status: number; body: st
       fn()
     }
     const req = net.request({ url, method: 'GET' })
-    req.setHeader('user-agent', 'dsh-desktop-container')
+    req.setHeader('user-agent', 'DesktopContainer')
     timer = setTimeout(() => {
       done(() => {
         try {
@@ -134,7 +134,7 @@ function download(
   return new Promise((resolve, reject) => {
     const req = httpsGet(
       url,
-      { headers: { 'user-agent': 'dsh-desktop-container' }, timeout: 60000 },
+      { headers: { 'user-agent': 'DesktopContainer' }, timeout: 60000 },
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume()
@@ -209,7 +209,8 @@ async function downloadZip(
   throw new Error(m('node.downloadFail', { err: lastErr }))
 }
 
-function extractZip(zip: string, dest: string): Promise<void> {
+/** Shared by the Node-runtime updater and the OTA asar update: out-of-process Expand-Archive. */
+export function extractZip(zip: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
     // Single-quote the paths (PowerShell treats '...' literally, so Windows-path backslashes
     // stay intact) and hand the whole script to PowerShell via -EncodedCommand as base64

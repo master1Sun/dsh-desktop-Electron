@@ -84,7 +84,9 @@ const envRootInfo = ref<EnvRootInfo | null>(null)
 const envRootDraft = ref('')
 
 async function loadEnvRoot(): Promise<void> {
-  const res = await window.container.getEnvRoot().catch(() => null)
+  // Optional-call: the whole `?.().catch` chain short-circuits to undefined when the bridge
+  // method is absent (tests / older shells), so a missing IPC never becomes an unhandled rejection.
+  const res = await window.container.getEnvRoot?.().catch(() => null)
   if (!res?.ok) return
   envRootInfo.value = res.data as EnvRootInfo
   envRootDraft.value = (envRootInfo.value?.custom ? envRootInfo.value.envRoot : '') || ''
@@ -105,7 +107,7 @@ async function saveEnvRoot(value: string): Promise<void> {
 }
 
 async function browseEnvRoot(): Promise<void> {
-  const res = await window.container.chooseDirectory(t('settings.chooseEnvDir')).catch(() => null)
+  const res = await window.container.chooseDirectory?.(t('settings.chooseEnvDir')).catch(() => null)
   if (!res?.ok || !res.data) return
   envRootDraft.value = String(res.data)
   await saveEnvRoot(envRootDraft.value)
@@ -120,7 +122,7 @@ const downloadDirInfo = ref<DownloadDirInfo | null>(null)
 const downloadDirDraft = ref('')
 
 async function loadDownloadDir(): Promise<void> {
-  const res = await window.container.getDownloadDir().catch(() => null)
+  const res = await window.container.getDownloadDir?.().catch(() => null)
   if (!res?.ok) return
   downloadDirInfo.value = res.data as DownloadDirInfo
   downloadDirDraft.value = downloadDirInfo.value?.custom
@@ -386,7 +388,7 @@ function onLocaleChange(next: 'zh' | 'en'): void {
 
         <template v-if="envSections.length">
           <div v-for="section in envSections" :key="section.pageId" class="env-section">
-            <div class="env-page-name">{{ section.pageName }}</div>
+            <div class="env-page-name neon">{{ section.pageName }}</div>
             <el-form label-position="left" size="small">
               <el-form-item v-for="row in section.vars" :key="row.key" :label="row.label">
                 <el-input
@@ -481,7 +483,9 @@ function onLocaleChange(next: 'zh' | 'en'): void {
 }
 .settings-tabs :deep(.el-tabs__item:hover) {
   color: var(--text);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  -webkit-backdrop-filter: blur(6px) saturate(125%);
+  backdrop-filter: blur(6px) saturate(125%);
 }
 .settings-tabs :deep(.el-tabs__item.is-active) {
   color: var(--accent);
@@ -566,6 +570,14 @@ function onLocaleChange(next: 'zh' | 'en'): void {
   font-weight: 650;
   color: var(--text);
   margin: 4px 0 8px;
+}
+/* Every settings form row (incl. the 系统 page bottom / env-section lists) reads on
+   hover with a glassy accent wash instead of an opaque block. */
+.settings-panel :deep(.el-form-item):hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
 }
 .env-empty {
   font-size: 12.5px;

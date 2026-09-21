@@ -239,10 +239,17 @@ const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') :
   width: min(560px, calc(100vw - 32px));
   display: flex;
   flex-direction: column;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background:
+    radial-gradient(120% 50% at 50% -8%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
+    color-mix(in srgb, var(--surface) 90%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
   border-radius: 14px;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(34px) saturate(150%);
+  backdrop-filter: blur(34px) saturate(150%);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.45),
+    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset,
+    0 18px 60px color-mix(in srgb, var(--accent) 14%, transparent);
   overflow: hidden;
 }
 
@@ -316,8 +323,9 @@ const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') :
 }
 
 .palette-item.active {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
   color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent) inset;
 }
 
 .item-title {

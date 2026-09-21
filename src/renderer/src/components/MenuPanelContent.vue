@@ -61,8 +61,9 @@ async function installBuiltinRow(row: UpdateCheckResult): Promise<void> {
 }
 
 /**
- * The container asar is already staged (updates/<commit>/app.asar + update-meta.json);
- * boot.cjs swaps it in on the next launch, so the only action left is the restart.
+ * The container asar is already staged (updates/<commit>/app.asar + update-meta.json). Relaunching
+ * hands the swap to a detached helper that replaces resources/app.asar the moment this process
+ * exits and then brings the app back — so the only action left here is the restart.
  */
 async function relaunchNow(): Promise<void> {
   try {
@@ -75,6 +76,37 @@ async function relaunchNow(): Promise<void> {
     return // user deferred — the row keeps offering 立即重启 until they restart
   }
   await window.container.relaunchApp()
+}
+
+/* ---- builtin page reset (dsh-web / openclaw) ----
+   Users can break the writable copy under pages/<id> (bad container.json, deleted files).
+   Resetting re-seeds it from the bundled originals; destructive, so a warning confirm gates it. */
+const resetting = ref<string | null>(null)
+async function resetBuiltinRow(row: UpdateCheckResult): Promise<void> {
+  if (!row.pageId || resetting.value) return
+  try {
+    await ElMessageBox.confirm(t('panel.resetConfirm', { name: row.name }), t('panel.resetTitle'), {
+      type: 'warning',
+      confirmButtonText: t('panel.resetBtn'),
+      cancelButtonText: t('common.cancel')
+    })
+  } catch {
+    return // user backed out
+  }
+  resetting.value = row.name
+  try {
+    const res = await window.container.resetBuiltinPage(row.pageId)
+    if (!res.ok) throw new Error(res.error || t('common.unknownError'))
+    ElMessage.success(t('panel.resetDone', { name: row.name }))
+    // The page list (status/port/env declarations) and the table both describe the re-seeded
+    // folder now — refresh both so no surface keeps showing the broken state.
+    await pagesStore.refresh().catch(() => undefined)
+    await updates.check(true).catch(() => undefined)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    resetting.value = null
+  }
 }
 
 /* ---- bundled-Node runtime upgrade (关于与更新) ----
@@ -309,7 +341,7 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
         }}</strong>
       </div>
       <div class="line" />
-      <div class="head">
+      <div class="head neon">
         <span>{{ t('panel.updatesTitle') }}</span>
         <el-button size="small" :loading="updates.checking" @click="emit('check-updates')">
           {{ t('panel.checkUpdates') }}
@@ -394,6 +426,15 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
             <el-tooltip v-else-if="row.hasUpdate" :content="t('panel.manualTip')" placement="top">
               <el-button size="small" round disabled>{{ t('panel.manualBtn') }}</el-button>
             </el-tooltip>
+            <el-button
+              v-else-if="row.pageId"
+              size="small"
+              round
+              :loading="resetting === row.name"
+              @click="resetBuiltinRow(row)"
+            >
+              {{ t('panel.resetBtn') }}
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -475,6 +516,12 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
   gap: 10px;
   font-size: 12.5px;
   margin-bottom: 6px;
+}
+/* Update-list rows (关于与更新) get a glassy accent wash on hover, like the other lists. */
+.help :deep(.el-table__body tr:hover > td) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
+  -webkit-backdrop-filter: blur(4px) saturate(125%);
+  backdrop-filter: blur(4px) saturate(125%);
 }
 
 .kv span {

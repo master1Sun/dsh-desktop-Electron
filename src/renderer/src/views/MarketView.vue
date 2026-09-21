@@ -6,7 +6,7 @@ import { t } from '../i18n'
  * 默认工作台 = 内置插件市场静态页（原 pages/dsh-plugin-market 的 node server 版本已移除）。
  * 纯渲染层内容：不注册 page、不占端口、不随启动运行；顶部为工作台描述，下方是精选插件。
  */
-const emit = defineEmits<{ 'install-pages': [] }>()
+const emit = defineEmits<{ 'install-pages': []; 'open-panel': [panel: string] }>()
 
 interface MarketPlugin {
   id: string
@@ -87,6 +87,74 @@ function copyDesktopCommand(p: MarketPlugin): void {
   copyText(p.desktopCmd, p.id + '-desk')
 }
 
+/* ---- desktop-console feature panorama: deep links into the real config panels ---- */
+interface ConsoleModule {
+  kind: string
+  icon: string
+  title: string
+  desc: string
+}
+
+/** Copy resolves through t() so switching language repaints the cards live. */
+const consoleModules = computed<ConsoleModule[]>(() => [
+  { kind: 'pages', icon: '📦', title: t('market.modPagesTitle'), desc: t('market.modPagesDesc') },
+  {
+    kind: 'external',
+    icon: '🌐',
+    title: t('market.modExternalTitle'),
+    desc: t('market.modExternalDesc')
+  },
+  { kind: 'dsh', icon: '🧩', title: t('market.modDshTitle'), desc: t('market.modDshDesc') },
+  {
+    kind: 'openclaw',
+    icon: '🐾',
+    title: t('market.modOpenclawTitle'),
+    desc: t('market.modOpenclawDesc')
+  },
+  {
+    kind: 'settings',
+    icon: '⚙️',
+    title: t('market.modSettingsTitle'),
+    desc: t('market.modSettingsDesc')
+  },
+  { kind: 'help', icon: '🛟', title: t('market.modHelpTitle'), desc: t('market.modHelpDesc') }
+])
+
+function openPanel(kind: string): void {
+  emit('open-panel', kind)
+}
+
+/* ---- per-kind neon theme + live status for the console module cards ----
+ * statusOf() is a placeholder mapping; wire it to real runtime config state
+ * (e.g. pages installed / dsh & openclaw configured) when the host exposes it. */
+interface ModuleTheme {
+  c1: string
+  c2: string
+  glow: string
+}
+const moduleThemes: Record<string, ModuleTheme> = {
+  pages: { c1: '#38bdf8', c2: '#22d3ee', glow: 'rgba(56,189,248,0.5)' },
+  external: { c1: '#a855f7', c2: '#ec4899', glow: 'rgba(168,85,247,0.5)' },
+  dsh: { c1: '#34d399', c2: '#10b981', glow: 'rgba(52,211,153,0.5)' },
+  openclaw: { c1: '#fb923c', c2: '#f59e0b', glow: 'rgba(251,146,60,0.5)' },
+  settings: { c1: '#6366f1', c2: '#818cf8', glow: 'rgba(99,102,241,0.5)' },
+  help: { c1: '#f43f5e', c2: '#fb7185', glow: 'rgba(244,63,94,0.5)' }
+}
+const moduleStatus: Record<string, 'ready' | 'todo'> = {
+  pages: 'ready',
+  external: 'todo',
+  dsh: 'ready',
+  openclaw: 'todo',
+  settings: 'ready',
+  help: 'ready'
+}
+function themeOf(kind: string): ModuleTheme {
+  return moduleThemes[kind] ?? moduleThemes.pages
+}
+function statusOf(kind: string): 'ready' | 'todo' {
+  return moduleStatus[kind] ?? 'todo'
+}
+
 /* ---- scroll reveal + pointer tilt (ported from the original static page) ---- */
 const rootEl = ref<HTMLElement | null>(null)
 let io: IntersectionObserver | null = null
@@ -118,7 +186,7 @@ onMounted(() => {
 
   // Pointer-driven 3D tilt on plugin cards (skipped when the OS asks for less motion).
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return
-  for (const card of root.querySelectorAll<HTMLElement>('.card')) {
+  for (const card of root.querySelectorAll<HTMLElement>('.card, .module')) {
     const onMove = (e: PointerEvent): void => {
       const r = card.getBoundingClientRect()
       const x = (e.clientX - r.left) / r.width - 0.5
@@ -150,7 +218,11 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="rootEl" class="market-page">
-    <div class="aurora"><div class="blob b1" /><div class="blob b2" /><div class="blob b3" /></div>
+    <div class="aurora">
+      <div class="blob b1" />
+      <div class="blob b2" />
+      <div class="blob b3" />
+    </div>
     <div class="noise" />
 
     <div class="scroll">
@@ -167,19 +239,53 @@ onBeforeUnmount(() => {
           <div class="terminal">
             <div class="term-bar">
               <i class="dot d-r" /><i class="dot d-y" /><i class="dot d-g" />
-              <span class="term-name">bash — ~/.dsh/fileworkbench</span>
+              <span class="term-name">{{ t('market.termName') }}</span>
             </div>
             <div class="term-body">
               <div>
                 <span class="prompt">$</span>
-                <span class="typed">dsh plugin --profile web add &lt;package&gt;</span>
+                <span class="typed">dsh</span>
                 <span class="caret" />
               </div>
-              <div class="out-line">added 1 package in 3s · cordis discover &#10003;</div>
+              <div class="out-line">{{ t('market.termOut') }}</div>
               <span class="ok-badge">&#10003; {{ t('market.okBadge') }}</span>
             </div>
           </div>
         </header>
+
+        <section class="console">
+          <div class="console-head">
+            <span class="kicker reveal">{{ t('market.consoleKicker') }}</span>
+            <h2 class="section reveal">&#128421;&#65039; {{ t('market.consoleHeading') }}</h2>
+            <p class="section-sub reveal">{{ t('market.consoleSub') }}</p>
+          </div>
+          <div class="grid-console">
+            <button
+              v-for="m in consoleModules"
+              :key="m.kind"
+              class="module reveal"
+              type="button"
+              :style="{
+                '--c1': themeOf(m.kind).c1,
+                '--c2': themeOf(m.kind).c2,
+                '--cg': themeOf(m.kind).glow
+              }"
+              @click="openPanel(m.kind)"
+            >
+              <span class="mod-status" :class="statusOf(m.kind)">
+                <i class="sdot" />{{
+                  statusOf(m.kind) === 'ready' ? t('market.modReady') : t('market.modTodo')
+                }}
+              </span>
+              <span class="mod-icon">{{ m.icon }}</span>
+              <span class="mod-body">
+                <span class="mod-title">{{ m.title }}</span>
+                <span class="mod-desc">{{ m.desc }}</span>
+              </span>
+              <span class="mod-enter">{{ t('market.enterLabel') }} <i class="arrow">→</i></span>
+            </button>
+          </div>
+        </section>
 
         <section class="features">
           <div class="feat reveal">
@@ -217,9 +323,7 @@ onBeforeUnmount(() => {
                 :class="{ ok: copiedId === p.id + '-desk' }"
                 @click="copyDesktopCommand(p)"
               >
-                {{
-                  copiedId === p.id + '-desk' ? t('market.copied') : t('market.desktopCopy')
-                }}
+                {{ copiedId === p.id + '-desk' ? t('market.copied') : t('market.desktopCopy') }}
               </button>
             </div>
             <a class="repo" :href="p.repo" target="_blank" rel="noreferrer">{{ p.repoLabel }}</a>
@@ -282,7 +386,12 @@ html.light .market-page {
   overflow: hidden;
   isolation: isolate;
   color-scheme: dark;
-  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'Microsoft YaHei UI',
+    sans-serif;
   --mp-bg: #070b16;
   --mp-fg: #e2e8f0;
   --mp-tagline: #9fb0cc;
@@ -728,6 +837,259 @@ a.repo {
 a.repo:hover {
   text-decoration: underline;
 }
+/* ── console feature panorama ───────────────────── */
+.console {
+  margin-top: 112px;
+}
+.console-head {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 30px;
+  padding-left: 20px;
+}
+.console-head::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 4px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, var(--mp-glow-blue), var(--mp-glow-purple));
+  box-shadow: 0 0 16px var(--mp-glow-blue);
+}
+.console-head .section {
+  margin: 0;
+}
+.console-head .section-sub {
+  margin: 0;
+}
+.kicker {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--mp-link);
+}
+.grid-console {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(3, 1fr);
+  perspective: 1000px;
+}
+@media (max-width: 880px) {
+  .grid-console {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .grid-console {
+    grid-template-columns: 1fr;
+  }
+}
+.module {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  min-height: 188px;
+  padding: 24px 22px;
+  border-radius: 18px;
+  background: var(--mp-card-bg);
+  border: 1px solid var(--mp-card-border);
+  border-top: 2px solid var(--c1);
+  box-shadow: var(--mp-card-shadow);
+  text-align: left;
+  color: var(--mp-fg);
+  font: inherit;
+  cursor: pointer;
+  transform-style: preserve-3d;
+  isolation: isolate;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+  overflow: hidden;
+}
+/* perpetual faint rainbow edge — brightens + sweeps on hover */
+.module::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 18px;
+  padding: 1px;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--a, 0deg),
+    transparent 0 55%,
+    var(--c1) 70%,
+    var(--c2) 80%,
+    transparent 90%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0.22;
+  transition: opacity 0.3s ease;
+  z-index: 2;
+}
+/* theme glow that blooms from the top-right corner on hover */
+.module::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  background: radial-gradient(130% 95% at 100% -10%, var(--cg), transparent 55%);
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+  z-index: 0;
+}
+.module:hover {
+  border-color: transparent;
+  box-shadow: var(--mp-card-shadow-hover), 0 0 34px var(--cg);
+}
+.module:hover::before {
+  opacity: 1;
+  animation: sweep 3.2s linear infinite;
+}
+.module:hover::after {
+  opacity: 1;
+}
+.mod-icon,
+.mod-body,
+.mod-enter,
+.mod-status {
+  position: relative;
+  z-index: 1;
+}
+.mod-icon {
+  flex: 0 0 auto;
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  font-size: 25px;
+  border-radius: 15px;
+  background: linear-gradient(140deg, var(--c1), var(--c2));
+  border: 1px solid var(--mp-copy-border);
+  box-shadow: 0 10px 30px var(--cg);
+  animation: float 5s ease-in-out infinite;
+  isolation: isolate;
+}
+/* spinning neon halo behind the icon on hover */
+.mod-icon::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 16px;
+  background: conic-gradient(from 0deg, var(--c1), var(--c2), var(--c1));
+  filter: blur(9px);
+  opacity: 0;
+  z-index: -1;
+  transition: opacity 0.35s ease;
+  animation: spin 5s linear infinite;
+}
+.module:hover .mod-icon::after {
+  opacity: 0.75;
+}
+.mod-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.mod-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--mp-strong);
+}
+.mod-desc {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--mp-tagline);
+}
+.mod-enter {
+  margin-top: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mp-link);
+  white-space: nowrap;
+}
+.mod-enter .arrow {
+  font-style: normal;
+  transition: transform 0.2s ease;
+}
+.module:hover .mod-enter .arrow {
+  transform: translateX(5px);
+}
+/* ── live status chip (top-right) ── */
+.mod-status {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 3px 9px 3px 8px;
+  border-radius: 999px;
+}
+.mod-status .sdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+.mod-status.ready {
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+.mod-status.ready .sdot {
+  background: #34d399;
+  box-shadow: 0 0 8px #34d399;
+}
+.mod-status.todo {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.38);
+}
+.mod-status.todo .sdot {
+  background: #fbbf24;
+  box-shadow: 0 0 8px #fbbf24;
+}
+.module:focus-visible {
+  outline: 2px solid var(--mp-link);
+  outline-offset: 2px;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.55;
+  }
+}
+
 /* ── scroll reveal ───────────────────────────────── */
 .reveal {
   opacity: 0;
@@ -744,7 +1106,10 @@ a.repo:hover {
   .blob,
   .whale,
   .typed,
-  .ok-badge {
+  .ok-badge,
+  .mod-icon,
+  .mod-icon::after,
+  .mod-status .sdot {
     animation: none !important;
   }
   .typed {
