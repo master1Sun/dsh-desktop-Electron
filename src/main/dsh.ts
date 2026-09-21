@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
 import { resolveDshProfileDir, resolveDshRuntimeDirs, resolvePagesDir } from './store'
@@ -9,6 +9,8 @@ import type { ContainerManifest } from './pages'
 import { m as msg, msgIn } from './i18n'
 
 const DEFAULT_PROFILE = 'web'
+/** An empty writer lock older than this is a crashed holder, not a live writer mid-flush. */
+const STALE_EMPTY_LOCK_MS = 15_000
 
 /** Run a CLI without blocking the main-process event loop (a frozen UI otherwise). */
 function runCli(
@@ -529,6 +531,65 @@ async function remoteHeadSha(repoUrl: string): Promise<string> {
 }
 
 /**
+ * dsh's atomic-write writer locks (`<home>/*.lock`) record the holder's PID but are never
+ * reclaimed when that holder dies without releasing (crash, `taskkill /T`), so the next boot
+ * waits out the whole timeout and the page exits code 1 — surfacing as a dead webview / 404.
+ * Drop every lock whose recorded PID is no longer running right before spawning; a lock held
+ * by a LIVE process (a dsh the user runs in a terminal) is left strictly alone.
+ */
+export function clearStaleDshLocks(homeDir: string): string[] {
+  let names: string[] = []
+  try {
+    names = readdirSync(homeDir).filter((n) => n.endsWith('.lock'))
+  } catch {
+    return [] // home not created yet: nothing to reclaim
+  }
+  const removed: string[] = []
+  for (const name of names) {
+    const file = join(homeDir, name)
+    let raw = ''
+    let mtimeMs = 0
+    try {
+      raw = readFileSync(file, 'utf-8').trim()
+      mtimeMs = statSync(file).mtimeMs
+    } catch {
+      continue
+    }
+    let stale: boolean
+    if (!raw) {
+      // Empty lock = a holder that died between creating the file and writing its pid (the
+      // common crash shape). Only reclaim once it is clearly not a live writer mid-flush.
+      stale = Date.now() - mtimeMs > STALE_EMPTY_LOCK_MS
+    } else {
+      const pid = parseInt(raw, 10)
+      // An unparseable non-empty lock is NOT touched: we cannot prove it stale, and deleting
+      // a live holder's lock would corrupt its in-flight write.
+      if (!Number.isFinite(pid) || pid <= 0) continue
+      stale = !isProcessAlive(pid)
+    }
+    if (!stale) continue
+    try {
+      unlinkSync(file)
+      removed.push(file)
+    } catch {
+      /* open handle elsewhere: leave it and let dsh report it */
+    }
+  }
+  if (removed.length) console.warn(`[dsh] reclaimed stale writer lock(s): ${removed.join(', ')}`)
+  return removed
+}
+
+/** Signal-0 probe: ESRCH = gone, EPERM = alive but owned by someone else. */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
  * Spawn spec for pages.ts when kind=dsh: `node <dsh lib/bin.js> --profile <name> --host … --port …`.
  * The trailing flags belong to the profile's app (parsed by @deepseek-ai/dsh-web-app),
  * and `--no-open` keeps the container's webview as the only surface.
@@ -542,6 +603,9 @@ export async function dshSpawnCommand(
   const binJs = dshBinJs()
   if (!binJs) throw new Error(msg('dsh.binMissing'))
   mkdirSync(status.profileDir, { recursive: true })
+  // Self-heal dead credentials/plugin locks left by a crashed harness, or this spawn would
+  // block on withFileLock until timeout and die (see clearStaleDshLocks).
+  clearStaleDshLocks(join(status.profileDir, '..', '..'))
   return {
     cmd: resolveDshNodeExePath(),
     args: [binJs, '--profile', profile, '--host', '127.0.0.1', '--port', String(port), '--no-open'],

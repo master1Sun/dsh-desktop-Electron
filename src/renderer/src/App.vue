@@ -13,6 +13,7 @@ import { usePagesStore, type PageState } from './stores/pages'
 import { useSettingsStore } from './stores/settings'
 import { useTerminalStore } from './stores/terminal'
 import { useUpdatesStore } from './stores/updates'
+import { useRuntimesStore } from './stores/runtimes'
 import { ElConfigProvider } from 'element-plus'
 import { locale as i18nLocale, t, epLocale } from './i18n'
 
@@ -21,6 +22,7 @@ const settingsStore = useSettingsStore()
 const store = useTerminalStore()
 const hasBridge = typeof window !== 'undefined' && !!window.container
 const updatesStore = useUpdatesStore()
+const runtimes = useRuntimesStore()
 
 /** Panels float over the workbench instead of replacing it, so an embedded page never unmounts. */
 const activePanel = ref<string | null>(null)
@@ -168,7 +170,15 @@ const commands = computed<Command[]>(() => {
 
 /* ---- selected page + view toolbar live in the chrome so HomeView is content-only ---- */
 const activePageId = ref<string | null>(null)
-const webviewSrc = ref('')
+/** One mounted <webview> per opened page; switching only flips which one is visible, so a
+    guest that is already up (openclaw's one-time bootstrap token, dsh terminals) is never
+    reloaded by a page switch. */
+const webviewSessions = ref<{ id: string; url: string }[]>([])
+const activeSessionId = ref<string | null>(null)
+/** URL of the session on screen; '' while the market / a CLI terminal owns the surface. */
+const webviewSrc = computed(
+  () => webviewSessions.value.find((s) => s.id === activeSessionId.value)?.url || ''
+)
 const webviewLoading = ref(false)
 const homeRef = ref<InstanceType<typeof HomeView> | null>(null)
 const cliTermRef = ref<{ restart: () => void } | null>(null)
@@ -306,6 +316,11 @@ async function restoreDefaultView(): Promise<boolean> {
 
 /** Start a page from the switcher; the row only becomes switchable once this succeeds. */
 async function startPage(id: string): Promise<void> {
+  const target = pagesStore.pages.find((x) => x.id === id)
+  if (target && runtimeBlocked(target)) {
+    guideToInstall(target)
+    return
+  }
   try {
     await pagesStore.start(id)
   } catch (err) {
@@ -318,21 +333,44 @@ async function startPage(id: string): Promise<void> {
   if (p.kind !== 'terminal') showInWebview(p)
 }
 
+/**
+ * Mount (or re-point) one session without touching the others. Re-showing an unchanged
+ * session must NOT navigate or flash the loading overlay — that is what keeps an openclaw
+ * token / dsh terminal alive across switches.
+ */
+const stripReloadHash = (u: string): string => u.replace(/#container-reload=\d+/, '')
+function upsertSession(id: string, url: string): void {
+  const clean = stripReloadHash(url)
+  const existing = webviewSessions.value.find((s) => s.id === id)
+  if (existing) {
+    if (existing.url === clean) {
+      webviewLoading.value = false // already loaded: just reveal it
+      return
+    }
+    if (stripReloadHash(existing.url) === clean) {
+      // Only a leftover reload-hash differs: drop it as a fragment-only change (no full
+      // navigation, no openclaw "switch gateway" prompt).
+      existing.url = clean
+      webviewLoading.value = false
+      return
+    }
+    existing.url = clean // same page, new token-bearing URL: navigate in place
+    webviewLoading.value = true
+    return
+  }
+  webviewSessions.value.push({ id, url: clean })
+  webviewLoading.value = true
+}
+
 function showInWebview(page: PageState): void {
   activePageId.value = page.id
   externalView.value = false
   if (page.kind === 'terminal') {
-    webviewSrc.value = ''
-  } else {
-    const url = pageUrl(page)
-    // Same URL already shown: src is unchanged → no navigation → the loading overlay would
-    // never get cleared by did-stop-loading / dom-ready. Reveal the current view instead.
-    if (url && url === webviewSrc.value) webviewLoading.value = false
-    else {
-      webviewLoading.value = true
-      webviewSrc.value = url
-    }
+    activeSessionId.value = null
+    return
   }
+  upsertSession(page.id, pageUrl(page))
+  activeSessionId.value = page.id
   // Switching a page deliberately does NOT touch the persisted 默认打开页面 setting —
   // that is only changed from 设置, and every launch loads exactly what is configured there.
 }
@@ -345,6 +383,25 @@ function backToWorkbench(): void {
   webviewLoading.value = false
 }
 
+/**
+ * A hosted dsh/openclaw page cannot run until its runtime is installed — the slim installer
+ * ships none, so they are provisioned on demand into userData. Clicking such a page before its
+ * runtime exists would only spawn a doomed process; bounce the user to the setup guide instead.
+ * A page already running is by definition unblocked (its runtime is present).
+ */
+function runtimeBlocked(page: PageState | undefined): boolean {
+  if (!page || page.status === 'running') return false
+  if (page.kind === 'dsh') return !runtimes.dshInstalled
+  if (page.kind === 'openclaw') return !runtimes.openclawInstalled
+  return false
+}
+
+/** Route a blocked page interaction back to the first-run install guide. */
+function guideToInstall(page: PageState): void {
+  runtimes.requestGuide()
+  ElMessage.warning(t('setup.runtimeMissingToast', { name: page.name }))
+}
+
 /** Pick a page for the content area: CLI pages take it over with the terminal, web pages start on demand. */
 async function openPage(id: string): Promise<void> {
   const page = pagesStore.pages.find((p) => p.id === id)
@@ -353,6 +410,10 @@ async function openPage(id: string): Promise<void> {
     // from the page switcher just points the webview at its URL (highlighted via `id`).
     const site = settingsStore.settings.externalSites.find((s) => s.id === id)
     if (site) previewExternalUrl(site.url, id)
+    return
+  }
+  if (runtimeBlocked(page)) {
+    guideToInstall(page)
     return
   }
   if (page.external) {
@@ -390,14 +451,9 @@ function previewExternalUrl(url: string, siteId?: string): void {
   // The 外部地址打开方式 setting was removed — external addresses always display embedded.
   externalView.value = true
   activePageId.value = siteId ?? null
-  // Same URL already shown: <webview> src is unchanged, so no navigation fires and
-  // did-stop-loading / dom-ready would never clear the overlay — just reveal current view.
-  if (webviewSrc.value === url) {
-    webviewLoading.value = false
-    return
-  }
-  webviewLoading.value = true
-  webviewSrc.value = url
+  const sid = siteId || `ext:${url}`
+  upsertSession(sid, url)
+  activeSessionId.value = sid
   // Displaying an external address is transient too — it never rewrites the default view.
 }
 
@@ -408,9 +464,11 @@ function previewSiteById(id: string): void {
 
 function reload(): void {
   if (!webviewSrc.value) return
+  // Refresh the guest in place via <webview>.reload(): mutating src (the old
+  // `#container-reload=` hash trick) changed the address openclaw's Control UI compares
+  // against its current gateway, popping the "switch gateway?" confirm on every refresh.
+  if (!homeRef.value?.reload()) return
   webviewLoading.value = true
-  webviewSrc.value =
-    webviewSrc.value.replace(/#container-reload=\d+/, '') + `#container-reload=${Date.now()}`
 }
 
 async function inspectWebview(): Promise<void> {
@@ -557,6 +615,7 @@ onMounted(async () => {
     })
   }
   await pagesStore.refresh().catch(() => undefined)
+  runtimes.refresh().catch(() => undefined)
   // The configured default page wins over the CLI auto-start surface: it is what the
   // user asked to see on entry and gets started on demand when it isn't running yet.
   const restored = await restoreDefaultView().catch(() => false)
@@ -571,7 +630,7 @@ onMounted(async () => {
       .at(-1)
     if (cliPage) {
       activePageId.value = cliPage.id
-      webviewSrc.value = ''
+      activeSessionId.value = null
     }
   }
   updatesStore.check().catch(() => undefined)
@@ -587,16 +646,25 @@ onBeforeUnmount(() => {
 
 watch(activePanel, (panel) => {
   if (panel === 'pages' || panel === 'settings') pagesStore.refresh().catch(() => undefined)
+  // Install status can change from these panels (provision / upgrade) — keep the guard fresh.
+  if (panel === 'dsh' || panel === 'openclaw' || panel === 'help')
+    runtimes.refresh().catch(() => undefined)
   if (panel === 'help' && !updatesStore.results.length) {
     updatesStore.check().catch(() => undefined)
   }
 })
 
-// A dsh page only reports its token-bearing URL after it boots, so re-point the webview when it lands.
+// A dsh page only reports its token-bearing URL after it boots, so re-point that session
+// (in place, never a remount) when the announcement lands.
 watch(
   () => pagesStore.pages.find((p) => p.id === activePageId.value)?.launchUrl,
   (url) => {
-    if (url && url !== webviewSrc.value && !activeTerminalPage.value) webviewSrc.value = url
+    if (!url || activeTerminalPage.value) return
+    const s = webviewSessions.value.find((x) => x.id === activePageId.value)
+    if (s && s.url !== url) {
+      s.url = url
+      webviewLoading.value = true
+    }
   }
 )
 
@@ -760,7 +828,8 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
         />
         <HomeView
           ref="homeRef"
-          :url="webviewSrc"
+          :sessions="webviewSessions"
+          :active-id="activeSessionId"
           :loading="webviewLoading"
           :starting-text="startingText"
           :phase-text="bootPhaseText"

@@ -126,6 +126,16 @@ export interface EnvRootInfo {
   custom: boolean
 }
 
+/** Resolved "下载目录" info surfaced to the Settings panel. */
+export interface DownloadDirInfo {
+  /** effective folder webview downloads save into (the override, or the OS default) */
+  downloadDir: string
+  /** the OS Downloads folder the empty override falls back to */
+  defaultDir: string
+  /** true when the user pinned a custom folder instead of following the OS default */
+  custom: boolean
+}
+
 export type DefaultView =
   { kind: 'none' } | { kind: 'page'; pageId: string } | { kind: 'external'; url: string }
 
@@ -152,6 +162,8 @@ export interface ContainerSettings {
   dshHome: string
   /** openclaw config home override; empty = <envRoot>/openclaw (existing ~/.openclaw kept as fallback) */
   openclawHome: string
+  /** where files downloaded inside an embedded page are saved; empty = the OS Downloads folder */
+  downloadDir: string
   /** per-page directory env overrides: pageId -> (envVarKey -> path); empty value falls back to the spec defaultPath */
   pageEnvs: Record<string, Record<string, string>>
   /** per-page port overrides: pageId -> port; wins over container.json so imported projects need no editing */
@@ -274,6 +286,36 @@ export interface InstallProgress {
   target?: string
 }
 
+/**
+ * Live progress of a file download started inside an embedded <webview> (an external site
+ * like baidu.com, or a hosted page). The main process owns the native DownloadItem and
+ * broadcasts this over IPC so the window-level top progress bar can render a bar, while the
+ * save location rides along (`savePath`) for the completion notification.
+ *
+ * - `progressing`: bytes moving; `percent` is null when the server sent no Content-Length
+ *   (the bar animates as an indeterminate striped flow instead of a fake number).
+ * - `completed`: the file is fully written to `savePath` — the renderer drops the row and the
+ *   main process pops a system notification naming the location.
+ * - `cancelled`: the user interrupted / it failed — row dropped, no success toast.
+ */
+export interface DownloadProgress {
+  /** stable id for this download (top-bar row key), minted in the main process */
+  id: string
+  /** file name being saved (already deduped against an existing Downloads-folder file) */
+  filename: string
+  state: 'progressing' | 'completed' | 'cancelled'
+  /** bytes written so far */
+  received: number
+  /** total bytes, or -1 when the size is unknown */
+  total: number
+  /** 0..100 when computable; null → indeterminate */
+  percent: number | null
+  /** absolute path the file is (being) written to — the "下载位置" */
+  savePath?: string
+  /** host of the embedded view that started it (e.g. "baidu.com"), for the row caption */
+  host?: string
+}
+
 export interface IpcResult<T = unknown> {
   ok: boolean
   data?: T
@@ -356,6 +398,8 @@ export const IPC = {
   GetSettings: 'container:get-settings',
   UpdateSettings: 'container:update-settings',
   EnvRoot: 'container:env-root',
+  /** resolved webview download folder + the OS default it falls back to (DownloadDirInfo) */
+  DownloadDir: 'container:download-dir',
   CheckUpdates: 'container:check-updates',
   PerformUpdate: 'container:perform-update',
   /** list Node versions eligible to replace the bundled runtime (NodeVersionInfo[]) */
@@ -414,5 +458,7 @@ export const IPC = {
   OnPtyData: 'container:pty-data',
   OnPtyExit: 'container:pty-exit',
   /** broadcast: a secondary window asks every window to switch to that CLI page's terminal */
-  OpenTerminalPage: 'container:open-terminal-page'
+  OpenTerminalPage: 'container:open-terminal-page',
+  /** broadcast: live progress of a file download inside an embedded webview (DownloadProgress) */
+  OnDownloadProgress: 'container:download-progress'
 } as const

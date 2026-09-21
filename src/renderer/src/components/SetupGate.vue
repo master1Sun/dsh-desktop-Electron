@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { usePagesStore } from '../stores/pages'
 import { useUpdatesStore } from '../stores/updates'
 import { useTasksStore } from '../stores/tasks'
+import { useRuntimesStore } from '../stores/runtimes'
 import { NODE_VERSION_REQUIRED, type IpcResult, type NodeVersionInfo } from '@shared/types'
 import { t } from '../i18n'
 
@@ -20,22 +21,34 @@ import { t } from '../i18n'
 const pages = usePagesStore()
 const updates = useUpdatesStore()
 const tasks = useTasksStore()
+const runtimes = useRuntimesStore()
 
-const DISMISS_KEY = 'dsh.setupGate.dismissed'
-
-const state = reactive({ checked: false, dshOk: false, openclawOk: false })
 const nodeVersions = ref<NodeVersionInfo[]>([])
 const nodeSel = ref('')
 const nodeLoading = ref(false)
 const nodeError = ref('')
-const dismissed = ref(localStorage.getItem(DISMISS_KEY) === '1')
+/** Session-scoped skip: the guide re-arms on the next launch while a runtime is still missing. */
+const dismissed = ref(false)
+/** Bumped by App (via the runtimes store) to bounce the user back to the guide — e.g. clicking
+ *  a page whose runtime is missing. Forces the overlay open even after a skip, and even when
+ *  only ONE of dsh/openclaw is absent (which alone would not auto-trigger `shouldGuide`). */
+const forced = ref(false)
 
 const nodeOk = computed(() => pages.nodeInfo.ok)
-const anyMissing = computed(() => !nodeOk.value || !state.dshOk || !state.openclawOk)
+const dshOk = computed(() => runtimes.dshInstalled)
+const openclawOk = computed(() => runtimes.openclawInstalled)
+/** Auto-show the guide when Node is missing, or when BOTH optional runtimes are absent — with
+ *  neither installed there is nothing to do but set up. A single missing runtime does not nag. */
+const shouldGuide = computed(() => !nodeOk.value || (!dshOk.value && !openclawOk.value))
 /** Blocking = no Node: the overlay cannot be dismissed until it is installed. */
 const blocking = computed(() => !nodeOk.value)
-const visible = computed(() => state.checked && anyMissing.value && (blocking.value || !dismissed.value))
-const allReady = computed(() => nodeOk.value && state.dshOk && state.openclawOk)
+const visible = computed(
+  () =>
+    runtimes.loaded &&
+    (shouldGuide.value || forced.value) &&
+    (blocking.value || !dismissed.value)
+)
+const allReady = computed(() => nodeOk.value && dshOk.value && openclawOk.value)
 
 const nodeVersionLabel = (v: NodeVersionInfo): string =>
   v.lts ? `${v.version} · LTS ${typeof v.lts === 'string' ? v.lts : ''}`.trim() : v.version
@@ -62,13 +75,7 @@ async function loadNodeVersions(): Promise<void> {
 }
 
 async function checkRuntimes(): Promise<void> {
-  const [dsh, oc] = await Promise.all([
-    window.container.dshStatus().catch(() => null),
-    window.container.openclawStatus().catch(() => null)
-  ])
-  state.dshOk = Boolean(dsh?.ok && (dsh.data as { installed?: boolean })?.installed)
-  state.openclawOk = Boolean(oc?.ok && (oc.data as { installed?: boolean })?.installed)
-  state.checked = true
+  await runtimes.refresh()
 }
 
 async function doNodeInstall(): Promise<void> {
@@ -88,26 +95,34 @@ async function doInstallBuiltin(kind: 'dsh' | 'openclaw'): Promise<void> {
 }
 
 function dismiss(): void {
-  localStorage.setItem(DISMISS_KEY, '1')
   dismissed.value = true
+  forced.value = false
 }
 
 // Side effects are deferred until Node's state is actually known (the store's initial
-// `ok:false` just means "not loaded yet"). A dismissed gate with a healthy Node never
-// renders, so it must not spend the dsh/openclaw status IPCs nor the network-hungry
-// Node version-index fetch on every launch.
+// `ok:false` just means "not loaded yet"). Node's version index is the only network-hungry
+// fetch, so it loads solely when Node itself is missing; the dsh/openclaw probe is two cheap
+// local IPCs and always runs once, since `shouldGuide` depends on it.
 watch(
-  () => [pages.nodeInfoLoaded, dismissed.value] as const,
-  ([loaded, dis]) => {
+  () => pages.nodeInfoLoaded,
+  (loaded) => {
     if (!loaded) return
-    if (dis && pages.nodeInfo.ok) {
-      state.checked = true // nothing left to gate — never show the overlay
-      return
-    }
-    if (!state.checked) void checkRuntimes()
+    if (!runtimes.loaded) void checkRuntimes()
     if (!nodeOk.value && !nodeVersions.value.length) void loadNodeVersions()
   },
   { immediate: true }
+)
+
+// Another surface asked to show the setup guide (e.g. a page whose runtime is missing was
+// clicked) — re-arm the overlay for this session.
+watch(
+  () => runtimes.reopenSignal,
+  (n) => {
+    if (n > 0) {
+      forced.value = true
+      dismissed.value = false
+    }
+  }
 )
 
 // Once a Node install lands, nodeInfo.ok flips — re-probe the agent runtimes to refresh the tags.
@@ -148,6 +163,7 @@ const nodeProgress = computed(() => updates.nodeProgress)
             :placeholder="t('panel.nodeVersionPick')"
             :loading="nodeLoading"
             :disabled="updates.nodeBusy"
+            popper-class="sg-node-popper"
             style="width: 210px"
           >
             <el-option
@@ -192,7 +208,7 @@ const nodeProgress = computed(() => updates.nodeProgress)
         <div class="sg-row-head">
           <span class="sg-step">2</span>
           <span class="sg-name">{{ t('topbar.dsh') }}</span>
-          <el-tag v-if="state.dshOk" size="small" type="success" effect="plain" round>
+          <el-tag v-if="dshOk" size="small" type="success" effect="plain" round>
             {{ t('setup.installedTag') }}
           </el-tag>
           <el-tag v-else size="small" type="info" effect="plain" round>
@@ -215,7 +231,7 @@ const nodeProgress = computed(() => updates.nodeProgress)
         <div class="sg-row-head">
           <span class="sg-step">3</span>
           <span class="sg-name">{{ t('topbar.openclaw') }}</span>
-          <el-tag v-if="state.openclawOk" size="small" type="success" effect="plain" round>
+          <el-tag v-if="openclawOk" size="small" type="success" effect="plain" round>
             {{ t('setup.installedTag') }}
           </el-tag>
           <el-tag v-else size="small" type="info" effect="plain" round>
@@ -344,5 +360,18 @@ const nodeProgress = computed(() => updates.nodeProgress)
 .sg-hint {
   font-size: 12px;
   color: var(--text-dim);
+}
+</style>
+
+<!--
+  The Node version dropdown is teleported to <body> by Element Plus, so it is a sibling of
+  `.setup-gate` (z-index 3000) rather than a descendant — scoped/`:deep` styles can't reach it.
+  Element Plus sets an inline z-index (~2001) on the popper, which lands *below* the gate and
+  makes the list unclickable. This global rule lifts just this popper above the overlay; the
+  `!important` is required to beat the inline style.
+-->
+<style>
+.sg-node-popper.el-popper {
+  z-index: 4000 !important;
 }
 </style>

@@ -1,17 +1,17 @@
 # DSH Desktop Container
 
-桌面端 Node 容器：内置 **Node v24.21.0**，托管 `pages/` 下的 web 项目（deepseek-harness、openclaw 等任意 node http 服务），主界面内嵌展示页面，支持配置持久化、任务栏常驻与 git 更新检测。
+桌面端 Node 容器：托管 `pages/` 下的 web 项目（deepseek-harness、openclaw 等任意 node http 服务），主界面内嵌展示页面，支持配置持久化、任务栏常驻与 git 更新检测。运行时（Node v24.21.0 / dsh / openclaw）**不再打进安装包**，改为**首次启动引导按需下载到 userData**，以瘦小安装包。
 
 ## 特性
 
-- **自带运行时**：不依赖系统 node；`resources/node/` 内的 v24.21.0 由 `npm run setup:node` 从 npmmirror 下载。启动时自动校验版本。选 24.x 是为同时满足 openclaw（需 Node ≥24.16 <25）与 dsh（无 engines 上界）。
+- **运行时按需下载（安装包瘦身）**：不依赖系统 node，但安装包**不再内置** `resources/node|dsh|openclaw`。首启 `SetupGate` 引导把 Node v24.21.0 下载到 `userData/node`（`node-updater`），随后 dsh→`userData/dsh`、openclaw→`userData/openclaw`（走内置 npm 的 `provisionBuiltin`）。三者发现路径均以 `userData` 优先，`resources/*` 仅作 dev 兜底。开发者也可 `npm run setup:node` 预置到 `resources/node/`。选 24.x 是为同时满足 openclaw（需 Node ≥24.16 <25）与 dsh（无 engines 上界）。
 - **Page 生命周期**：每个 page 是一个内置 node 子进程（PATH 前置注入，page 内 `node/npm` 均走内置版本）；端口就绪探测、stdout/stderr 日志、托盘一键启停。
 - **默认视图下拉**：设置页可选运行中的 page / 外部地址（含最近使用历史），主界面 `<webview>` 内嵌展示；外部地址可选"系统浏览器打开"。
 - **配置持久化**：electron-store（userData/container-settings.json）。
 - **最小化到任务栏**：点 ✕ 隐藏到托盘继续运行；托盘菜单可恢复窗口、启停各 page、彻底退出（退出前优雅终止全部 node 子进程，Windows 下 taskkill /T 杀进程树）。
 - **git 更新检测**：容器自身 + pages 下各项目统一检测（ls-remote vs 本地 HEAD，5min 缓存），一键 `git pull --ff-only`，脏仓库自动跳过。
 - **DSH 插件管理**：内置 `@deepseek-ai/dsh` CLI，可在设置页对某个 dsh profile 安装 / 卸载 / 更新插件（npm 或 git 通道），并把 profile 注册成一个可启停的页面在主界面内嵌打开。详见下文。
-- **OpenClaw Gateway 托管**：随包自带最新版 `openclaw`（npm 全局安装到 `resources/openclaw/`），把它的 gateway 注册成一个可启停页面，运行后主界面内嵌打开 Control UI；配置目录默认跟随环境目录（安装目录下的 `env/openclaw`）。详见下文。
+- **OpenClaw Gateway 托管**：按需下载最新版 `openclaw`（用内置 npm 全局装到 `userData/openclaw/`，不再随包分发），把它的 gateway 注册成一个可启停页面，运行后主界面内嵌打开 Control UI；配置目录默认跟随环境目录（安装目录下的 `env/openclaw`）。详见下文。
 - **打开系统终端**：页面切换器、DSH 面板与「页面」面板都有「终端」按钮，点一下即在对应项目目录拉起一个真实控制台，PATH 已前置内置 node（和 pnpm），不再叠加容器自己的弹窗。
 - **纯 CLI 项目整屏终端**：`kind: "terminal"` 的页面被选中时直接占满主区跑其启动命令，退出即返回，详见「Page 约定」。
 - **内置插件市场工作台**：默认工作台就是渲染层内置的 DSH 插件市场静态页（`MarketView.vue`，顶部为工作台描述）——不注册 page、不占端口、不随启动运行，从「页面」面板安装插件项目。
@@ -77,7 +77,7 @@ node node_modules/@deepseek-ai/dsh/lib/bin.js plugin --profile web add @someorg/
 
 openclaw 是多渠道 AI 网关，npm 包 `openclaw`（本项目自带 latest）。它按 dsh 的同款方式**完整托管**：注册为一个 page、可启停、开终端、内嵌 Control UI。
 
-- **自带安装**：`npm run setup:openclaw` 用内置 node 跑 `npm install -g openclaw@latest --ignore-scripts`，`npm_config_prefix` 指向 `resources/openclaw`，实际入口是 `resources/openclaw/node_modules/openclaw/openclaw.mjs`，随安装包一起分发（`electron-builder.yml` 的 extraResources）。openclaw 有 postinstall 生命周期脚本，故强制 `--ignore-scripts`。**构建期自动 provision**：`npm run build` 经 `prebuild` 钩子触发本脚本，且幂等——已存在入口即跳过（`--force` 或 `DSH_OPENCLAW_FORCE=1` 强制刷新以拉新版），因此这棵 ~537MB 目录与 `resources/node/` 一样列入 `.gitignore`、不进版本库，只在打包时现取。
+- **按需 provision**：运行时不随包分发。首启 `SetupGate` 或「关于与更新」面板触发 `provisionBuiltin('openclaw')`，用内置 node 跑 `npm install -g openclaw@latest --ignore-scripts`，`npm_config_prefix` 指向 `userData/openclaw`（可写），实际入口是 `userData/openclaw/node_modules/openclaw/openclaw.mjs`；发现路径 `openclawRoots()` 也把 userData 排在首位。openclaw 有 postinstall 生命周期脚本，故强制 `--ignore-scripts`。开发者仍可用 `npm run setup:openclaw` 预置到 `resources/openclaw`（dev 兜底路径），该脚本**不再**在打包期由 `prebuild` 自动触发。
 - **运行时要求**：openclaw 声明 `engines >=24.16.0 <25 || >=26.1.0`，dsh 无上限。这是把内置 Node 升到 `v24.21.0` 的直接原因——一个版本同时满足两者。启动时容器始终用**内置 node** 直接跑 `.mjs` 入口，而不是 npm 的 `.cmd` shim（后者会回退到 PATH 上第一个 `node.exe`，可能是更旧的系统 node），因此不依赖 shell、路径含空格也安全。
 - **配置 home**：默认使用 openclaw CLI 自己的 `~/.openclaw`（JSON5 的 `openclaw.json`），与终端里的 openclaw 共用同一套配置。设置页「环境目录 → OPENCLAW 配置目录」可改；主进程把 `OPENCLAW_STATE_DIR` 注入 spawn 环境。
 - **page 形态**：`pages/openclaw/container.json` 写入 `{"kind":"openclaw","openclaw":{"port":18789}}`。启动命令是 `<内置node> openclaw.mjs gateway run --force --port <p>`——`gateway` 是命令组，裸跑只打印帮助、永不监听，必须用前台子命令 `gateway run`；`--force` 清掉端口上的残留进程以便重启即起。就绪后 Control UI 在 `http://127.0.0.1:<port>`，端口轮询沿用非 dsh 路径，但 openclaw 首次启动会自装 provider 插件并跑状态迁移（约 30s+ 才 LISTEN），故其就绪超时放宽到 ~120s（`DSH_OPENCLAW_READY_TIMEOUT_MS`）。
@@ -129,12 +129,12 @@ openclaw 是多渠道 AI 网关，npm 包 `openclaw`（本项目自带 latest）
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm run dev`                                         | electron-vite 开发                                                                                                                             |
 | `npm run build`                                       | typecheck + 打包渲染层/主进程/preload                                                                                                          |
-| `npm run build:win`                                   | electron-builder NSIS 安装包（内置 node 经 extraResources 随包分发）                                                                           |
+| `npm run build:win`                                   | electron-builder NSIS 安装包（运行时**不再内置**，首启按需下载到 userData；仅 icon.png/pages/boot.cjs 经 extraResources 随包）                  |
 | `npm test`                                            | vitest（page 生命周期真进程测试 + git 检测 fixture 测试 + dsh 插件管理真实 CLI 测试 + 终端命令生成）                                           |
 | `E2E_DSH_BOOT=1 npx vitest run test/dsh.boot.test.ts` | 真启动一个 dsh web profile，验证端口发现与带 token 的 URL                                                                                      |
 | `npm run setup:node`                                  | 下载解压内置 Node                                                                                                                              |
-| `npm run setup:openclaw`                              | 用内置 node 把 openclaw（latest）装进 `resources/openclaw`，随包分发；幂等（已装即跳过，`--force` 刷新），`npm run build` 经 prebuild 自动触发 |
-| `npm run setup:dsh`                                   | 用内置 node 把 dsh（alpha）+ pnpm（latest）装进 `resources/dsh`，随包分发；同样幂等 + prebuild 自动触发，并修复 pnpm 的 Windows shim           |
+| `npm run setup:openclaw`                              | **dev 兜底**：用内置 node 把 openclaw（latest）装进 `resources/openclaw`（打包产物不再内置，运行时改下载到 `userData/openclaw`）；幂等，`--force` 刷新 |
+| `npm run setup:dsh`                                   | **dev 兜底**：用内置 node 把 dsh（alpha）+ pnpm（latest）装进 `resources/dsh`（打包产物不再内置，运行时改下载到 `userData/dsh`）；同样幂等，并修复 pnpm 的 Windows shim |
 | `node tools/build-icon.cjs <source.png> [shrink]`     | 由鲸鱼源图重绘图标：裁掉水印带→居中取方→缩放，产出 `resources/icon.png` 与手工组装的 `build/icon.ico`（PNG-in-ICO，7 个尺寸）                  |
 
 ## 已知限制

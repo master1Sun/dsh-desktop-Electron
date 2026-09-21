@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import MarketView from '../views/MarketView.vue'
 import { t, locale } from '../i18n'
 import whaleIcon from '../assets/whale.png'
 
 const props = defineProps<{
-  url: string
+  /** Every page opened this session, one mounted <webview> each. Switching only toggles
+      visibility so a guest session (openclaw's one-time token, dsh terminals) survives. */
+  sessions: { id: string; url: string }[]
+  /** Session currently on screen; null while the market / a CLI terminal owns the surface. */
+  activeId: string | null
   loading: boolean
   startingText?: string
   /** Current boot phase label streamed from the main process (empty until the first event). */
@@ -81,8 +85,16 @@ onBeforeUnmount(() => {
   if (tipTimer) clearInterval(tipTimer)
 })
 
-/** App.vue's toolbar needs the guest element to open its DevTools / drive history nav. */
-const webviewEl = ref<HTMLElement | null>(null)
+/** Per-page mounted <webview> elements, keyed by session id. */
+const webviewEls = ref<Record<string, HTMLElement | null>>({})
+function setWebviewRef(id: string, el: unknown): void {
+  webviewEls.value[id] = (el as HTMLElement | null) || null
+}
+
+/** The session on screen; drives the loading overlay + the top-bar nav buttons. */
+const activeUrl = computed(
+  () => props.sessions.find((s) => s.id === props.activeId)?.url || ''
+)
 
 /** Minimal slice of the Electron <webview> API used for in-page history navigation. */
 interface WebviewNav {
@@ -90,14 +102,17 @@ interface WebviewNav {
   canGoForward?: boolean
   goBack?: () => void
   goForward?: () => void
+  reload?: () => void
   loadURL?: (url: string) => Promise<void>
 }
-const guest = (): WebviewNav | null => webviewEl.value as unknown as WebviewNav | null
+const guest = (id: string | null = props.activeId): WebviewNav | null =>
+  (id && (webviewEls.value[id] as unknown as WebviewNav)) || null
 
 /** Last pushed nav state, so syncNav only emits when it actually changes. */
 const nav = ref({ back: false, forward: false })
-function syncNav(): void {
-  const el = guest()
+function syncNav(id: string): void {
+  if (id !== props.activeId) return
+  const el = guest(id)
   const next = { back: Boolean(el?.canGoBack), forward: Boolean(el?.canGoForward) }
   if (next.back !== nav.value.back || next.forward !== nav.value.forward) {
     nav.value = next
@@ -113,32 +128,31 @@ function goForward(): void {
   guest()?.goForward?.()
 }
 
-// A fresh src (page / external switch) starts a new history stack — reflect it at once.
-watch(
-  () => props.url,
-  () => {
-    nav.value = { back: false, forward: false }
-    emit('nav-state', nav.value)
-  }
-)
-
-function onStopLoading(): void {
-  emit('guest-stop-loading')
+/**
+ * Top-bar reload: refresh the guest IN PLACE without touching its URL. Re-pointing src
+ * (even by a `#…` hash) makes openclaw's Control UI see a different gateway address and
+ * pop its "switch gateway?" confirm on every refresh.
+ */
+function reload(): boolean {
+  const g = guest()
+  if (!g?.reload) return false
+  g.reload()
+  return true
 }
 
-/* The <webview> custom element is registered lazily by Electron; await it before
-   touching instance methods or Vue would bind listeners to a plain HTMLElement. */
-onMounted(async () => {
-  // Plain-browser/dev-tools path has no <webview> wiring; whenDefined rejects there.
-  await customElements.whenDefined('webview').catch(() => undefined)
-  const el = webviewEl.value
-  if (!el) return
-  // The webview persists across src changes (v-show), so these listeners attach once.
-  el.addEventListener('did-navigate', syncNav)
-  el.addEventListener('did-navigate-in-page', syncNav)
-  el.addEventListener('did-start-loading', syncNav)
-  el.addEventListener('dom-ready', syncNav)
+// A fresh src (page / external switch) starts a new history stack — reflect it at once.
+watch(activeUrl, () => {
+  nav.value = { back: false, forward: false }
+  emit('nav-state', nav.value)
 })
+
+function onStopLoading(id: string): void {
+  if (id === props.activeId) emit('guest-stop-loading')
+}
+function onDomReady(id: string): void {
+  syncNav(id)
+  onStopLoading(id)
+}
 
 /**
  * Keep window.open / target=_blank inside the SAME embedded page — never pop a window or
@@ -152,7 +166,13 @@ function onNewWindow(ev: Event): void {
   if (url) void guest()?.loadURL?.(url)?.catch(() => undefined)
 }
 
-defineExpose({ webviewEl, goBack, goForward })
+defineExpose({
+  /** The on-screen guest element, for App's DevTools / history toolbar. */
+  webviewEl: computed(() => (guest(props.activeId) as unknown as HTMLElement | null) || null),
+  goBack,
+  goForward,
+  reload
+})
 </script>
 
 <template>
@@ -205,18 +225,26 @@ defineExpose({ webviewEl, goBack, goForward })
       }}</pre>
     </div>
 
-    <div v-show="props.url" class="webview-wrap">
+    <div v-show="activeUrl" class="webview-wrap">
       <div v-if="props.loading" class="webview-loading">
         <span class="status-dot starting" /> {{ t('common.loading') }}
       </div>
+      <!-- One <webview> per opened page: switching only flips v-show, so a guest that is
+           already up (openclaw token, dsh terminal sessions) is never reloaded. -->
       <!-- eslint-disable-next-line vue/html-self-closing -->
       <webview
-        ref="webviewEl"
-        :src="props.url"
+        v-for="s in props.sessions"
+        :key="s.id"
+        :ref="(el) => setWebviewRef(s.id, el)"
+        v-show="s.id === props.activeId"
+        :src="s.url"
         class="wv"
         allowpopups
-        @did-stop-loading="onStopLoading"
-        @dom-ready="onStopLoading"
+        @did-stop-loading="onStopLoading(s.id)"
+        @dom-ready="onDomReady(s.id)"
+        @did-navigate="syncNav(s.id)"
+        @did-navigate-in-page="syncNav(s.id)"
+        @did-start-loading="syncNav(s.id)"
         @new-window="onNewWindow"
       />
     </div>
@@ -224,7 +252,7 @@ defineExpose({ webviewEl, goBack, goForward })
     <!-- Default workbench: the built-in plugin market static view, overlaid so the
          webview below it never unmounts when the user switches to it. -->
     <MarketView
-      v-if="!props.startingText && (props.marketActive || !props.url)"
+      v-if="!props.startingText && (props.marketActive || !activeUrl)"
       class="market-layer"
       @install-pages="emit('install-pages')"
     />

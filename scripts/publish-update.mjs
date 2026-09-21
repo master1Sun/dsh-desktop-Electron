@@ -1,11 +1,16 @@
-// Publish the compiled app as an over-the-air update: build → pack out/ into app.asar
-// → commit it to the orphan `release` branch → push. Packaged clients fetch that branch
-// (git protocol, so private repos ride on the user's existing git credentials) and swap
-// their running asar via src/boot.cjs.
+// Publish the compiled app as an over-the-air update: run electron-builder --dir, then ship
+// its authoritative `app.asar` + the asarUnpack'd `app.asar.unpacked` native tree as a single
+// app.zip → commit it to the orphan `release` branch → push. Packaged clients fetch that branch
+// (git protocol, so private repos ride on the user's existing git credentials), unzip it into
+// <installDir>/resources/updates/<commit>/ and boot.cjs swaps the running asar via src/boot.cjs.
+//
+// We deliberately reuse electron-builder's output instead of hand-packing out/: a hand-packed
+// asar silently omitted every runtime dependency (the ~59 MB of node_modules) and node-pty's
+// native binaries, so the resulting small asar booted straight into a missing-module crash.
 //
 // Usage:  npm run publish:update [-- --skip-build]
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -22,14 +27,33 @@ function git(args, cwd = root) {
   return execFileSync('git', args, { cwd, encoding: 'utf-8' }).trim()
 }
 
-if (!existsSync(join(root, 'out/main/index.js'))) {
-  if (skipBuild) {
-    console.error('[publish] --skip-build but out/ is missing — run npm run build first')
+// The OTA artifact must equal what the installer ships, so we reuse electron-builder's own
+// output (app.asar + the asarUnpack'd app.asar.unpacked native tree). Hand-packing out/ was
+// the original bug: it omitted every runtime dependency and node-pty's binaries.
+function findBuilderResources() {
+  const dist = join(root, 'dist')
+  if (!existsSync(dist)) return null
+  for (const name of readdirSync(dist)) {
+    if (!name.endsWith('-unpacked')) continue
+    const r = join(dist, name, 'resources')
+    if (existsSync(join(r, 'app.asar'))) return r
+  }
+  return null
+}
+
+let resources = findBuilderResources()
+if (skipBuild) {
+  if (!resources) {
+    console.error('[publish] --skip-build but no dist/*-unpacked/resources/app.asar found — run npm run build:unpack first')
     process.exit(1)
   }
-  run('npm', ['run', 'build'])
-} else if (!skipBuild) {
-  run('npm', ['run', 'build'])
+} else {
+  run('npm', ['run', 'build:unpack'])
+  resources = findBuilderResources()
+  if (!resources) {
+    console.error('[publish] electron-builder --dir produced no dist/*-unpacked/resources/app.asar')
+    process.exit(1)
+  }
 }
 
 // ---- publish to the orphan release branch WITHOUT a worktree or local branch ----
@@ -37,7 +61,6 @@ if (!existsSync(join(root, 'out/main/index.js'))) {
 // tracker here rewrote HEAD~1 into an orphan commit mid-run). Instead: stage the artifacts
 // in a throwaway index inside the main repo (objects are shared, so commit-tree -p <remote
 // tip> works), then push the raw commit SHA — no local ref, nothing for a hook to touch.
-const { createPackage } = await import('@electron/asar')
 const branch = 'release'
 const remoteRef = `refs/heads/${branch}`
 const stage = join(root, 'dist-release/app-src')
@@ -56,34 +79,28 @@ try {
   }
   if (!base) console.log('[publish] no release branch on origin yet — creating the first orphan commit')
 
-  // Pack from a clean copy: createPackage() refuses to nest an asar inside its own
-  // source dir, so the previous run's app.asar must not be present here.
-  const packSrc = join(root, 'dist-release/app-pack')
-  rmSync(packSrc, { recursive: true, force: true })
-  mkdirSync(join(packSrc, 'out'), { recursive: true })
-  for (const dir of ['main', 'preload', 'renderer']) {
-    cpSync(join(root, 'out', dir), join(packSrc, 'out', dir), { recursive: true })
-  }
-  writeFileSync(
-    join(packSrc, 'package.json'),
-    JSON.stringify({ name: pkg.name, version: pkg.version, main: './out/main/index.js' }, null, 2)
-  )
-  const asarOut = join(stage, 'app.asar')
-  // Wipe the staging dir. On Windows a previous run's app.asar may be locked by an
+  // Stage the payload as a single zip: app.asar + (when present) the asarUnpack'd
+  // app.asar.unpacked native tree. One blob keeps the client's single-git-blob streaming/resume
+  // path intact; unzipping into <commit>/ yields app.asar with its sibling app.asar.unpacked,
+  // exactly matching the installer layout boot.cjs relies on.
+  // Wipe the staging dir. On Windows a previous run's app.zip may be locked by an
   // IDE indexer — rename it to a temp name first (rename is atomic on the same volume),
   // then remove the old dir without waiting for the lock to clear.
   try {
     rmSync(stage, { recursive: true, force: true })
   } catch {
     try {
-      const tmpName = join(stage, `app.asar.${Date.now()}.tmp`)
-      require('node:fs').renameSync(join(stage, 'app.asar'), tmpName)
+      renameSync(join(stage, 'app.zip'), join(stage, `app.zip.${Date.now()}.tmp`))
     } catch {}
     try { rmSync(stage, { recursive: true, force: true }) } catch {}
   }
   mkdirSync(stage, { recursive: true })
-  await createPackage(packSrc, asarOut)
-  console.log(`[publish] packed app.asar (${Math.round(statSync(asarOut).size / 1024 / 1024)} MB)`)
+  const zipOut = join(stage, 'app.zip')
+  const entries = ['app.asar']
+  if (existsSync(join(resources, 'app.asar.unpacked'))) entries.push('app.asar.unpacked')
+  // bsdtar (shipped with Windows 10+/macOS/Linux) picks the zip format from the .zip suffix via -a.
+  run('tar', ['-a', '-c', '-f', zipOut, '-C', resources, ...entries])
+  console.log(`[publish] packed app.zip (${Math.round(statSync(zipOut).size / 1024 / 1024)} MB)`)
   writeFileSync(join(stage, 'version.txt'), `${pkg.version}\n${git(['rev-parse', 'HEAD'])}\n`)
 
   rmSync(idx, { force: true })
@@ -91,8 +108,8 @@ try {
   const env = { ...process.env, GIT_INDEX_FILE: idx, GIT_DIR: join(root, '.git'), GIT_WORK_TREE: stage }
   delete env.GIT_QUARANTINE_PATH
   const out = (args) => execFileSync('git', args, { cwd: stage, encoding: 'utf-8', env }).trim()
-  // app.asar matches the global .gitignore *.asar rule — force-add the artifacts.
-  out(['add', '-f', 'app.asar', 'version.txt'])
+  // app.zip + version.txt live under the git-ignored dist-release/ — force-add them.
+  out(['add', '-f', 'app.zip', 'version.txt'])
   const tree = out(['write-tree'])
   const baseTree = base ? git(['rev-parse', `${base}^{tree}`]) : null
   if (base && tree === baseTree) {

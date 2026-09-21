@@ -23,6 +23,8 @@ const DEFAULTS: ContainerSettings = {
   envRoot: '',
   dshHome: '',
   openclawHome: '',
+  // empty = the OS Downloads folder; embedded-page downloads save there (see downloads.ts)
+  downloadDir: '',
   pageEnvs: {},
   pagePorts: {},
   // a page that crashes after having run is relaunched automatically; off surfaces the error only
@@ -237,4 +239,21 @@ export function applyLaunchAtStartup(enabled: boolean): void {
 export function resolvePagePort(pageId: string, declared: number): number {
   const override = getSettings().pagePorts?.[pageId]
   return isValidPort(override) ? Number(override) : declared
+}
+
+/** The OS Downloads folder, falling back to userData when the platform doesn't provide one. */
+export function defaultDownloadDir(): string {
+  try {
+    const p = app.getPath('downloads')
+    if (p) return p
+  } catch {
+    /* fall through */
+  }
+  return join(app.getPath('userData'), 'Downloads')
+}
+
+/** Effective webview download folder: the user override (`~` expanded) or the OS default. */
+export function resolveDownloadDir(): string {
+  const override = (getSettings().downloadDir || '').trim()
+  return override ? expandHome(override) : defaultDownloadDir()
 }

@@ -27,6 +27,8 @@ import {
   resolveOpenclawHome,
   resolveEnvRoot,
   resolveInstallDir,
+  resolveDownloadDir,
+  defaultDownloadDir,
   applyLaunchAtStartup
 } from './store'
 import { installFromGit, installFromLocalDir, removePage } from './installer'
@@ -364,6 +366,7 @@ export function registerIpc(registry: PageRegistry): void {
         envRoot?: string
         dshHome?: string
         openclawHome?: string
+        downloadDir?: string
         pageEnvs?: Record<string, Record<string, string>>
         pagePorts?: Record<string, number>
         crashAutoRestart?: boolean
@@ -400,6 +403,16 @@ export function registerIpc(registry: PageRegistry): void {
       envRoot: resolveEnvRoot(),
       installDir: resolveInstallDir(),
       custom: Boolean((getSettings().envRoot || '').trim())
+    })
+  )
+
+  // The effective webview download folder + the OS default an empty override falls back to,
+  // so the Settings panel can show a real placeholder and a "reveal current" value.
+  ipcMain.handle(IPC.DownloadDir, (): IpcResult =>
+    ok({
+      downloadDir: resolveDownloadDir(),
+      defaultDir: defaultDownloadDir(),
+      custom: Boolean((getSettings().downloadDir || '').trim())
     })
   )
 

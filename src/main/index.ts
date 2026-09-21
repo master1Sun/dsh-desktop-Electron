@@ -11,6 +11,7 @@ import { getSettings, resolvePagesDir, resolveProjectDir, applyLaunchAtStartup }
 import { getNodeRuntimeInfo } from './node-runtime'
 import { m, onLocaleChanged, registerLocaleSource } from './i18n'
 import { installFileLogger } from './logger'
+import { registerDownloadHandling } from './downloads'
 import icon from '../../resources/icon.png?asset'
 
 /**
@@ -265,11 +266,17 @@ function createTray(): void {
 async function verifyNodeRuntime(): Promise<void> {
   const info = await getNodeRuntimeInfo()
   if (!info.ok) {
-    const msg = info.version
-      ? m('err.nodeVersion', { version: info.version })
-      : m('err.nodeMissing')
-    console.error(`[container] ${msg}`)
-    dialogWarn(msg)
+    // A missing bundled Node is the expected state on a slim install: the first-run
+    // SetupGate overlay already blocks the UI and drives the on-demand download, so a
+    // native warning dialog here is just a redundant nag. Log it for developers only.
+    // A present-but-wrong version is an anomaly the gate can't catch — still surface it.
+    if (info.version) {
+      const msg = m('err.nodeVersion', { version: info.version })
+      console.error(`[container] ${msg}`)
+      dialogWarn(msg)
+    } else {
+      console.error(`[container] ${m('err.nodeMissing')}`)
+    }
   } else {
     console.log(`[container] bundled node OK: ${info.path} (${info.version})`)
   }
@@ -316,6 +323,10 @@ if (!gotLock) {
         })
       }
     })
+
+    // Files a user grabs inside an embedded page / external site stream into the top progress
+    // bar and pop a completion notice naming the save location (see downloads.ts).
+    registerDownloadHandling()
 
     await verifyNodeRuntime()
 

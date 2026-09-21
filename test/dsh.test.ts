@@ -1,5 +1,6 @@
 import { describe, it, expect, afterAll, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PageState } from '../src/shared/types'
@@ -235,5 +236,33 @@ describe('dsh token resolution (DSH panel)', () => {
     expect(
       pages.resolveDshToken([dshPage({ launchUrl: 'http://127.0.0.1:8899/?token=x' })], '  ')
     ).toMatchObject({ kind: 'ok', token: 'x' })
+  })
+})
+
+describe('stale dsh writer-lock reclaim', () => {
+  it('drops locks whose holder pid is dead, keeps live and unparseable ones', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-locks-'))
+    // A finished spawnSync child: its pid is guaranteed not running anymore.
+    const deadPid = spawnSync(process.execPath, ['-e', '0']).pid as number
+    writeFileSync(join(dir, '.credentials.yaml.lock'), String(deadPid))
+    writeFileSync(join(dir, '.live.lock'), String(process.pid))
+    writeFileSync(join(dir, '.unknown.lock'), 'not-a-pid')
+    // A crashed holder leaves an EMPTY lock; backdate it past the grace window.
+    const oldEmpty = join(dir, '.empty-old.lock')
+    writeFileSync(oldEmpty, '')
+    const past = new Date(Date.now() - 60_000)
+    utimesSync(oldEmpty, past, past)
+    // A fresh empty lock may be a live writer mid-flush: must be left alone.
+    writeFileSync(join(dir, '.empty-fresh.lock'), '')
+
+    const removed = dsh.clearStaleDshLocks(dir)
+
+    expect(removed.sort()).toEqual([join(dir, '.credentials.yaml.lock'), oldEmpty].sort())
+    expect(existsSync(join(dir, '.credentials.yaml.lock'))).toBe(false)
+    expect(existsSync(oldEmpty)).toBe(false)
+    expect(existsSync(join(dir, '.empty-fresh.lock'))).toBe(true)
+    expect(existsSync(join(dir, '.live.lock'))).toBe(true)
+    expect(existsSync(join(dir, '.unknown.lock'))).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
   })
 })

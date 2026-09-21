@@ -27,6 +27,8 @@ export interface Settings {
   envRoot: string
   dshHome: string
   openclawHome: string
+  /** where embedded-page downloads save; empty = the OS Downloads folder */
+  downloadDir: string
   pageEnvs: Record<string, Record<string, string>>
   pagePorts: Record<string, number>
 }
@@ -52,6 +54,7 @@ export const useSettingsStore = defineStore('settings', () => {
     envRoot: '',
     dshHome: '',
     openclawHome: '',
+    downloadDir: '',
     pageEnvs: {},
     pagePorts: {}
   })

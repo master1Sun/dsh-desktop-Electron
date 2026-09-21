@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import type { PageState } from '../stores/pages'
+import { useRuntimesStore } from '../stores/runtimes'
 import { t } from '../i18n'
 
 /**
@@ -58,6 +59,19 @@ function onStart(p: PageState): void {
  */
 function needsStart(p: PageState): boolean {
   return !p.external && p.kind !== 'terminal' && p.status !== 'running'
+}
+
+/**
+ * A hosted dsh/openclaw page whose runtime is not installed yet: the row is flagged so the
+ * user is guided to install (the ▶ click is intercepted upstream and opens the setup guide)
+ * rather than attempting a start that can only fail. A running page is never blocked.
+ */
+const runtimes = useRuntimesStore()
+function blocked(p: PageState): boolean {
+  if (p.status === 'running') return false
+  if (p.kind === 'dsh') return !runtimes.dshInstalled
+  if (p.kind === 'openclaw') return !runtimes.openclawInstalled
+  return false
 }
 
 /** Traffic-light / status labels for tooltips, in the active language. */
@@ -133,12 +147,22 @@ defineExpose({ close })
       >
         <button
           class="row-name"
+          :class="{ 'is-blocked': blocked(p) }"
           :disabled="needsStart(p)"
-          :title="needsStart(p) ? t('menu.notRunningHint') : statusText(p)"
+          :title="
+            blocked(p)
+              ? t('setup.runtimeMissingTag')
+              : needsStart(p)
+                ? t('menu.notRunningHint')
+                : statusText(p)
+          "
           @click="pick(p)"
         >
           {{ p.name }}
         </button>
+        <span v-if="blocked(p)" class="block-tag" :title="t('setup.runtimeMissingTag')">{{
+          t('setup.missingTag')
+        }}</span>
         <button
           v-if="needsStart(p)"
           class="row-start"
@@ -255,6 +279,20 @@ defineExpose({ close })
 .row-name:disabled {
   color: var(--text-dim);
   cursor: not-allowed;
+}
+
+.row-name.is-blocked {
+  color: var(--text-dim);
+}
+
+.block-tag {
+  flex: none;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
 }
 
 .row-start {

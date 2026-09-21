@@ -10,7 +10,13 @@ import AppManager from './AppManager.vue'
 import { usePagesStore } from '../stores/pages'
 import { useUpdatesStore } from '../stores/updates'
 import { useTasksStore } from '../stores/tasks'
-import type { BuiltinKind, IpcResult, NodeVersionInfo, UpdateCheckResult, UpdateProgress } from '@shared/types'
+import type {
+  BuiltinKind,
+  IpcResult,
+  NodeVersionInfo,
+  UpdateCheckResult,
+  UpdateProgress
+} from '@shared/types'
 import { parseAppPanel } from '@shared/types'
 import { t } from '../i18n'
 
@@ -163,7 +169,13 @@ const sourceTag = (r: { name: string; source?: string; action?: string }): strin
 const refLabel = (r: { source?: string; branch?: string; latestVersion?: string }): string =>
   r.source && r.source !== 'git' ? r.latestVersion || '' : r.branch || ''
 
-/** Subtitle under the name: dir for git, current→latest for npm/builtin. */
+/**
+ * Subtitle under the name: a labelled version pair as soon as a row carries any version —
+ * npm/built-in rows always do, and so does the container's own OTA row, which downloads
+ * the new app.asar from a git *release branch* and so used to fall through to its install
+ * dir under the old git-vs-npm test. A plain local git checkout has no versions at all and
+ * still reads as its folder.
+ */
 const subLabel = (r: {
   dir: string
   source?: string
@@ -171,8 +183,11 @@ const subLabel = (r: {
   currentVersion?: string
   latestVersion?: string
 }): string =>
-  r.source && r.source !== 'git' && r.action !== 'none'
-    ? `${r.currentVersion || '?'} → ${r.latestVersion || '?'}`
+  r.currentVersion || r.latestVersion || (r.source && r.source !== 'git' && r.action !== 'none')
+    ? t('panel.verLocalLatest', {
+        current: r.currentVersion || '?',
+        latest: r.latestVersion || '?'
+      })
     : r.dir
 
 /** The container self-update streams a large app.asar: surface live download progress. */

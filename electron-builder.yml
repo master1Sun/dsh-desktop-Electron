@@ -30,17 +30,14 @@ extraResources:
   # Lives outside app.asar so electron-builder never tries to resolve it inside the archive.
   - from: src/boot.cjs
     to: boot.cjs
-  # Ship the whole bundled-runtime tree in ONE matcher.
-  #
-  # Do NOT use per-directory entries (from: resources/dsh, to: dsh): electron-builder's
-  # filter drops the *root* node_modules of every copy source
-  # (createFilter() in app-builder-lib/out/util/filter.js: `if (relative === "node_modules") return false`),
-  # so such an entry silently ships the npm prefix WITHOUT its node_modules — only the
-  # shims/.npmrc land in the installer. Copying `resources/` as a whole moves that
-  # directory to `dsh/node_modules`, which is kept.
+  # Bundled runtimes (node/dsh/openclaw) are NO LONGER shipped in the installer — they are
+  # provisioned on demand at runtime into userData (node→userData/node, dsh→userData/dsh,
+  # openclaw→userData/openclaw) and driven by the first-run SetupGate (download/guide). This
+  # keeps the installer small; only icon.png still ships here (required at runtime for the
+  # taskbar/tray; appIconPath() probes this unpacked copy as a fallback to the asar `?asset`).
   - from: resources
     to: .
-    filter: ['**/*']
+    filter: ['icon.png']
   # builtin page metas (dsh-web; openclaw is seeded by ensureDefaultOpenclawPage at
   # runtime) — seeded into userData/pages on first launch so they survive packaged updates.
   - from: pages

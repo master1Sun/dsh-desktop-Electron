@@ -3,6 +3,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 import {
   IPC,
   type BuiltinKind,
+  type DownloadProgress,
   type InstallProgress,
   type PageProgress,
   type UpdateCheckResult,
@@ -37,6 +38,7 @@ const api = {
   updateSettings: (partial: Record<string, unknown>) =>
     ipcRenderer.invoke(IPC.UpdateSettings, partial),
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
+  getDownloadDir: () => ipcRenderer.invoke(IPC.DownloadDir),
   checkUpdates: (force?: boolean) => ipcRenderer.invoke(IPC.CheckUpdates, force),
   performUpdate: (target: UpdateCheckResult) => ipcRenderer.invoke(IPC.PerformUpdate, target),
   openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
@@ -60,6 +62,11 @@ const api = {
     const listener = (_e: Electron.IpcRendererEvent, p: InstallProgress): void => cb(p)
     ipcRenderer.on(IPC.OnInstallProgress, listener)
     return () => ipcRenderer.removeListener(IPC.OnInstallProgress, listener)
+  },
+  onDownloadProgress: (cb: (p: DownloadProgress) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, p: DownloadProgress): void => cb(p)
+    ipcRenderer.on(IPC.OnDownloadProgress, listener)
+    return () => ipcRenderer.removeListener(IPC.OnDownloadProgress, listener)
   },
   relaunchApp: () => ipcRenderer.invoke(IPC.RelaunchApp),
   dshStatus: (profile?: string) => ipcRenderer.invoke(IPC.DshStatus, profile),

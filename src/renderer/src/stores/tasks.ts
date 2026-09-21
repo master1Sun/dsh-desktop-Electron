@@ -94,6 +94,25 @@ export const useTasksStore = defineStore('tasks', () => {
     })
   })
 
+  // File downloads started inside an embedded page / external site (e.g. baidu.com). The main
+  // process owns the native DownloadItem and broadcasts every byte update here, so a grab
+  // counts up in the same top bar as an app update — the row is labelled by the file name and
+  // its message names the save location. The completion notification is popped in the main
+  // process; here a terminal (completed / cancelled) snapshot just drops the row.
+  window.container?.onDownloadProgress?.((p) => {
+    const id = 'download:' + p.id
+    if (p.state !== 'progressing') {
+      remove(id)
+      return
+    }
+    const dir = p.savePath ? p.savePath.replace(/[\\/][^\\/]*$/, '') : ''
+    upsert(id, {
+      label: p.filename,
+      percent: p.percent,
+      message: dir ? `${t('topbar.downloadTo')} ${dir}` : t('topbar.downloading')
+    })
+  })
+
   const list = computed<ProgressTask[]>(() => Object.values(tasks))
   const active = computed(() => list.value.length > 0)
   /** True while a specific built-in runtime install is in flight — drives the button spinner. */

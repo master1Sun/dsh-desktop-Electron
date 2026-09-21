@@ -86,6 +86,10 @@ const zh: Dict = {
     updateNoRow: '尚未检测到该应用的更新信息'
   },
   settings: {
+    tabView: '界面与视图',
+    tabBehavior: '行为',
+    tabDownload: '外链下载',
+    tabEnv: '环境目录',
     interfaceTitle: '界面与默认视图',
     defaultPage: '默认打开页面',
     defaultPageTip:
@@ -131,6 +135,12 @@ const zh: Dict = {
     themeSwitched: '主题已切换',
     pageEnvSaved: '环境目录已保存，重启该页面生效',
     chooseEnvDir: '选择环境目录',
+    downloadDir: '下载目录',
+    downloadDirFollow: '系统下载文件夹',
+    downloadDirTip:
+      '内嵌网页 / 外部地址里下载的文件会保存到此目录；留空即使用系统「下载」文件夹（当前 {dir}）。',
+    chooseDownloadDir: '选择下载目录',
+    downloadSaved: '下载目录已保存',
     tagExternal: '（外部）',
     tagDsh: '（DSH）',
     tagTerminal: '（终端）',
@@ -145,6 +155,8 @@ const zh: Dict = {
     checkUpdates: '立即检测',
     colName: '名称',
     colBranch: '分支/最新版',
+    /** Subtitle under every versioned row (container OTA / npm / built-in runtimes). */
+    verLocalLatest: '本机 {current} → 服务器最新 {latest}',
     colStatus: '状态',
     colAction: '操作',
     statusHasUpdate: '有更新',
@@ -430,19 +442,23 @@ const zh: Dict = {
     openclaw: 'OpenClaw',
     installing: '安装中…',
     downloading: '下载中…',
+    downloadTo: '保存到',
     extracting: '解压校验中…',
     writing: '写入中…'
   },
   setup: {
     title: '初始化内置运行环境',
-    intro: '首次使用需安装容器内置的运行环境。必须先安装内置 Node，完成后才能安装 DSH 与 OpenClaw。',
+    intro:
+      '首次使用需安装容器内置的运行环境。必须先安装内置 Node，完成后才能安装 DSH 与 OpenClaw。',
     nodeRequired: '请先安装内置 Node：DSH / OpenClaw 依赖它安装与运行。',
     installedTag: '已安装',
     missingTag: '未安装',
     installBtn: '安装',
     later: '稍后安装',
     enter: '进入应用',
-    laterHint: 'DSH / OpenClaw 可稍后在「帮助 ▸ 关于与更新」中随时安装或升级。'
+    laterHint: 'DSH / OpenClaw 可稍后在「帮助 ▸ 关于与更新」中随时安装或升级。',
+    runtimeMissingTag: '运行环境未安装',
+    runtimeMissingToast: '{name} 依赖的运行环境尚未安装，已为你打开安装引导'
   },
   terminal: {
     newTab: '新建终端',
@@ -601,6 +617,10 @@ const en: Dict = {
     updateNoRow: 'No update information detected for this app yet'
   },
   settings: {
+    tabView: 'Interface & View',
+    tabBehavior: 'Behavior',
+    tabDownload: 'External Downloads',
+    tabEnv: 'Environment',
     interfaceTitle: 'Interface & default view',
     defaultPage: 'Default page to open',
     defaultPageTip:
@@ -646,6 +666,12 @@ const en: Dict = {
     themeSwitched: 'Theme switched',
     pageEnvSaved: 'Env dir saved; restart this page to apply',
     chooseEnvDir: 'Choose environment directory',
+    downloadDir: 'Download folder',
+    downloadDirFollow: 'System Downloads folder',
+    downloadDirTip:
+      'Files downloaded inside an embedded page / external site save here; empty uses the OS Downloads folder (currently {dir}).',
+    chooseDownloadDir: 'Choose download folder',
+    downloadSaved: 'Download folder saved',
     tagExternal: ' (external)',
     tagDsh: ' (DSH)',
     tagTerminal: ' (terminal)',
@@ -660,6 +686,8 @@ const en: Dict = {
     checkUpdates: 'Check now',
     colName: 'Name',
     colBranch: 'Branch / latest',
+    /** Subtitle under every versioned row (container OTA / npm / built-in runtimes). */
+    verLocalLatest: 'local {current} → server latest {latest}',
     colStatus: 'Status',
     colAction: 'Action',
     statusHasUpdate: 'Update available',
@@ -953,6 +981,7 @@ const en: Dict = {
     openclaw: 'OpenClaw',
     installing: 'Installing…',
     downloading: 'Downloading…',
+    downloadTo: 'Saving to',
     extracting: 'Extracting…',
     writing: 'Writing…'
   },
@@ -960,13 +989,16 @@ const en: Dict = {
     title: 'Set up the built-in runtimes',
     intro:
       'The container needs its built-in runtimes installed before first use. Install the built-in Node first — DSH and OpenClaw can only be installed once it is present.',
-    nodeRequired: 'Install the built-in Node first: DSH / OpenClaw depend on it to install and run.',
+    nodeRequired:
+      'Install the built-in Node first: DSH / OpenClaw depend on it to install and run.',
     installedTag: 'Installed',
     missingTag: 'Not installed',
     installBtn: 'Install',
     later: 'Install later',
     enter: 'Enter app',
-    laterHint: 'DSH / OpenClaw can be installed or upgraded any time from Help ▸ About & Updates.'
+    laterHint: 'DSH / OpenClaw can be installed or upgraded any time from Help ▸ About & Updates.',
+    runtimeMissingTag: 'Runtime not installed',
+    runtimeMissingToast: '{name} needs a runtime that is not installed yet; opened the setup guide'
   },
   terminal: {
     newTab: 'New terminal',
@@ -1082,6 +1114,6 @@ export function setLocale(next: Locale): void {
 }
 
 /** Locale object for Element Plus' built-in components, matching the active language. */
-export function epLocale() {
+export function epLocale(): typeof zhCn | typeof enLocale {
   return locale.value === 'en' ? enLocale : zhCn
 }

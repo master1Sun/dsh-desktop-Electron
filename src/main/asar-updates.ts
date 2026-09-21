@@ -14,6 +14,7 @@ import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
+import extract from 'extract-zip'
 import {
   CONTAINER_REPO_URL,
   type UpdateProgress,
@@ -25,12 +26,13 @@ import { isNewer } from './update-service'
 
 /**
  * Over-the-air asar updates. The publisher (scripts/publish-update.mjs) commits the
- * compiled app.asar + version.txt to an orphan `release` branch; a packaged client
- * fetches that branch with its own git credentials, extracts the artifacts into
- * <installDir>/resources/updates/<commit>/app.asar, and boot.cjs swaps the running asar on
- * next launch. Each release lives in its own commit folder holding a literal `app.asar`, so
- * Electron's sibling `app.asar.unpacked` convention stays valid and a newer update can stage a
- * different file rather than overwrite the running (Windows-locked) asar.
+ * electron-builder artifacts (app.asar + the asarUnpack'd app.asar.unpacked native tree) as a
+ * single app.zip, plus version.txt, to an orphan `release` branch; a packaged client fetches that
+ * branch with its own git credentials, extracts the zip into
+ * <installDir>/resources/updates/<commit>/ (yielding a literal `app.asar` and its sibling
+ * `app.asar.unpacked`), and boot.cjs swaps the running asar on next launch. Each release lives in
+ * its own commit folder, so Electron's sibling `app.asar.unpacked` convention stays valid and a
+ * newer update can stage a different file rather than overwrite the running (Windows-locked) asar.
  *
  * The artifact is large, so the download is streamed and reports progress rather than
  * slurping a 512 MB buffer through a blocking `spawnSync` (which froze the whole main
@@ -88,6 +90,22 @@ export function readStagedUpdate(): StagedAsarUpdate | null {
     /* best-effort; next check just repeats the detection */
   }
   return null
+}
+
+/**
+ * Drop a pending asar record. boot.cjs boots `pendingAsar || currentAsar` unconditionally, so a
+ * pending entry that is NOT newer than the running version would silently DOWNGRADE the app on
+ * the next launch (e.g. local 0.1.5 with a leftover 0.1.4 download). Clearing it both stops the
+ * downgrade and lets the OTA row fall back to a plain "已是最新" state.
+ */
+export function clearStagedUpdate(): void {
+  const metaFile = join(updatesRoot(), 'update-meta.json')
+  try {
+    const meta = JSON.parse(readFileSync(metaFile, 'utf-8'))
+    writeFileSync(metaFile, JSON.stringify({ ...meta, pendingAsar: null }))
+  } catch {
+    /* no meta / unreadable: nothing staged to clear */
+  }
 }
 
 export type ProgressCb = (p: UpdateProgress) => void
@@ -286,7 +304,7 @@ function pruneOldReleases(root: string, keep: Set<string>): void {
 async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: ProgressCb): Promise<void> {
   const root = updatesRoot()
   mkdirSync(root, { recursive: true })
-  const rev = `${tip.commit}:app.asar`
+  const rev = `${tip.commit}:app.zip`
   const total = Number(runGit(['--git-dir', gitDir(), 'cat-file', '-s', rev]).trim())
   if (!Number.isFinite(total) || total <= 0) throw new Error(m('git.asarSizeUnknown'))
 
@@ -294,7 +312,7 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
   // release is never resumed into and a running asar is never overwritten in place.
   const dir = join(root, tip.commit)
   mkdirSync(dir, { recursive: true })
-  const part = join(dir, 'app.asar.part')
+  const part = join(dir, 'app.zip.part')
 
   let resumeFrom = 0
   if (existsSync(part)) {
@@ -308,10 +326,19 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
   if (statSync(part).size !== total)
     throw new Error(m('git.asarSizeMismatch', { want: total, got: statSync(part).size }))
 
-  const finalAsar = join(dir, 'app.asar')
-  rmSync(finalAsar, { force: true }) // same-commit re-download: replace the prior copy
+  const zipPath = join(dir, 'app.zip')
+  rmSync(zipPath, { force: true }) // same-commit re-download: replace the prior copy
   // Rename-after-complete: a half-written file can never be picked up as the pending update.
-  renameSync(part, finalAsar)
+  renameSync(part, zipPath)
+
+  // Unpack the release into <commit>/: this places app.asar *and* app.asar.unpacked (node-pty's
+  // native binaries). It is the step that actually materialises app.asar, so a crash before it
+  // leaves only the .zip on disk and boot.cjs can never see a half-extracted asar.
+  onProgress?.({ name, phase: 'extract', percent: 100, message: m('git.zipUnpacking') })
+  await extract(zipPath, { dir })
+  const stagedAsar = join(dir, 'app.asar')
+  if (!existsSync(stagedAsar) || statSync(stagedAsar).size < MIN_ASAR_BYTES)
+    throw new Error(m('git.asarExtractFailed'))
 
   // Preserve the running currentAsar as a rollback record and clear any stale broken flag while
   // staging the new artifact under its commit-relative path (boot.cjs joins this onto updates/).
@@ -355,8 +382,15 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
     // A completed download that no restart has consumed yet: surface "立即重启" and skip
     // the network round-trip entirely — unless the staged version is behind the tip, in
     // which case the fetch below re-points the row at the newer download.
-    const staged = readStagedUpdate()
-    if (staged && isNewer(current, staged.version)) {
+    let staged = readStagedUpdate()
+    if (staged && !isNewer(current, staged.version)) {
+      // Staged but NOT newer than what's running (a leftover download of an older release,
+      // or one already applied): offering a restart here would downgrade the app, so drop
+      // the pending entry and let the row read as up-to-date instead.
+      clearStagedUpdate()
+      staged = null
+    }
+    if (staged) {
       return {
         ...base,
         ok: true,
@@ -378,10 +412,10 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
       remoteHead: tip.commit.slice(0, 8),
       currentVersion: current,
       latestVersion: tip.version,
+      // local ahead of the release branch (e.g. a locally-built 0.1.5 vs server 0.1.4) is
+      // simply up-to-date: hasUpdate stays false and no action is offered.
       hasUpdate: isNewer(current, tip.version),
-      // Staged but not newer than what's running (e.g. a rollback install): boot.cjs will
-      // still swap it in, so a restart remains the only pending action.
-      pendingRestart: Boolean(staged)
+      pendingRestart: false
     }
   } catch (err) {
     return { ...base, error: (err as Error).message }

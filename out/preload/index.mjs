@@ -16,6 +16,8 @@ const IPC = {
   GetSettings: "container:get-settings",
   UpdateSettings: "container:update-settings",
   EnvRoot: "container:env-root",
+  /** resolved webview download folder + the OS default it falls back to (DownloadDirInfo) */
+  DownloadDir: "container:download-dir",
   CheckUpdates: "container:check-updates",
   PerformUpdate: "container:perform-update",
   /** list Node versions eligible to replace the bundled runtime (NodeVersionInfo[]) */
@@ -72,7 +74,9 @@ const IPC = {
   OnPtyData: "container:pty-data",
   OnPtyExit: "container:pty-exit",
   /** broadcast: a secondary window asks every window to switch to that CLI page's terminal */
-  OpenTerminalPage: "container:open-terminal-page"
+  OpenTerminalPage: "container:open-terminal-page",
+  /** broadcast: live progress of a file download inside an embedded webview (DownloadProgress) */
+  OnDownloadProgress: "container:download-progress"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
@@ -99,6 +103,7 @@ const api = {
   getSettings: () => ipcRenderer.invoke(IPC.GetSettings),
   updateSettings: (partial) => ipcRenderer.invoke(IPC.UpdateSettings, partial),
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
+  getDownloadDir: () => ipcRenderer.invoke(IPC.DownloadDir),
   checkUpdates: (force) => ipcRenderer.invoke(IPC.CheckUpdates, force),
   performUpdate: (target) => ipcRenderer.invoke(IPC.PerformUpdate, target),
   openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
@@ -121,6 +126,11 @@ const api = {
     const listener = (_e, p) => cb(p);
     ipcRenderer.on(IPC.OnInstallProgress, listener);
     return () => ipcRenderer.removeListener(IPC.OnInstallProgress, listener);
+  },
+  onDownloadProgress: (cb) => {
+    const listener = (_e, p) => cb(p);
+    ipcRenderer.on(IPC.OnDownloadProgress, listener);
+    return () => ipcRenderer.removeListener(IPC.OnDownloadProgress, listener);
   },
   relaunchApp: () => ipcRenderer.invoke(IPC.RelaunchApp),
   dshStatus: (profile) => ipcRenderer.invoke(IPC.DshStatus, profile),

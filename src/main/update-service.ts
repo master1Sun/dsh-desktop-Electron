@@ -177,9 +177,12 @@ export function clearUpdateCache(): void {
 
 // ---- update execution ----
 
-/** Candidate roots where openclaw is provisioned — mirrors openclaw.ts entry discovery. */
+/** Candidate roots where openclaw is provisioned — mirrors openclaw.ts entry discovery.
+    userData first so a fresh (unbundled) install provisions into a writable dir, exactly
+    like dsh (userData/dsh) and the Node override. */
 function openclawRoots(): string[] {
   return [
+    join(app.getPath('userData'), 'openclaw'),
     join(process.resourcesPath || '', 'openclaw'),
     join(app.getAppPath(), 'resources', 'openclaw'),
     join(process.cwd(), 'resources', 'openclaw')

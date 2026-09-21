@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Monitor, Operation, Download, FolderOpened } from '@element-plus/icons-vue'
 import { usePagesStore } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import type { DefaultView } from '../stores/settings'
-import type { EnvRootInfo } from '../../../shared/types'
+import type { EnvRootInfo, DownloadDirInfo } from '../../../shared/types'
 import { t } from '../i18n'
 
 const emit = defineEmits<{
@@ -14,6 +15,9 @@ const emit = defineEmits<{
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
+
+/** Which settings tab is open — one of view / behavior / download / env. */
+const activeTab = ref('view')
 
 /* ---- dynamic per-page directory env config ----
    Pages declare configurable "home" dirs in container.json `envVars`; render one input each. */
@@ -109,6 +113,37 @@ async function browseEnvRoot(): Promise<void> {
 
 onMounted(loadEnvRoot)
 
+/* ---- 下载目录 ----
+   Embedded-page / external-site downloads save straight here (no "Save As" prompt); empty
+   follows the OS Downloads folder. Mirrors the env-root browse/save row above. */
+const downloadDirInfo = ref<DownloadDirInfo | null>(null)
+const downloadDirDraft = ref('')
+
+async function loadDownloadDir(): Promise<void> {
+  const res = await window.container.getDownloadDir().catch(() => null)
+  if (!res?.ok) return
+  downloadDirInfo.value = res.data as DownloadDirInfo
+  downloadDirDraft.value = downloadDirInfo.value?.custom
+    ? settingsStore.settings.downloadDir || ''
+    : ''
+}
+
+async function saveDownloadDir(value: string): Promise<void> {
+  await patch({ downloadDir: value.trim() }, t('settings.downloadSaved'))
+  await loadDownloadDir()
+}
+
+async function browseDownloadDir(): Promise<void> {
+  const res = await window.container
+    .chooseDirectory(t('settings.chooseDownloadDir'))
+    .catch(() => null)
+  if (!res?.ok || !res.data) return
+  downloadDirDraft.value = String(res.data)
+  await saveDownloadDir(downloadDirDraft.value)
+}
+
+onMounted(loadDownloadDir)
+
 async function savePageEnv(pageId: string, key: string, value: string): Promise<void> {
   const next: Record<string, Record<string, string>> = JSON.parse(
     JSON.stringify(settingsStore.settings.pageEnvs || {})
@@ -191,141 +226,205 @@ function onLocaleChange(next: 'zh' | 'en'): void {
 
 <template>
   <div class="settings-panel">
-    <h3>{{ t('settings.interfaceTitle') }}</h3>
-    <el-form label-position="left" size="small">
-      <el-form-item :label="t('settings.defaultPage')">
-        <el-select v-model="viewValue" style="width: 340px">
-          <el-option
-            v-for="opt in viewOptions.plain"
-            :key="opt.value"
-            :value="opt.value"
-            :label="opt.label"
-            :disabled="opt.disabled"
-          />
-          <el-option-group v-for="g in viewOptions.groups" :key="g.label" :label="g.label">
-            <el-option v-for="sub in g.options" :key="sub.value" :value="sub.value" :label="sub.label" />
-          </el-option-group>
-        </el-select>
-        <div class="tip">{{ t('settings.defaultPageTip') }}</div>
-      </el-form-item>
-
-      <el-form-item :label="t('settings.theme')">
-        <el-radio-group
-          :model-value="settingsStore.settings.theme"
-          @update:model-value="onThemeChange($event as 'auto' | 'light' | 'dark')"
-        >
-          <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
-          <el-radio-button value="light">{{ t('settings.themeLight') }}</el-radio-button>
-          <el-radio-button value="dark">{{ t('settings.themeDark') }}</el-radio-button>
-        </el-radio-group>
-      </el-form-item>
-
-      <el-form-item :label="t('settings.language')">
-        <el-radio-group
-          :model-value="settingsStore.settings.locale"
-          @update:model-value="onLocaleChange($event as 'zh' | 'en')"
-        >
-          <el-radio-button value="zh">{{ t('settings.langZh') }}</el-radio-button>
-          <el-radio-button value="en">{{ t('settings.langEn') }}</el-radio-button>
-        </el-radio-group>
-      </el-form-item>
-    </el-form>
-
-    <h3>{{ t('settings.behavior') }}</h3>
-    <el-form label-position="left" size="small">
-      <el-form-item :label="t('settings.minimizeToTray')">
-        <el-switch
-          :model-value="settingsStore.settings.minimizeToTray"
-          @update:model-value="
-            patch(
-              { minimizeToTray: $event as boolean },
-              $event ? t('settings.minimizeOn') : t('settings.minimizeOff')
-            )
-          "
-        />
-        <div class="tip">{{ t('settings.minimizeTip') }}</div>
-      </el-form-item>
-
-      <el-form-item :label="t('settings.launchAtStartup')">
-        <el-switch
-          :model-value="settingsStore.settings.launchAtStartup"
-          @update:model-value="patch({ launchAtStartup: $event as boolean })"
-        />
-        <div class="tip">{{ t('settings.launchAtStartupTip') }}</div>
-      </el-form-item>
-
-      <el-form-item :label="t('settings.crashAutoRestart')">
-        <el-switch
-          :model-value="settingsStore.settings.crashAutoRestart"
-          @update:model-value="patch({ crashAutoRestart: $event as boolean })"
-        />
-        <div class="tip">{{ t('settings.crashAutoRestartTip') }}</div>
-      </el-form-item>
-    </el-form>
-
-    <h3>{{ t('settings.envDir') }}</h3>
-    <el-form label-position="left" size="small">
-      <el-form-item :label="t('settings.envRoot')">
-        <div class="env-root-row">
-          <el-input
-            v-model="envRootDraft"
-            :placeholder="
-              envRootInfo
-                ? `${t('settings.envRootFollow')}（${envRootInfo.installDir}/env）`
-                : t('settings.envRootFollow')
-            "
-            style="width: 340px"
-            clearable
-            @change="saveEnvRoot(String($event || ''))"
-          />
-          <el-button size="small" @click="browseEnvRoot">{{ t('common.browse') }}</el-button>
-        </div>
-        <div class="tip">
-          {{
-            t('settings.envRootTip', {
-              root: envRootInfo?.envRoot || t('settings.envRootLoaded'),
-              envRoot: '{envRoot}'
-            })
-          }}
-        </div>
-      </el-form-item>
-    </el-form>
-
-    <template v-if="envSections.length">
-      <div v-for="section in envSections" :key="section.pageId" class="env-section">
-        <div class="env-page-name">{{ section.pageName }}</div>
+    <el-tabs v-model="activeTab" class="settings-tabs" tab-position="left">
+      <el-tab-pane name="view">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Monitor /></el-icon>{{ t('settings.tabView') }}</span
+          >
+        </template>
         <el-form label-position="left" size="small">
-          <el-form-item v-for="row in section.vars" :key="row.key" :label="row.label">
-            <el-input
-              :model-value="envDrafts[draftKey(section.pageId, row.key)] || ''"
-              :placeholder="
-                row.defaultPath
-                  ? t('settings.envInputPlaceholderDefault', { path: displayPath(row.defaultPath) })
-                  : t('settings.envInputPlaceholderEmpty')
+          <el-form-item :label="t('settings.defaultPage')">
+            <el-select v-model="viewValue" style="width: 340px">
+              <el-option
+                v-for="opt in viewOptions.plain"
+                :key="opt.value"
+                :value="opt.value"
+                :label="opt.label"
+                :disabled="opt.disabled"
+              />
+              <el-option-group v-for="g in viewOptions.groups" :key="g.label" :label="g.label">
+                <el-option
+                  v-for="sub in g.options"
+                  :key="sub.value"
+                  :value="sub.value"
+                  :label="sub.label"
+                />
+              </el-option-group>
+            </el-select>
+            <div class="tip">{{ t('settings.defaultPageTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.theme')">
+            <el-radio-group
+              :model-value="settingsStore.settings.theme"
+              @update:model-value="onThemeChange($event as 'auto' | 'light' | 'dark')"
+            >
+              <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
+              <el-radio-button value="light">{{ t('settings.themeLight') }}</el-radio-button>
+              <el-radio-button value="dark">{{ t('settings.themeDark') }}</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.language')">
+            <el-radio-group
+              :model-value="settingsStore.settings.locale"
+              @update:model-value="onLocaleChange($event as 'zh' | 'en')"
+            >
+              <el-radio-button value="zh">{{ t('settings.langZh') }}</el-radio-button>
+              <el-radio-button value="en">{{ t('settings.langEn') }}</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane name="behavior">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Operation /></el-icon>{{ t('settings.tabBehavior') }}</span
+          >
+        </template>
+        <el-form label-position="left" size="small">
+          <el-form-item :label="t('settings.minimizeToTray')">
+            <el-switch
+              :model-value="settingsStore.settings.minimizeToTray"
+              @update:model-value="
+                patch(
+                  { minimizeToTray: $event as boolean },
+                  $event ? t('settings.minimizeOn') : t('settings.minimizeOff')
+                )
               "
-              style="width: 340px"
-              clearable
-              @update:model-value="envDrafts[draftKey(section.pageId, row.key)] = String($event)"
-              @change="savePageEnv(section.pageId, row.key, String($event))"
             />
+            <div class="tip">{{ t('settings.minimizeTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.launchAtStartup')">
+            <el-switch
+              :model-value="settingsStore.settings.launchAtStartup"
+              @update:model-value="patch({ launchAtStartup: $event as boolean })"
+            />
+            <div class="tip">{{ t('settings.launchAtStartupTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.crashAutoRestart')">
+            <el-switch
+              :model-value="settingsStore.settings.crashAutoRestart"
+              @update:model-value="patch({ crashAutoRestart: $event as boolean })"
+            />
+            <div class="tip">{{ t('settings.crashAutoRestartTip') }}</div>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane name="download">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Download /></el-icon>{{ t('settings.tabDownload') }}</span
+          >
+        </template>
+        <el-form label-position="left" size="small">
+          <el-form-item :label="t('settings.downloadDir')">
+            <div class="env-root-row">
+              <el-input
+                v-model="downloadDirDraft"
+                :placeholder="
+                  downloadDirInfo
+                    ? `${t('settings.downloadDirFollow')}（${downloadDirInfo.defaultDir}）`
+                    : t('settings.downloadDirFollow')
+                "
+                style="width: 340px"
+                clearable
+                @change="saveDownloadDir(String($event || ''))"
+              />
+              <el-button size="small" @click="browseDownloadDir">{{
+                t('common.browse')
+              }}</el-button>
+            </div>
             <div class="tip">
-              <template v-if="row.description">{{ row.description }}</template>
-              <template v-else>
-                {{ t('settings.envInjectPrefix') }} <code>{{ row.key }}</code>
-                {{
-                  t('settings.envInjectSuffix', {
-                    def: row.defaultPath
-                      ? t('settings.envInjectDefault', { path: row.defaultPath })
-                      : ''
-                  })
-                }}
-              </template>
+              {{
+                t('settings.downloadDirTip', {
+                  dir: downloadDirInfo?.downloadDir || t('settings.envRootLoaded')
+                })
+              }}
             </div>
           </el-form-item>
         </el-form>
-      </div>
-    </template>
-    <div v-else class="env-empty">{{ t('settings.envSectionEmpty') }}</div>
+      </el-tab-pane>
+
+      <el-tab-pane name="env">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><FolderOpened /></el-icon>{{ t('settings.tabEnv') }}</span
+          >
+        </template>
+        <el-form label-position="left" size="small">
+          <el-form-item :label="t('settings.envRoot')">
+            <div class="env-root-row">
+              <el-input
+                v-model="envRootDraft"
+                :placeholder="
+                  envRootInfo
+                    ? `${t('settings.envRootFollow')}（${envRootInfo.installDir}/env）`
+                    : t('settings.envRootFollow')
+                "
+                style="width: 340px"
+                clearable
+                @change="saveEnvRoot(String($event || ''))"
+              />
+              <el-button size="small" @click="browseEnvRoot">{{ t('common.browse') }}</el-button>
+            </div>
+            <div class="tip">
+              {{
+                t('settings.envRootTip', {
+                  root: envRootInfo?.envRoot || t('settings.envRootLoaded'),
+                  envRoot: '{envRoot}'
+                })
+              }}
+            </div>
+          </el-form-item>
+        </el-form>
+
+        <template v-if="envSections.length">
+          <div v-for="section in envSections" :key="section.pageId" class="env-section">
+            <div class="env-page-name">{{ section.pageName }}</div>
+            <el-form label-position="left" size="small">
+              <el-form-item v-for="row in section.vars" :key="row.key" :label="row.label">
+                <el-input
+                  :model-value="envDrafts[draftKey(section.pageId, row.key)] || ''"
+                  :placeholder="
+                    row.defaultPath
+                      ? t('settings.envInputPlaceholderDefault', {
+                          path: displayPath(row.defaultPath)
+                        })
+                      : t('settings.envInputPlaceholderEmpty')
+                  "
+                  style="width: 340px"
+                  clearable
+                  @update:model-value="
+                    envDrafts[draftKey(section.pageId, row.key)] = String($event)
+                  "
+                  @change="savePageEnv(section.pageId, row.key, String($event))"
+                />
+                <div class="tip">
+                  <template v-if="row.description">{{ row.description }}</template>
+                  <template v-else>
+                    {{ t('settings.envInjectPrefix') }} <code>{{ row.key }}</code>
+                    {{
+                      t('settings.envInjectSuffix', {
+                        def: row.defaultPath
+                          ? t('settings.envInjectDefault', { path: row.defaultPath })
+                          : ''
+                      })
+                    }}
+                  </template>
+                </div>
+              </el-form-item>
+            </el-form>
+          </div>
+        </template>
+        <div v-else class="env-empty">{{ t('settings.envSectionEmpty') }}</div>
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -340,6 +439,69 @@ function onLocaleChange(next: 'zh' | 'en'): void {
    label must fit on one line, or it would wrap out of its 24px box. */
 .settings-panel {
   --settings-label-w: 166px;
+}
+
+/* Vertical (left) tab rail: a compact icon+label column instead of a top strip. The active
+   item gets a soft accent background; the hairline EP would draw between the nav and the
+   content is removed so the two columns read as one card. */
+.settings-tabs {
+  display: flex;
+  align-items: stretch;
+  min-height: 240px;
+}
+.settings-tabs :deep(.el-tabs__header) {
+  margin: 0 16px 0 0;
+}
+.settings-tabs :deep(.el-tabs__nav-wrap)::after {
+  display: none;
+}
+.settings-tabs :deep(.el-tabs__nav) {
+  padding: 2px;
+}
+/* EP 对竖排 tab 默认是 `justify-content:flex-end; text-align:right`（选择器
+   `.el-tabs--left .el-tabs__item.is-left`，特异性 0,3,0），单类 :deep 规则压不过，
+   这里再叠一个本组件类名把特异性抬到 0,4,0 确保图标+文字真正贴左。 */
+.settings-tabs.settings-tabs :deep(.el-tabs__item.is-left) {
+  justify-content: flex-start;
+  text-align: left;
+}
+.settings-tabs :deep(.el-tabs__item) {
+  height: auto;
+  /* 上下 padding 加大，让侧栏条目更透气 */
+  padding: 12px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.settings-tabs :deep(.el-tabs__item + .el-tabs__item) {
+  /* 条目之间的额外间距 */
+  margin-top: 8px;
+}
+.settings-tabs :deep(.el-tabs__item:hover) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.settings-tabs :deep(.el-tabs__item.is-active) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+.settings-tabs :deep(.el-tabs__active-bar) {
+  display: none;
+}
+.settings-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  overflow: hidden;
+}
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.tab-label .el-icon {
+  font-size: 15px;
 }
 
 .settings-panel :deep(.el-form-item__label) {

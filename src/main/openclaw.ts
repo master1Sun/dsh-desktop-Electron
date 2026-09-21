@@ -48,10 +48,10 @@ export interface OpenclawStatus {
 
 /** Candidate locations for openclaw's real CLI entry (`openclaw.mjs`) inside the bundled install. */
 function openclawEntryCandidates(): string[] {
-  // Mirror node-runtime's discovery: packaged copies resources/openclaw ->
-  // <resourcesPath>/openclaw, but in dev `process.resourcesPath` points at
-  // electron's own dist/resources (no openclaw), so also probe the project dir.
+  // Provisioned-on-demand installs land in the writable userData dir (mirrors dsh /
+  // the Node override); prefer it, then the legacy installer/dev resources locations.
   const roots = [
+    join(app.getPath('userData'), 'openclaw'),
     join(process.resourcesPath || '', 'openclaw'),
     join(app.getAppPath(), 'resources', 'openclaw'),
     join(process.cwd(), 'resources', 'openclaw')
@@ -83,6 +83,7 @@ function openclawEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 /** Sync version read for the update table — the async CLI probe can't run there. */
 export function openclawVersion(): string | undefined {
   const roots = [
+    join(app.getPath('userData'), 'openclaw'),
     join(process.resourcesPath || '', 'openclaw'),
     join(app.getAppPath(), 'resources', 'openclaw'),
     join(process.cwd(), 'resources', 'openclaw')
