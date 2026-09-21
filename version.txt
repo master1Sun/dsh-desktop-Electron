@@ -1,2 +1,2 @@
-0.1.5
+0.1.6
 fc4edab76ffae1fa8d85fb9845c43a26aef2f269
