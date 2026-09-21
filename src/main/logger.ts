@@ -8,11 +8,13 @@ import {
   readdirSync,
   readSync,
   renameSync,
-  statSync
+  statSync,
+  watch,
+  type FSWatcher
 } from 'node:fs'
 import { join } from 'node:path'
 import { m } from './i18n'
-import type { LogFileInfo, LogReadResult } from '../shared/types'
+import type { LogFileInfo, LogReadResult, LogLineEvent } from '../shared/types'
 
 /**
  * Dependency-free file logging for the packaged app.
@@ -204,4 +206,99 @@ export function readLogTail(key: string, tail = 400, filter?: string): LogReadRe
     readBytes,
     totalBytes: total
   }
+}
+
+/* ---- #22 live log streaming (IPC container:log-line) ---- */
+
+/** Byte offset already delivered per watched file, so a change only ships the new tail. */
+const streamOffsets = new Map<string, number>()
+let streamWatchers: FSWatcher[] = []
+
+/** Emit complete lines appended to `file` since the last flush; skip history on first sight. */
+function flushFile(file: string, key: string, onLine: (ev: LogLineEvent) => void): void {
+  let size = 0
+  try {
+    size = statSync(file).size
+  } catch {
+    return
+  }
+  let off = streamOffsets.get(file)
+  if (off === undefined) {
+    // First observation: baseline to the current end so the viewer's own initial
+    // readLogTail (not a replay of history) supplies everything before now.
+    streamOffsets.set(file, size)
+    return
+  }
+  if (size < off) off = 0 // rotation / truncation
+  if (size <= off) return
+  const want = Math.min(size - off, 64 * 1024)
+  const buf = Buffer.allocUnsafe(want)
+  let fd: number | undefined
+  try {
+    fd = openSync(file, 'r')
+    readSync(fd, buf, 0, want, off)
+  } catch {
+    return
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+  const text = buf.toString('utf8')
+  const lastNl = text.lastIndexOf('\n')
+  if (lastNl === -1) return // no complete line yet — leave the offset, wait for the newline
+  const complete = text.slice(0, lastNl)
+  streamOffsets.set(file, off + Buffer.byteLength(complete, 'utf8') + 1)
+  const lines = complete
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\r$/, ''))
+    .filter((l) => l.length > 0)
+  if (lines.length) onLine({ key, lines })
+}
+
+/**
+ * Watch the log files and push newly-appended lines to `onLine` (#22). The IPC layer forwards
+ * these to every window's `OnLogLine` channel so an open viewer follows along live instead of
+ * re-polling every 3s. Call once at boot; {@link stopLogStream} releases the watchers on quit.
+ */
+export function startLogStream(onLine: (ev: LogLineEvent) => void): void {
+  stopLogStream()
+  streamOffsets.clear()
+  const root = logsDir()
+  const pagesDir = join(root, 'pages')
+  try {
+    mkdirSync(pagesDir, { recursive: true })
+  } catch {
+    /* pages dir creation is best-effort */
+  }
+  const watchDir = (dir: string, resolve: (name: string) => string | null): void => {
+    try {
+      const w = watch(dir, (_event, filename) => {
+        if (!filename) return
+        const name = String(filename)
+        const key = resolve(name)
+        if (!key) return
+        flushFile(join(dir, name), key, onLine)
+      })
+      w.on('error', () => {
+        /* a dropped watcher just means we fall back to the viewer's manual refresh */
+      })
+      streamWatchers.push(w)
+    } catch {
+      /* watch unsupported on this path: polling fallback stays in the viewer */
+    }
+  }
+  // Root holds main.log (+ rotated .1 siblings we ignore); the pages dir holds <id>.log.
+  watchDir(root, (name) => (name === 'main.log' ? 'main' : null))
+  watchDir(pagesDir, (name) => (name.endsWith('.log') ? `pages/${name}` : null))
+}
+
+export function stopLogStream(): void {
+  for (const w of streamWatchers) {
+    try {
+      w.close()
+    } catch {
+      /* already gone */
+    }
+  }
+  streamWatchers = []
+  streamOffsets.clear()
 }

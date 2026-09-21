@@ -19,7 +19,8 @@ import {
   CONTAINER_REPO_URL,
   type UpdateProgress,
   type UpdateCheckResult,
-  type UpdateOutcome
+  type UpdateOutcome,
+  type UpdateHistory
 } from '../shared/types'
 import { m } from './i18n'
 import { isNewer } from './update-service'
@@ -638,6 +639,24 @@ function readMeta(): UpdateMeta | null {
     return JSON.parse(readFileSync(join(updatesRoot(), 'update-meta.json'), 'utf-8'))
   } catch {
     return null
+  }
+}
+
+/**
+ * #17: a small version-history view for the container OTA row. Surfaces the running version,
+ * any staged-but-not-applied version, the one-level rollback backup, and the version we last
+ * rolled back from — everything readable straight off update-meta.json + on-disk backups.
+ */
+export function getUpdateHistory(): UpdateHistory {
+  const meta = readMeta()
+  const staged = readStagedUpdate()
+  const rb = canRollbackAsar()
+  return {
+    running: app.getVersion(),
+    current: staged?.version || null,
+    backup: rb.available ? rb.fromVersion || null : null,
+    rollbackFrom: meta?.rollbackFromVersion || null,
+    pendingRestart: !!staged
   }
 }
 

@@ -20,6 +20,8 @@ export interface Settings {
   /** OS notifications for guard give-up / OTA-ready events */
   systemNotifications: boolean
   autoStartPages: string[]
+  /** pages the user pinned auto-start on by hand (sticky vs. the 默认打开 coupling) */
+  autoStartManual?: string[]
   lastExternalUrls: string[]
   externalSites: ExternalSite[]
   theme: 'auto' | 'light' | 'dark'
@@ -33,6 +35,16 @@ export interface Settings {
   downloadDir: string
   pageEnvs: Record<string, Record<string, string>>
   pagePorts: Record<string, number>
+  /** #25: custom accent hex; '' = keep the theme's CSS default */
+  accentColor?: string
+  /** #25: glass blur strength in px; undefined = stylesheet default (30) */
+  glassBlur?: number
+  /** #25: frosted-surface opacity (%); overrides --glass-tint-a live; undefined = coupled to blur */
+  glassAlpha?: number
+  /** #20: RSS (MB) over which a running page is flagged over-budget */
+  memWarnMb?: number
+  /** 内嵌终端面板被拖出的高度（px），下次启动恢复 */
+  terminalHeight?: number
 }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
@@ -59,7 +71,12 @@ export const useSettingsStore = defineStore('settings', () => {
     openclawHome: '',
     downloadDir: '',
     pageEnvs: {},
-    pagePorts: {}
+    pagePorts: {},
+    accentColor: '',
+    glassBlur: 30,
+    glassAlpha: 60,
+    memWarnMb: 800,
+    terminalHeight: 320
   })
   const loaded = ref(false)
 

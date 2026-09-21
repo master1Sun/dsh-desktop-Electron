@@ -205,7 +205,7 @@ async function patch(
 ): Promise<void> {
   try {
     await settingsStore.patch(partial)
-    ElMessage.success(msg)
+    if (msg) ElMessage.success(msg)
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
@@ -223,6 +223,44 @@ function onThemeChange(mode: 'auto' | 'light' | 'dark'): void {
  */
 function onLocaleChange(next: 'zh' | 'en'): void {
   settingsStore.patch({ locale: next }).catch((err) => ElMessage.error((err as Error).message))
+}
+
+/* #25: a single "frosted glass" slider drives BOTH axes at once — blur strength
+   (--glass-blur) and surface opacity (--glass-tint-a). frost 0 = solid (no blur, near-opaque),
+   100 = heavy frost (max blur, most see-through). It still persists into the two existing
+   settings (glassBlur / glassAlpha) so the main process, App.vue and the four frosted surfaces
+   keep consuming them unchanged. Local draft + @input live preview; @change talks to main once. */
+const FROST_BLUR_MAX_PX = 60 // frost 100 → 60px blur (== the old glassBlur slider max)
+const FROST_ALPHA_TOP = 96 // frost 0 → 96% opaque (near-solid)
+const FROST_ALPHA_BOTTOM = 8 // frost 100 → 8% opaque (very transparent)
+function blurFromFrost(f: number): number {
+  return Math.round((f / 100) * FROST_BLUR_MAX_PX)
+}
+function alphaFromFrost(f: number): number {
+  return Math.round(FROST_ALPHA_TOP - (f / 100) * (FROST_ALPHA_TOP - FROST_ALPHA_BOTTOM))
+}
+/** Derive the displayed frost level from the persisted blur (opacity is redundant now). */
+function frostFromSettings(): number {
+  const blur = settingsStore.settings.glassBlur ?? 30
+  return Math.min(100, Math.max(0, Math.round((blur / FROST_BLUR_MAX_PX) * 100)))
+}
+const frostDraft = ref(frostFromSettings())
+watch(
+  () => settingsStore.settings.glassBlur,
+  () => {
+    const next = frostFromSettings()
+    if (next !== frostDraft.value) frostDraft.value = next
+  }
+)
+function previewFrost(f: number): void {
+  const root = document.documentElement.style
+  const blur = blurFromFrost(f)
+  root.setProperty('--glass-blur', `${blur}px`)
+  root.setProperty('--glass-blur-n', `${blur}`)
+  root.setProperty('--glass-tint-a', (alphaFromFrost(f) / 100).toFixed(3))
+}
+function commitFrost(f: number): void {
+  void patch({ glassBlur: blurFromFrost(f), glassAlpha: alphaFromFrost(f) }, '')
 }
 </script>
 
@@ -266,6 +304,41 @@ function onLocaleChange(next: 'zh' | 'en'): void {
               <el-radio-button value="light">{{ t('settings.themeLight') }}</el-radio-button>
               <el-radio-button value="dark">{{ t('settings.themeDark') }}</el-radio-button>
             </el-radio-group>
+          </el-form-item>
+
+          <!-- #25 theme customization: accent override + frosted-blur strength -->
+          <el-form-item :label="t('settings.accentColor')">
+            <div class="accent-row">
+              <el-color-picker
+                :model-value="settingsStore.settings.accentColor || ''"
+                @update:model-value="patch({ accentColor: ($event as string) || '' }, '')"
+              />
+              <el-button
+                v-if="settingsStore.settings.accentColor"
+                link
+                type="primary"
+                @click="patch({ accentColor: '' }, t('settings.saved'))"
+              >
+                {{ t('settings.accentReset') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.accentTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.glassFx')">
+            <div class="blur-row">
+              <el-slider
+                v-model="frostDraft"
+                :min="0"
+                :max="100"
+                :step="1"
+                style="width: 260px"
+                @input="previewFrost"
+                @change="commitFrost"
+              />
+              <span class="blur-val">{{ frostDraft }}%</span>
+            </div>
+            <div class="tip">{{ t('settings.glassFxTip') }}</div>
           </el-form-item>
 
           <el-form-item :label="t('settings.language')">
@@ -556,6 +629,21 @@ function onLocaleChange(next: 'zh' | 'en'): void {
   color: var(--text-dim);
   line-height: 1.6;
   width: 100%;
+}
+
+/* #25 theme customization rows: align the control and its inline value/reset. */
+.accent-row,
+.blur-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.blur-val {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  font-size: 12px;
+  min-width: 42px;
 }
 
 .tip code {

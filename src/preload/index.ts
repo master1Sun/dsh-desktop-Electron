@@ -8,7 +8,9 @@ import {
   type PageProgress,
   type ReadLogsArgs,
   type UpdateCheckResult,
-  type UpdateProgress
+  type UpdateProgress,
+  type LogLineEvent,
+  type PageMetrics
 } from '../shared/types'
 
 const api = {
@@ -47,6 +49,13 @@ const api = {
   listLogFiles: () => ipcRenderer.invoke(IPC.ListLogFiles),
   readLogs: (args: ReadLogsArgs) => ipcRenderer.invoke(IPC.ReadLogs, args),
   exportDiagnostics: () => ipcRenderer.invoke(IPC.ExportDiagnostics),
+  exportSnapshot: () => ipcRenderer.invoke(IPC.ExportSnapshot),
+  importSnapshot: () => ipcRenderer.invoke(IPC.ImportSnapshot),
+  runNetworkProbe: () => ipcRenderer.invoke(IPC.RunNetworkProbe),
+  getSystemInfo: () => ipcRenderer.invoke(IPC.GetSystemInfo),
+  getNetworkStats: () => ipcRenderer.invoke(IPC.GetNetworkStats),
+  getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
+  getPageMetrics: () => ipcRenderer.invoke(IPC.GetPageMetrics),
   killPortHolder: (port: number) => ipcRenderer.invoke(IPC.KillPortHolder, port),
   rollbackAsar: () => ipcRenderer.invoke(IPC.RollbackAsar),
   onUpdateResults: (cb: (results: UpdateCheckResult[]) => void) => {
@@ -146,6 +155,18 @@ const api = {
     const listener = (_e: Electron.IpcRendererEvent, running: unknown[]): void => cb(running)
     ipcRenderer.on(IPC.OnStateChanged, listener)
     return () => ipcRenderer.removeListener(IPC.OnStateChanged, listener)
+  },
+  // #22 live log stream: tailed lines appended to one file since the last push.
+  onLogLine: (cb: (ev: LogLineEvent) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, ev: LogLineEvent): void => cb(ev)
+    ipcRenderer.on(IPC.OnLogLine, listener)
+    return () => ipcRenderer.removeListener(IPC.OnLogLine, listener)
+  },
+  // #20 periodic CPU/RAM sample for running pages.
+  onPageMetrics: (cb: (metrics: PageMetrics[]) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, metrics: PageMetrics[]): void => cb(metrics)
+    ipcRenderer.on(IPC.OnPageMetrics, listener)
+    return () => ipcRenderer.removeListener(IPC.OnPageMetrics, listener)
   }
 }
 

@@ -1,18 +1,20 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { Close, Cpu, Minus, Plus, Refresh } from '@element-plus/icons-vue'
 import { useTerminalStore } from '../stores/terminal'
+import { useSettingsStore } from '../stores/settings'
 import { t } from '../i18n'
 
 /**
- * 内嵌终端面板：默认停靠在窗口底部（可拖上边缘调高度）；最小化后收成一个
+ * 内嵌终端面板：默认停靠在窗口底部（拖上边缘可调高度，双击复位）；最小化后收成一个
  * 可拖动的小图标，松手时横向吸附到窗口右缘，点图标即展开回底部面板。
  */
 const store = useTerminalStore()
+const settingsStore = useSettingsStore()
 const containerEl = ref<HTMLElement | null>(null)
 const fabEl = ref<HTMLElement | null>(null)
 let term: Terminal | null = null
@@ -21,8 +23,18 @@ let disposeData: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 
 const minimized = ref(false)
-const size = ref({ h: 320 })
+/** 折叠面板高度（px）：与主进程 container-settings 的 terminalHeight 默认值保持一致。 */
+const DEFAULT_H = 320
 const MIN_H = 160
+/** 顶部窗口控件条 + 一点余量：面板不能高到把窗口内容挤没。 */
+const TOP_CHROME_H = 80
+const size = ref({ h: DEFAULT_H })
+
+/** 把高度夹在 [MIN_H, 窗口可用高度] 内，窗口变小后也要重新夹。 */
+function clampH(h: number): number {
+  const max = Math.max(MIN_H, window.innerHeight - TOP_CHROME_H)
+  return Math.max(MIN_H, Math.min(Math.round(h), max))
+}
 
 /* ---- minimized FAB: draggable, snaps back to the right edge on release ---- */
 const FAB_SIZE = 42
@@ -72,11 +84,13 @@ function onFabUp(): void {
 }
 
 /* ---- bottom-dock height resize via the panel's top edge ---- */
-let resizing = false
+const resizing = ref(false)
 let resizeStart = { py: 0, h: 0 }
+/** 待执行的 fit 帧号，0 = 无待执行。 */
+let fitRaf = 0
 
 function onResizeDown(e: PointerEvent): void {
-  resizing = true
+  resizing.value = true
   resizeStart = { py: e.clientY, h: size.value.h }
   ;(e.currentTarget as HTMLElement)?.setPointerCapture?.(e.pointerId)
   window.addEventListener('pointermove', onResizeMove)
@@ -84,16 +98,54 @@ function onResizeDown(e: PointerEvent): void {
 }
 
 function onResizeMove(e: PointerEvent): void {
-  if (!resizing) return
-  const dy = e.clientY - resizeStart.py
-  size.value.h = Math.max(MIN_H, Math.min(resizeStart.h - dy, window.innerHeight - 80))
+  if (!resizing.value) return
+  // 向上拖（dy<0）增高，向下拖降低度
+  size.value.h = clampH(resizeStart.h - (e.clientY - resizeStart.py))
 }
 
 function onResizeUp(): void {
-  resizing = false
+  if (!resizing.value) return
+  resizing.value = false
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeUp)
   fitActive()
+  saveHeight()
+}
+
+/** 双击上边缘：回到默认高度。 */
+function resetHeight(): void {
+  size.value.h = clampH(DEFAULT_H)
+  fitActive()
+  saveHeight()
+}
+
+/** 拖完再落盘，避免拖动过程中刷屏 IPC；失败静默（下次启动回到已存值）。 */
+function saveHeight(): void {
+  settingsStore.patch({ terminalHeight: size.value.h }).catch(() => undefined)
+}
+
+// 启动时从设置里恢复上次高度（设置是异步加载的，loaded 之前先用默认值）。只恢复一次，
+// 之后高度归拖拽管，避免 save 回包反过来覆盖用户刚拖出的新高度。
+let restored = false
+watch(
+  () => settingsStore.loaded,
+  (loaded) => {
+    if (!loaded || restored) return
+    restored = true
+    const h = settingsStore.settings.terminalHeight
+    size.value.h = clampH(typeof h === 'number' && h > 0 ? h : DEFAULT_H)
+    fitActive()
+  },
+  { immediate: true }
+)
+
+/** 窗口缩小/最大化时重新夹高度，别让面板超出可视区。 */
+function onWindowResize(): void {
+  const next = clampH(size.value.h)
+  if (next !== size.value.h) {
+    size.value.h = next
+    fitActive()
+  }
 }
 
 function themeColors(): { bg: string; fg: string } {
@@ -123,19 +175,44 @@ function ensureTerm(): void {
     store.feed(id, data)
     if (id === store.activeId) term?.write(data)
   })
-  resizeObserver = new ResizeObserver(() => fitActive())
+  resizeObserver = new ResizeObserver(() => scheduleFit())
   resizeObserver.observe(containerEl.value)
 }
 
-function fitActive(): void {
+/**
+ * 重算 xterm 尺寸（fit）+ 同步给 PTY，用 rAF 合并同一帧内的多次尺寸变化：
+ * 拖动中每帧 fit 一次保证内容区跟手，而 ptyResize（IPC + shell 重排）留到松手再发。
+ */
+function fitSurface(): void {
+  fitRaf = 0
   if (!term || !fit || minimized.value) return
   try {
     fit.fit()
-    if (store.activeId)
-      window.container.ptyResize(store.activeId, term.cols, term.rows).catch(() => undefined)
   } catch {
-    /* container not laid out yet */
+    return /* container not laid out yet */
   }
+  if (!resizing.value) syncPtySize()
+}
+
+function syncPtySize(): void {
+  if (!term || !fit || minimized.value) return
+  if (store.activeId)
+    window.container.ptyResize(store.activeId, term.cols, term.rows).catch(() => undefined)
+}
+
+/** 尺寸变化统一入口：交给下一帧的 fitSurface，避免 ResizeObserver 回调风暴。 */
+function scheduleFit(): void {
+  if (fitRaf) return
+  fitRaf = requestAnimationFrame(fitSurface)
+}
+
+/** 不等下一帧，立刻重算尺寸并同步 PTY（fitSurface 内含同步）：切页 / 展开 / 松手 / 复位时用。 */
+function fitActive(): void {
+  if (fitRaf) {
+    cancelAnimationFrame(fitRaf)
+    fitRaf = 0
+  }
+  fitSurface()
 }
 
 /** Repaint the shared surface with the active tab's buffered scrollback. */
@@ -204,22 +281,32 @@ function newTerminal(): void {
   store.start(target, store.activeSession?.title ?? t('terminal.rootTitle')).catch(() => undefined)
 }
 
-/** 关闭全部会话会 kill 所有还在运行的 shell，属于破坏性操作 → 二次确认。 */
+/**
+ * 关闭全部会话会 kill 所有还在运行的 shell，属破坏性操作 → 多个会话时二次确认。
+ * 只剩一个会话时它就等价于点当前 Tab 的 ×（本来就不提示），所以直接关，不弹窗。
+ */
 async function closeAll(): Promise<void> {
-  if (!store.sessions.length) return
-  try {
-    await ElMessageBox.confirm(t('terminal.closeAllConfirm'), t('terminal.closeAllTitle'), {
-      type: 'warning',
-      confirmButtonText: t('terminal.closeAllConfirmBtn'),
-      cancelButtonText: t('common.cancel')
-    })
-  } catch {
-    return
+  if (store.sessions.length > 1) {
+    try {
+      await ElMessageBox.confirm(t('terminal.closeAllConfirm'), t('terminal.closeAllTitle'), {
+        type: 'warning',
+        confirmButtonText: t('terminal.closeAllConfirmBtn'),
+        cancelButtonText: t('common.cancel')
+      })
+    } catch {
+      return
+    }
   }
   store.closeAll()
 }
 
+onMounted(() => {
+  window.addEventListener('resize', onWindowResize)
+})
+
 onBeforeUnmount(() => {
+  if (fitRaf) cancelAnimationFrame(fitRaf)
+  window.removeEventListener('resize', onWindowResize)
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeUp)
   window.removeEventListener('pointermove', onFabMove)
@@ -232,8 +319,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <!-- Bottom-docked full-width terminal strip. -->
-  <section v-show="store.open && !minimized" class="term-dock">
+  <!-- Bottom-docked full-width terminal strip; height follows the dragged size. -->
+  <section
+    v-show="store.open && !minimized"
+    class="term-dock"
+    :class="{ resizing }"
+    :style="{ height: `${size.h}px` }"
+  >
     <header class="term-bar">
       <div class="tabs">
         <button
@@ -282,8 +374,20 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- top-edge resize handle -->
-    <div class="rz rz-n" @pointerdown="onResizeDown" />
+    <!-- top-edge resize handle: 拖动改高度，双击复位 -->
+    <div
+      class="rz rz-n"
+      :class="{ active: resizing }"
+      role="separator"
+      aria-orientation="horizontal"
+      :aria-valuenow="size.h"
+      :aria-valuemin="MIN_H"
+      :title="t('terminal.resize')"
+      @pointerdown="onResizeDown"
+      @dblclick="resetHeight"
+    >
+      <span class="rz-grip" />
+    </div>
   </section>
 
   <!-- Minimized: a draggable icon that hugs the right edge. -->
@@ -310,11 +414,11 @@ onBeforeUnmount(() => {
   z-index: 2000;
   display: flex;
   flex-direction: column;
-  /* frosted dock so the page behind bleeds through */
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  /* frosted dock so the page behind bleeds through; opacity follows --glass-tint-a */
+  background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.85));
   border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
-  -webkit-backdrop-filter: blur(26px) saturate(135%);
-  backdrop-filter: blur(26px) saturate(135%);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 30px)) saturate(135%);
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(135%);
   border-radius: 10px 10px 0 0;
   box-shadow:
     0 -12px 40px rgba(0, 0, 0, 0.35),
@@ -424,10 +528,43 @@ onBeforeUnmount(() => {
   top: 0;
   left: 0;
   right: 0;
-  height: 6px;
+  /* 拖拽命中区：比可见分隔线厚一点，又不至于挡到 tab 点击 */
+  height: 8px;
   cursor: ns-resize;
   touch-action: none;
-  z-index: 5;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 可见把手：居中短横条，悬停 / 拖动时高亮，提示此处可上下拖 */
+.rz-grip {
+  width: 46px;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-dim) 35%, transparent);
+  opacity: 0.5;
+  pointer-events: none;
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease,
+    width 0.15s ease;
+}
+
+.rz-n:hover .rz-grip,
+.rz-n.active .rz-grip {
+  background: var(--accent);
+  opacity: 1;
+  width: 64px;
+}
+
+/* 拖动时不要圈选文本 / 面板内容 */
+.term-dock.resizing {
+  user-select: none;
+}
+.term-dock.resizing .term-surface {
+  cursor: ns-resize;
 }
 
 /* ---- minimized floating icon ---- */

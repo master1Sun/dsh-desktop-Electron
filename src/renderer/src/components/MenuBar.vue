@@ -469,11 +469,13 @@ onBeforeUnmount(() => {
   height: 38px;
   flex: none;
   padding: 0 4px 0 10px;
-  /* Frosted top bar: lets the ambient aurora bleed through instead of a flat fill. */
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  /* Frosted top bar: lets the ambient aurora bleed through instead of a flat fill.
+     Opacity is driven by --glass-tint-a (settings ▸ 背景不透明度); blur/saturate stay on --glass-blur. */
+  background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.82));
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
-  -webkit-backdrop-filter: blur(26px) saturate(140%);
-  backdrop-filter: blur(26px) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
+    saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
   -webkit-app-region: drag;
   user-select: none;
   z-index: 60;
@@ -711,14 +713,16 @@ onBeforeUnmount(() => {
   max-height: calc(100vh - 52px);
   display: flex;
   flex-direction: column;
-  /* Frosted floating surface with a faint top glow so it reads as lit. */
+  /* Frosted floating surface with a faint top glow so it reads as lit; the tint
+     thins and the saturation rises with --glass-blur (see the glass layer). */
   background:
     radial-gradient(120% 70% at 50% -12%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
-    color-mix(in srgb, var(--surface) 72%, transparent);
+    rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.72));
   border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
   border-radius: 14px;
-  -webkit-backdrop-filter: blur(32px) saturate(145%);
-  backdrop-filter: blur(32px) saturate(145%);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
+    saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
   box-shadow:
     var(--shadow),
     0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent) inset,

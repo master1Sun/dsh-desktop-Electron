@@ -28,6 +28,7 @@ import {
   getSettings,
   updateSettings,
   setDefaultView,
+  syncAutoStartForDefaultView,
   resolvePagesDir,
   isValidPort,
   resolveProjectDir,
@@ -45,12 +46,17 @@ import { checkUpdates, performUpdate, clearUpdateCache, provisionBuiltin } from 
 import {
   relaunchToApplyStaged,
   canRollbackAsar,
-  rollbackToPreviousAsar
+  rollbackToPreviousAsar,
+  getUpdateHistory
 } from './asar-updates'
-import { logsDir, listLogFiles, readLogTail } from './logger'
+import { logsDir, listLogFiles, readLogTail, startLogStream } from './logger'
 import { exportDiagnostics } from './diagnostics'
+import { exportSnapshot, importSnapshot } from './snapshot'
+import { runNetworkProbe } from './net-probe'
+import { getSystemInfo, getNetworkStats } from './sysinfo'
+import { collectPageMetrics, pruneMetricsBaseline } from './metrics'
 import { killPortHolder } from './port-holder'
-import { setTrayUpdatePending } from './tray'
+import { setTrayUpdatePending, setTrayResourceWarn } from './tray'
 import { PtyManager } from './pty'
 import {
   getDshStatus,
@@ -76,6 +82,9 @@ import { m, notifyLocaleChanged, invalidateLocaleCache } from './i18n'
 let surveyTimer: NodeJS.Timeout | null = null
 /** How often the background survey re-probes every update source. Cheap on the LAN, network-bound otherwise. */
 const UPDATE_SURVEY_MS = 30 * 60_000
+/** #20: CPU/RAM sampling cadence for the live per-row resource badges. */
+let metricsTimer: NodeJS.Timeout | null = null
+const METRICS_POLL_MS = 5_000
 
 export function registerIpc(registry: PageRegistry): void {
   const ok = <T>(data?: T): IpcResult<T> => ({ ok: true, data })
@@ -465,6 +474,100 @@ export function registerIpc(registry: PageRegistry): void {
     }
   })
 
+  // #15 migration package: round-trippable config archive (settings + per-page container.json).
+  ipcMain.handle(IPC.ExportSnapshot, async (): Promise<IpcResult> => {
+    try {
+      return ok(await exportSnapshot(registry)) // null = user cancelled the save dialog
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.ImportSnapshot, async (): Promise<IpcResult> => {
+    try {
+      return ok(await importSnapshot(registry))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // #21 one-shot network reachability probe (loopback / github / npm / mirror / proxy).
+  ipcMain.handle(IPC.RunNetworkProbe, async (): Promise<IpcResult> => {
+    try {
+      return ok(await runNetworkProbe())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // #17 container OTA version history for the small table under the help-panel row.
+  ipcMain.handle(IPC.GetUpdateHistory, (): IpcResult => {
+    try {
+      return ok(getUpdateHistory())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // #20 on-demand CPU/RAM sample (the periodic broadcast covers the live view; this backs a
+  // refresh immediately after a start when the interval hasn't ticked yet).
+  ipcMain.handle(IPC.GetPageMetrics, async (): Promise<IpcResult> => {
+    try {
+      return ok(await collectPageMetrics(registry, getSettings().memWarnMb ?? 0))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // Help panel: static-ish system/runtime overview (OS, CPU, memory, versions, paths).
+  ipcMain.handle(IPC.GetSystemInfo, (): IpcResult => {
+    try {
+      return ok(getSystemInfo())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // Help panel: live network interfaces + cumulative byte counters (renderer diffs samples).
+  ipcMain.handle(IPC.GetNetworkStats, async (): Promise<IpcResult> => {
+    try {
+      return ok(await getNetworkStats())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // #22 live log tail: push newly-appended lines to every window's OnLogLine channel. The
+  // viewer keeps its 3s poll as a fallback, so this is pure latency win when a file changes.
+  startLogStream((ev) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnLogLine, ev)
+    }
+  })
+
+  // #20 resource sampling loop: broadcast CPU/RAM every few seconds so running rows show their
+  // cost live, and light the tray's gold dot when any page crosses its memory budget. Idempotent
+  // across dev-HMR re-registration (clear the old timer first) so the interval never stacks.
+  if (metricsTimer) clearInterval(metricsTimer)
+  metricsTimer = setInterval(async () => {
+    try {
+      const metrics = await collectPageMetrics(registry, getSettings().memWarnMb ?? 0)
+      pruneMetricsBaseline(
+        registry
+          .running()
+          .map((p) => p.pid!)
+          .filter(Boolean)
+      )
+      setTrayResourceWarn(metrics.some((mm) => mm.overLimit))
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send(IPC.OnPageMetrics, metrics)
+      }
+    } catch {
+      /* a failed sample tick is silently skipped — the next one retries */
+    }
+  }, METRICS_POLL_MS)
+  metricsTimer.unref?.()
+
   ipcMain.handle(
     IPC.UpdateSettings,
     (
@@ -485,10 +588,24 @@ export function registerIpc(registry: PageRegistry): void {
         pagePorts?: Record<string, number>
         crashAutoRestart?: boolean
         systemNotifications?: boolean
+        accentColor?: string
+        glassBlur?: number
+        glassAlpha?: number
+        memWarnMb?: number
       }
     ): IpcResult => {
       try {
-        if (partial.defaultView) setDefaultView(partial.defaultView)
+        if (partial.defaultView) {
+          // Couple 默认打开 ⇄ 自启动: the new default page joins auto-start, the one it
+          // replaces leaves (unless manually pinned). An external default is not startable,
+          // so it neither adds nor pins — it only unloads the previous page's implicit auto-start.
+          const prevDv = getSettings().defaultView
+          const prevId = prevDv.kind === 'page' ? prevDv.pageId : null
+          let nextId = partial.defaultView.kind === 'page' ? partial.defaultView.pageId : null
+          if (nextId && registry.get(nextId)?.external) nextId = null
+          syncAutoStartForDefaultView(prevId, nextId)
+          setDefaultView(partial.defaultView)
+        }
         const rest = { ...partial }
         delete rest.defaultView
         if (Object.keys(rest).length) updateSettings(rest)

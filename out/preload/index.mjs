@@ -91,7 +91,25 @@ const IPC = {
   /** taskkill the foreign process LISTENING on that port (port-conflict quick fix) */
   KillPortHolder: "container:kill-port-holder",
   /** swap the pre-update app.asar.bak back in and relaunch (one-level OTA rollback) */
-  RollbackAsar: "container:rollback-asar"
+  RollbackAsar: "container:rollback-asar",
+  /** #15: bundle pages manifest + per-page container.json + settings into an importable zip */
+  ExportSnapshot: "container:export-snapshot",
+  /** #15: restore from a snapshot zip chosen via open dialog */
+  ImportSnapshot: "container:import-snapshot",
+  /** #21: one-shot network reachability probe (connectivity / proxy / registry mirrors) */
+  RunNetworkProbe: "container:run-network-probe",
+  /** #17: read the OTA update-meta history for the container row */
+  GetUpdateHistory: "container:get-update-history",
+  /** #20: on-demand CPU/RAM sample for currently running pages (PageMetrics[]) */
+  GetPageMetrics: "container:get-page-metrics",
+  /** system + runtime overview for the help panel's 关于与运行 tab (SystemInfo) */
+  GetSystemInfo: "container:get-system-info",
+  /** live network interfaces + cumulative byte counters for the help panel (NetworkStats) */
+  GetNetworkStats: "container:get-network-stats",
+  /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
+  OnPageMetrics: "container:page-metrics",
+  /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
+  OnLogLine: "container:log-line"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
@@ -126,6 +144,13 @@ const api = {
   listLogFiles: () => ipcRenderer.invoke(IPC.ListLogFiles),
   readLogs: (args) => ipcRenderer.invoke(IPC.ReadLogs, args),
   exportDiagnostics: () => ipcRenderer.invoke(IPC.ExportDiagnostics),
+  exportSnapshot: () => ipcRenderer.invoke(IPC.ExportSnapshot),
+  importSnapshot: () => ipcRenderer.invoke(IPC.ImportSnapshot),
+  runNetworkProbe: () => ipcRenderer.invoke(IPC.RunNetworkProbe),
+  getSystemInfo: () => ipcRenderer.invoke(IPC.GetSystemInfo),
+  getNetworkStats: () => ipcRenderer.invoke(IPC.GetNetworkStats),
+  getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
+  getPageMetrics: () => ipcRenderer.invoke(IPC.GetPageMetrics),
   killPortHolder: (port) => ipcRenderer.invoke(IPC.KillPortHolder, port),
   rollbackAsar: () => ipcRenderer.invoke(IPC.RollbackAsar),
   onUpdateResults: (cb) => {
@@ -215,6 +240,18 @@ const api = {
     const listener = (_e, running) => cb(running);
     ipcRenderer.on(IPC.OnStateChanged, listener);
     return () => ipcRenderer.removeListener(IPC.OnStateChanged, listener);
+  },
+  // #22 live log stream: tailed lines appended to one file since the last push.
+  onLogLine: (cb) => {
+    const listener = (_e, ev) => cb(ev);
+    ipcRenderer.on(IPC.OnLogLine, listener);
+    return () => ipcRenderer.removeListener(IPC.OnLogLine, listener);
+  },
+  // #20 periodic CPU/RAM sample for running pages.
+  onPageMetrics: (cb) => {
+    const listener = (_e, metrics) => cb(metrics);
+    ipcRenderer.on(IPC.OnPageMetrics, listener);
+    return () => ipcRenderer.removeListener(IPC.OnPageMetrics, listener);
   }
 };
 if (process.contextIsolated) {

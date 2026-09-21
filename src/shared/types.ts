@@ -114,6 +114,11 @@ export interface PageState extends PageMeta {
    * process is LISTENING on it — the Pages panel offers a one-click kill-and-retry.
    */
   portHolder?: { pid: number; name: string } | null
+  /**
+   * #16 health-probe exposure: last probe outcome while running, and the consecutive-failure
+   * count feeding the假死 kill. `unknown` before the first probe resolves.
+   */
+  health?: { status: 'ok' | 'fail' | 'unknown'; fails: number; lastAt?: number; url?: string }
 }
 
 export interface RunningPageInfo {
@@ -175,6 +180,14 @@ export interface ContainerSettings {
   /** register the app as a Windows login item so it starts at boot (then minimizes to tray) */
   launchAtStartup: boolean
   autoStartPages: string[]
+  /**
+   * Pages whose auto-start the user turned on *explicitly* (via a switch), as opposed to
+   * those pulled in implicitly by being the 默认打开 page. Sticky: when the default-open
+   * selection later moves away, only the non-pinned page loses auto-start; a pinned one
+   * keeps launching. Maintained by updateSettings (auto-start toggles) and never by the
+   * default-open coupling, so an implicit add doesn't masquerade as a manual pin.
+   */
+  autoStartManual?: string[]
   lastExternalUrls: string[]
   /** user-saved named external URLs, managed + previewable from the top bar */
   externalSites: ExternalSite[]
@@ -197,6 +210,30 @@ export interface ContainerSettings {
   crashAutoRestart: boolean
   /** OS notifications for out-of-band events (guard gave up restarting, staged update ready) */
   systemNotifications: boolean
+  /**
+   * Custom accent color (#25). Empty/undefined keeps the CSS-defined default so light/dark
+   * each retain their own; a set value overrides `--accent` at runtime in both modes.
+   */
+  accentColor?: string
+  /**
+   * Glass blur strength in px (#25) applied to `.glass`/`.glass-soft` backdrops. Undefined =
+   * keep the stylesheet default (30px); a number overrides `--glass-blur` at runtime.
+   */
+  glassBlur?: number
+  /**
+   * Background transparency (#25 follow-up): opacity percentage (0–100) of the frosted-glass
+   * surfaces, overriding `--glass-tint-a` live. Independent of `glassBlur` (which only sets the
+   * blur/saturate strength) so the two axes can be tuned separately. Undefined = keep the
+   * blur-coupled stylesheet default.
+   */
+  glassAlpha?: number
+  /** #20: RSS (MB) above which a running page is flagged as over-budget (tray/resource badge). */
+  memWarnMb?: number
+  /**
+   * Height in px of the bottom-docked terminal panel the user dragged out; restored on the next
+   * launch. Undefined = the stylesheet default (320), clamped to the window height at runtime.
+   */
+  terminalHeight?: number
 }
 
 export interface UpdateCheckResult {
@@ -362,13 +399,21 @@ export interface DshPluginInfo {
   source: 'bundle' | 'profile'
 }
 
-/** per-plugin new-version hint; latest is a newer npm version, or the remote latest semver tag for git deps */
+/**
+ * per-plugin new-version hint. Both the npm registry and the package's git repo (its
+ * `repository` tag) are probed; the winner is whichever carries the newest semver, so
+ * `latest` is that source's version and `channel` records where the update should come from.
+ * When `channel` is 'git', `gitUrl` is the `repo#<tag>` spec to (re)install from — this also
+ * covers flipping an npm-pinned plugin onto a newer git tag.
+ */
 export interface DshPluginUpdate {
   name: string
   updateAvailable: boolean
   latest?: string
-  /** which channel the update should go through; derived from how the dep is pinned */
+  /** which channel the newest version came from, and therefore the update should go through */
   channel?: DshUpdateChannel
+  /** repo(+ref) to install when `channel === 'git'`; the arg `updateDshPlugin` consumes */
+  gitUrl?: string
 }
 
 export type DshUpdateChannel = 'npm' | 'git'
@@ -507,7 +552,25 @@ export const IPC = {
   /** taskkill the foreign process LISTENING on that port (port-conflict quick fix) */
   KillPortHolder: 'container:kill-port-holder',
   /** swap the pre-update app.asar.bak back in and relaunch (one-level OTA rollback) */
-  RollbackAsar: 'container:rollback-asar'
+  RollbackAsar: 'container:rollback-asar',
+  /** #15: bundle pages manifest + per-page container.json + settings into an importable zip */
+  ExportSnapshot: 'container:export-snapshot',
+  /** #15: restore from a snapshot zip chosen via open dialog */
+  ImportSnapshot: 'container:import-snapshot',
+  /** #21: one-shot network reachability probe (connectivity / proxy / registry mirrors) */
+  RunNetworkProbe: 'container:run-network-probe',
+  /** #17: read the OTA update-meta history for the container row */
+  GetUpdateHistory: 'container:get-update-history',
+  /** #20: on-demand CPU/RAM sample for currently running pages (PageMetrics[]) */
+  GetPageMetrics: 'container:get-page-metrics',
+  /** system + runtime overview for the help panel's 关于与运行 tab (SystemInfo) */
+  GetSystemInfo: 'container:get-system-info',
+  /** live network interfaces + cumulative byte counters for the help panel (NetworkStats) */
+  GetNetworkStats: 'container:get-network-stats',
+  /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
+  OnPageMetrics: 'container:page-metrics',
+  /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
+  OnLogLine: 'container:log-line'
 } as const
 
 /** One row of `IPC.ListLogFiles`. `key` is 'main' or a `pages/<file>` basename. */
@@ -534,4 +597,158 @@ export interface LogReadResult {
   readBytes: number
   /** total size of the file on disk */
   totalBytes: number
+}
+
+/**
+ * #22: tailed lines appended to one log file since the previous push. `key` mirrors
+ * `LogFileInfo.key` ('main' or a `pages/<file>` basename) so the viewer only appends when
+ * the currently-open file matches.
+ */
+export interface LogLineEvent {
+  key: string
+  lines: string[]
+}
+
+/**
+ * #20: one CPU/RAM sample for a running page's process tree. `cpu` is a percent of one core
+ * (delta between two wall-clock samples); `memMb` is working-set RSS summed over the pid and
+ * its children. `overLimit` marks it above the configured memory warning threshold.
+ */
+export interface PageMetrics {
+  pageId: string
+  pid?: number
+  /** CPU percent (0..~100*nCores), from the delta of two process-time samples */
+  cpu: number
+  /** resident set size in MB summed over the process tree */
+  memMb: number
+  overLimit?: boolean
+}
+
+/**
+ * #21: one step of the network diagnostic wizard. The wizard runs several steps and reports
+ * them in order so the user can see exactly which hop broke (`which step断了`).
+ */
+export interface NetProbeStep {
+  /** stable id (renderer maps to a label): 'gateway' | 'github' | 'npm' | 'npmmirror' | 'proxy' */
+  id: string
+  ok: boolean
+  /** round-trip time in ms when reachable */
+  ms?: number
+  /** short human detail (HTTP status, resolved proxy URL, or error message) */
+  detail?: string
+}
+
+/** #21: aggregate result of `IPC.RunNetworkProbe`. */
+export interface NetProbeResult {
+  steps: NetProbeStep[]
+  /** proxy env vars detected in the main process environment (HTTP(S)_PROXY / NO_PROXY) */
+  proxy?: { http?: string; https?: string; no?: string }
+  /** true when every non-proxy step passed */
+  healthy: boolean
+}
+
+/**
+ * #17: container OTA version history read from update-meta.json. Only versions with an
+ * on-disk artifact are reported; `current` is what the running app was built from.
+ */
+export interface UpdateHistory {
+  /** app.getVersion() — the version now running */
+  running: string
+  /** version the staged (pending) asar belongs to, applied on next restart */
+  current?: string | null
+  /** pre-update app.asar.bak version, offered for one-level rollback */
+  backup?: string | null
+  /** version we most recently rolled back from, when applicable */
+  rollbackFrom?: string | null
+  /** true when a restart would apply a pending update */
+  pendingRestart?: boolean
+}
+
+/**
+ * #15: result of exporting/importing a migration package. `path` is the chosen zip; the
+ * id lists let the UI summarize what moved without parsing the archive in the renderer.
+ */
+export interface SnapshotResult {
+  path: string
+  /** page ids captured in the snapshot (manifest entries with a container.json) */
+  pageIds: string[]
+  createdAt: number
+  /** on import: pages restored and settings keys applied */
+  restoredPages?: string[]
+  appliedSettings?: boolean
+}
+
+/**
+ * System + runtime overview for the help panel's 关于与运行 tab. Every field is best-effort:
+ * a value the platform can't provide is left undefined and the row is simply dropped, so an
+ * older Electron or a stripped-down OS never breaks the panel.
+ */
+export interface SystemInfo {
+  /** OS family string: 'Windows_NT' | 'Linux' | 'Darwin' … (os.type()) */
+  osType: string
+  /** OS release version string (os.release()) */
+  osRelease: string
+  /** node platform id: 'win32' | 'linux' | 'darwin' … */
+  platform: string
+  /** CPU architecture: 'x64' | 'arm64' … */
+  arch: string
+  hostname: string
+  /** first CPU's model name (trimmed); many CPUs report a single representative model */
+  cpuModel?: string
+  /** logical CPU count */
+  cpuCores: number
+  /** total system memory in bytes */
+  totalMem: number
+  /** free system memory in bytes */
+  freeMem: number
+  /** OS uptime in seconds */
+  osUptimeSec: number
+  /** this app process uptime in seconds */
+  appUptimeSec: number
+  /** BCP-47 locale resolved from the runtime Intl settings */
+  locale: string
+  /** IANA timezone name */
+  timezone: string
+  /** user home directory */
+  home: string
+  /** container app version (app.getVersion()) */
+  appVersion: string
+  /** true when running from a packaged build (not the dev tree) */
+  packaged: boolean
+  electron: string
+  chrome: string
+  node: string
+  /** userData directory */
+  userData: string
+  /** install (executable) directory the container runs from */
+  installDir: string
+  /** number of network interfaces reported as non-internal (informational count) */
+  interfaceCount: number
+}
+
+/** One network interface for the live-network view. */
+export interface NetInterfaceInfo {
+  name: string
+  /** first non-internal IPv4 address, when present */
+  address?: string
+  netmask?: string
+  mac?: string
+  /** address family label the renderer shows raw ('IPv4' etc. is derived from cidr) */
+  family: string
+  /** loopback / internal interfaces are marked so the UI can dim them */
+  internal: boolean
+  /** CIDR notation of the primary address, when available */
+  cidr?: string
+}
+
+/**
+ * Live network snapshot for the help panel. `counters` are cumulative bytes since boot summed
+ * over the non-internal adapters; the renderer diffs two consecutive samples against
+ * `sampleAt` to derive a real-time rate. `counters` is null where the OS path failed.
+ */
+export interface NetworkStats {
+  interfaces: NetInterfaceInfo[]
+  counters: { rxBytes: number; txBytes: number } | null
+  /** epoch ms of this sample, used as the delta baseline by the renderer */
+  sampleAt: number
 }

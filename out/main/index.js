@@ -1,11 +1,11 @@
 import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, dialog, nativeImage, Tray, Menu, ipcMain as ipcMain$1, BrowserWindow, webContents, session } from "electron";
 import * as fs from "node:fs";
-import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync, promises, copyFileSync } from "node:fs";
-import path, { join, delimiter, dirname, sep, extname, basename } from "node:path";
+import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync, promises, copyFileSync } from "node:fs";
+import path, { join, delimiter, extname, basename, dirname, sep } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import { EventEmitter } from "node:events";
 import { spawn, execFile, execFileSync, spawnSync } from "node:child_process";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { get as get$2 } from "node:http";
 import { get as get$1 } from "node:https";
 import * as os from "node:os";
@@ -118,7 +118,25 @@ const IPC = {
   /** taskkill the foreign process LISTENING on that port (port-conflict quick fix) */
   KillPortHolder: "container:kill-port-holder",
   /** swap the pre-update app.asar.bak back in and relaunch (one-level OTA rollback) */
-  RollbackAsar: "container:rollback-asar"
+  RollbackAsar: "container:rollback-asar",
+  /** #15: bundle pages manifest + per-page container.json + settings into an importable zip */
+  ExportSnapshot: "container:export-snapshot",
+  /** #15: restore from a snapshot zip chosen via open dialog */
+  ImportSnapshot: "container:import-snapshot",
+  /** #21: one-shot network reachability probe (connectivity / proxy / registry mirrors) */
+  RunNetworkProbe: "container:run-network-probe",
+  /** #17: read the OTA update-meta history for the container row */
+  GetUpdateHistory: "container:get-update-history",
+  /** #20: on-demand CPU/RAM sample for currently running pages (PageMetrics[]) */
+  GetPageMetrics: "container:get-page-metrics",
+  /** system + runtime overview for the help panel's 关于与运行 tab (SystemInfo) */
+  GetSystemInfo: "container:get-system-info",
+  /** live network interfaces + cumulative byte counters for the help panel (NetworkStats) */
+  GetNetworkStats: "container:get-network-stats",
+  /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
+  OnPageMetrics: "container:page-metrics",
+  /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
+  OnLogLine: "container:log-line"
 };
 let cached = null;
 function invalidateNodeRuntimeCache() {
@@ -11403,6 +11421,8 @@ const DEFAULTS = {
   launchAtStartup: false,
   // auto-run the bundled runtimes on launch: openclaw (gateway) + dsh-web (server)
   autoStartPages: ["openclaw", "dsh-web"],
+  // empty until the user pins a page's auto-start by hand; see ContainerSettings.autoStartManual
+  autoStartManual: [],
   lastExternalUrls: [],
   externalSites: [],
   theme: "auto",
@@ -11419,7 +11439,18 @@ const DEFAULTS = {
   // a page that crashes after having run is relaunched automatically; off surfaces the error only
   crashAutoRestart: true,
   // rare user-action-needed events (guard gave up, staged update) go to the OS notification center
-  systemNotifications: true
+  systemNotifications: true,
+  // #25: '' keeps each theme's CSS-defined accent; a hex overrides it live in both modes.
+  accentColor: "",
+  // #25: matches the stylesheet default (.glass blur 30px); slider overrides --glass-blur live.
+  glassBlur: 30,
+  // #25: frosted-surface opacity (%); slider overrides --glass-tint-a live (independent of blur).
+  glassAlpha: 60,
+  // #20: RSS (MB) over which a running page is flagged over-budget (tray resource badge).
+  memWarnMb: 800,
+  // bottom-docked terminal height the user dragged out; keep the default in sync with
+  // TerminalDrawer's DEFAULT_H.
+  terminalHeight: 320
 };
 let store = null;
 function getStore() {
@@ -11431,12 +11462,28 @@ function getStore() {
 function getSettings() {
   return { ...DEFAULTS, ...getStore().store };
 }
-function updateSettings(partial) {
+function updateSettings(partial, opts = {}) {
   const s = getStore();
+  if (Array.isArray(partial.autoStartPages) && opts.syncAutoStartPin !== false) {
+    const prev = new Set(s.get("autoStartPages") || []);
+    const next2 = new Set(partial.autoStartPages);
+    const manual = new Set(s.get("autoStartManual") || []);
+    for (const id2 of next2) if (!prev.has(id2)) manual.add(id2);
+    for (const id2 of prev) if (!next2.has(id2)) manual.delete(id2);
+    s.set("autoStartManual", [...manual]);
+  }
   for (const [k, v] of Object.entries(partial)) {
     if (v !== void 0) s.set(k, v);
   }
   return getSettings();
+}
+function syncAutoStartForDefaultView(prevPageId, nextPageId) {
+  const s = getStore();
+  const manual = new Set(s.get("autoStartManual") || []);
+  const auto = new Set(s.get("autoStartPages") || []);
+  if (prevPageId && prevPageId !== nextPageId && !manual.has(prevPageId)) auto.delete(prevPageId);
+  if (nextPageId) auto.add(nextPageId);
+  s.set("autoStartPages", [...auto]);
 }
 function setDefaultView(view) {
   const s = getStore();
@@ -11568,6 +11615,22 @@ function defaultDownloadDir() {
 function resolveDownloadDir() {
   const override = (getSettings().downloadDir || "").trim();
   return override ? expandHome(override) : defaultDownloadDir();
+}
+function uniquePath(dir, filename) {
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+  }
+  const ext = extname(filename);
+  const stem = basename(filename, ext);
+  for (let i = 0; i < 1e3; i += 1) {
+    const candidate = join(dir, i === 0 ? filename : `${stem} (${i})${ext}`);
+    if (!existsSync(candidate)) return candidate;
+  }
+  return join(dir, `${stem} (${Date.now()})${ext}`);
+}
+function resolveExportPath(filename) {
+  return uniquePath(resolveDownloadDir(), filename);
 }
 const zh = {
   "app.title": "桌面控制台",
@@ -11711,7 +11774,26 @@ const zh = {
   "upd.openclawUpToDate": "OpenClaw 已是最新（{after}）",
   "upd.localNoAuto": "本地项目不支持自动更新，请在其仓库拉取新版后重装/复制",
   "upd.builtinFollowsContainer": "容器内置页面，随桌面控制台源码一起更新",
-  "upd.unknownChannel": "未知的更新方式"
+  "upd.unknownChannel": "未知的更新方式",
+  // #15 配置快照 / 迁移包
+  "snapshot.exportTitle": "导出迁移包",
+  "snapshot.importTitle": "导入迁移包",
+  "snapshot.zipFilter": "迁移包 (zip)",
+  "snapshot.noPages": "没有可导出的页面清单，请先导入至少一个项目",
+  "snapshot.exported": "迁移包已导出：{path}",
+  "snapshot.exportFail": "导出迁移包失败：{err}",
+  "snapshot.importFail": "导入迁移包失败：{err}",
+  "snapshot.badArchive": "迁移包格式无效或缺少 manifest.json",
+  "snapshot.restored": "已导入迁移包，恢复 {n} 个页面配置",
+  // #18 崩溃守护分级退出码
+  "page.logEngineMismatch": "[container] 依赖引擎版本不匹配（EBADENGINE），自动重启无意义，已停止重试",
+  "page.logReclaimRetry": "[container] 退出码 78（资源被占用），已清理残留进程并立即重试，不计入崩溃预算",
+  // #20 资源超限角标
+  "tray.tooltipResource": "桌面控制台 · 有页面资源占用超限",
+  // #21 网络诊断向导（步骤标签由渲染层按 step.id 本地化）
+  "net.proxyNone": "未检测到代理环境变量",
+  "net.reachable": "可达（{ms}ms）",
+  "net.unreachable": "不可达：{err}"
 };
 const en = {
   "app.title": "Desktop Console",
@@ -11855,7 +11937,26 @@ const en = {
   "upd.openclawUpToDate": "OpenClaw is up to date ({after})",
   "upd.localNoAuto": "Local projects do not support auto-update; pull the new version in their repo, then reinstall/copy",
   "upd.builtinFollowsContainer": "Built-in container page — updates with the desktop container source",
-  "upd.unknownChannel": "Unknown update channel"
+  "upd.unknownChannel": "Unknown update channel",
+  // #15 config snapshot / migration package
+  "snapshot.exportTitle": "Export migration package",
+  "snapshot.importTitle": "Import migration package",
+  "snapshot.zipFilter": "Migration package (zip)",
+  "snapshot.noPages": "No page manifest to export — import at least one project first",
+  "snapshot.exported": "Migration package exported: {path}",
+  "snapshot.exportFail": "Failed to export the migration package: {err}",
+  "snapshot.importFail": "Failed to import the migration package: {err}",
+  "snapshot.badArchive": "The migration package is invalid or missing manifest.json",
+  "snapshot.restored": "Migration package imported — restored {n} page configs",
+  // #18 crash guard exit-code tiers
+  "page.logEngineMismatch": "[container] Dependency engine version mismatch (EBADENGINE); restarting is pointless, retries stopped",
+  "page.logReclaimRetry": "[container] Exit code 78 (resource busy); stale process reclaimed and retried immediately, without burning the crash budget",
+  // #20 over-budget tray badge
+  "tray.tooltipResource": "Desktop Console · a page is over its resource budget",
+  // #21 network diagnostic wizard (step labels localized by the renderer via step.id)
+  "net.proxyNone": "No proxy environment variables detected",
+  "net.reachable": "Reachable ({ms}ms)",
+  "net.unreachable": "Unreachable: {err}"
 };
 const dictionaries = { zh, en };
 let localeSource = () => "zh";
@@ -12039,6 +12140,78 @@ function readLogTail(key, tail = 400, filter) {
     totalBytes: total
   };
 }
+const streamOffsets = /* @__PURE__ */ new Map();
+let streamWatchers = [];
+function flushFile(file, key, onLine) {
+  let size = 0;
+  try {
+    size = statSync(file).size;
+  } catch {
+    return;
+  }
+  let off = streamOffsets.get(file);
+  if (off === void 0) {
+    streamOffsets.set(file, size);
+    return;
+  }
+  if (size < off) off = 0;
+  if (size <= off) return;
+  const want = Math.min(size - off, 64 * 1024);
+  const buf = Buffer.allocUnsafe(want);
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    readSync(fd, buf, 0, want, off);
+  } catch {
+    return;
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+  }
+  const text = buf.toString("utf8");
+  const lastNl = text.lastIndexOf("\n");
+  if (lastNl === -1) return;
+  const complete = text.slice(0, lastNl);
+  streamOffsets.set(file, off + Buffer.byteLength(complete, "utf8") + 1);
+  const lines = complete.split(/\r?\n/).map((l) => l.replace(/\r$/, "")).filter((l) => l.length > 0);
+  if (lines.length) onLine({ key, lines });
+}
+function startLogStream(onLine) {
+  stopLogStream();
+  streamOffsets.clear();
+  const root = logsDir();
+  const pagesDir = join(root, "pages");
+  try {
+    mkdirSync(pagesDir, { recursive: true });
+  } catch {
+  }
+  const watchDir = (dir, resolve2) => {
+    try {
+      const w = watch(dir, (_event, filename) => {
+        if (!filename) return;
+        const name = String(filename);
+        const key = resolve2(name);
+        if (!key) return;
+        flushFile(join(dir, name), key, onLine);
+      });
+      w.on("error", () => {
+      });
+      streamWatchers.push(w);
+    } catch {
+    }
+  };
+  watchDir(root, (name) => name === "main.log" ? "main" : null);
+  watchDir(pagesDir, (name) => name.endsWith(".log") ? `pages/${name}` : null);
+}
+function stopLogStream() {
+  for (const w of streamWatchers) {
+    try {
+      w.close();
+    } catch {
+    }
+  }
+  streamWatchers = [];
+  streamOffsets.clear();
+}
 function capture$1(cmd, args, timeoutMs = 8e3) {
   return new Promise((resolve2) => {
     const child = spawn(cmd, args, { windowsHide: true, timeout: timeoutMs });
@@ -12119,6 +12292,7 @@ const DSH_READY_TIMEOUT_MS = Number(process.env.DSH_DSH_READY_TIMEOUT_MS || 12e4
 const ANNOUNCE_GRACE_MS = 1500;
 const CRASH_RETRY_DELAYS_MS = [2e3, 5e3, 15e3];
 const STABLE_RESET_MS = 5 * 6e4;
+const MAX_RECLAIM_RETRIES = 3;
 const HEALTH_READY_TIMEOUT_MS = 2e4;
 const HEALTH_POLL_MS = 3e4;
 const HEALTH_FAIL_LIMIT = 3;
@@ -12171,6 +12345,9 @@ function runCli$2(cmd, args, opts = {}) {
     child.on("error", (err) => resolve2({ code: -1, stdout, stderr: stderr || err.message }));
     child.on("close", (code2) => resolve2({ code: code2 ?? -1, stdout, stderr }));
   });
+}
+function detectEngineMismatch(e) {
+  return e.logs.some((l) => /EBADENGINE/i.test(l));
 }
 function defaultStartCommand(dir) {
   if (existsSync(join(dir, "server.js"))) return "node server.js";
@@ -12444,7 +12621,15 @@ class PageRegistry extends EventEmitter {
       runtimeMissing: (e.meta.kind === "dsh" || e.meta.kind === "openclaw") && e.status !== "running" ? !this.hasRuntime(e.meta.kind) : void 0,
       portHolder: e.portHolder,
       crashes: e.crashes || void 0,
-      nextRestartAt: e.nextRestartAt
+      nextRestartAt: e.nextRestartAt,
+      // #16: only a page that declares a healthUrl has a meaningful probe outcome; others
+      // leave it undefined so the panel skips the badge rather than showing a false "unknown".
+      health: e.meta.healthUrl ? {
+        status: e.lastHealthOk === void 0 ? "unknown" : e.lastHealthOk ? "ok" : "fail",
+        fails: e.healthFails,
+        lastAt: e.lastHealthAt,
+        url: healthTarget(e.meta, port) ?? void 0
+      } : void 0
     };
   }
   logs(id2) {
@@ -12562,8 +12747,18 @@ class PageRegistry extends EventEmitter {
         }
       }
       if (wasRunning && code2 !== 0 && !this.quitting && e.meta.kind !== "terminal" && getSettings().crashAutoRestart !== false) {
-        e.crashes++;
-        this.scheduleCrashRestart(e, code2);
+        if (detectEngineMismatch(e)) {
+          e.lastError = m("page.logEngineMismatch");
+          e.logs.push(`[container] ${e.lastError}`);
+          console.warn(`[pages] ${e.meta.id}: EBADENGINE — not restarting (engine mismatch)`);
+        } else if (code2 === 78 && (e.reclaimRetries ?? 0) < MAX_RECLAIM_RETRIES) {
+          e.reclaimRetries = (e.reclaimRetries ?? 0) + 1;
+          e.logs.push(`[container] ${m("page.logReclaimRetry")}`);
+          this.scheduleReclaimRestart(e);
+        } else {
+          e.crashes++;
+          this.scheduleCrashRestart(e, code2);
+        }
       }
       e.proc = void 0;
       e.pid = void 0;
@@ -12578,6 +12773,8 @@ class PageRegistry extends EventEmitter {
         if (target && !await waitHealth(target, HEALTH_READY_TIMEOUT_MS)) {
           throw new Error(m("page.healthFail", { url: target }));
         }
+        e.lastHealthOk = true;
+        e.lastHealthAt = Date.now();
       }
       let launchUrl = url;
       if (isOpenclaw) {
@@ -12591,7 +12788,10 @@ class PageRegistry extends EventEmitter {
       clearTimeout(e.stableTimer);
       e.stableTimer = setTimeout(() => {
         e.stableTimer = void 0;
-        if (e.status === "running") e.crashes = 0;
+        if (e.status === "running") {
+          e.crashes = 0;
+          e.reclaimRetries = 0;
+        }
       }, STABLE_RESET_MS);
       e.stableTimer.unref?.();
       this.emitProgress(e, "ready");
@@ -12972,18 +13172,24 @@ class PageRegistry extends EventEmitter {
   startHealthMonitor(e) {
     this.stopHealthMonitor(e);
     if (!e.meta.healthUrl) return;
-    e.healthTimer = setInterval(() => {
+    const probe = () => {
       if (e.status !== "running" || !e.proc || this.quitting) return;
       const target = healthTarget(e.meta, e.resolvedPort ?? e.meta.containerPort ?? e.meta.port);
       if (!target) return;
       void probeHealth(target).then((alive) => {
         if (e.status !== "running" || !e.proc) return;
+        e.lastHealthAt = Date.now();
         if (alive) {
+          e.lastHealthOk = true;
           e.healthFails = 0;
           return;
         }
+        e.lastHealthOk = false;
         e.healthFails++;
-        if (e.healthFails < HEALTH_FAIL_LIMIT) return;
+        if (e.healthFails < HEALTH_FAIL_LIMIT) {
+          this.emitChanged();
+          return;
+        }
         e.healthFails = 0;
         e.logs.push(`[container] ${m("page.logHealthKill", { n: HEALTH_FAIL_LIMIT })}`);
         console.warn(`[pages] ${e.meta.id}: ${HEALTH_FAIL_LIMIT} failed health probes — restarting`);
@@ -12993,13 +13199,17 @@ class PageRegistry extends EventEmitter {
           e.proc.kill("SIGTERM");
         }
       });
-    }, HEALTH_POLL_MS);
+    };
+    setTimeout(probe, 1500).unref?.();
+    e.healthTimer = setInterval(probe, HEALTH_POLL_MS);
     e.healthTimer.unref?.();
   }
   stopHealthMonitor(e) {
     if (e.healthTimer) clearInterval(e.healthTimer);
     e.healthTimer = void 0;
     e.healthFails = 0;
+    e.lastHealthOk = void 0;
+    e.lastHealthAt = void 0;
   }
   /** Cancel the guard's pending auto-restart / budget-refill timers for one entry. */
   clearRestartTimers(e) {
@@ -13044,6 +13254,31 @@ class PageRegistry extends EventEmitter {
       if (this.quitting || e.proc) return;
       this.start(e.meta.id, { fromCrashGuard: true }).catch((err) => {
         console.warn(`[pages] crash-restart ${e.meta.id} failed:`, err.message);
+      });
+    }, delay);
+    e.restartTimer.unref?.();
+  }
+  /**
+   * #18: exit-78 (resource busy) reclaim-and-retry. Mirrors scheduleCrashRestart's shape
+   * but does NOT consume the crash budget — it reclaims the orphan holding the resource and
+   * restarts on the shortest rung. Bounded by MAX_RECLAIM_RETRIES (checked by the caller) so
+   * a page that keeps hitting 78 can't hot-loop; once the cap is spent the caller falls back
+   * to the normal budgeted ladder.
+   */
+  scheduleReclaimRestart(e) {
+    this.clearRestartTimers(e);
+    const delay = CRASH_RETRY_DELAYS_MS[0];
+    e.nextRestartAt = Date.now() + delay;
+    this.emitChanged();
+    e.restartTimer = setTimeout(() => {
+      e.restartTimer = void 0;
+      e.nextRestartAt = void 0;
+      if (this.quitting || e.proc) return;
+      void this.reclaimOrphan(e, e.meta.id).catch((err) => console.warn(`[pages] ${e.meta.id} reclaim failed:`, err.message)).finally(() => {
+        if (this.quitting || e.proc) return;
+        this.start(e.meta.id, { fromCrashGuard: true }).catch((err) => {
+          console.warn(`[pages] reclaim-restart ${e.meta.id} failed:`, err.message);
+        });
       });
     }, delay);
     e.restartTimer.unref?.();
@@ -13305,14 +13540,14 @@ function makeGit(dir) {
   const options = { baseDir: dir, maxConcurrentProcesses: 4 };
   return simpleGit(options);
 }
-function normalizeRepoUrl(url) {
+function normalizeRepoUrl$1(url) {
   return url.trim().replace(/\/+$/, "").replace(/^(https?:\/\/)[^@/\s]+@/i, "$1");
 }
 function isSshRemote(url) {
   return /^ssh:\/\//i.test(url) || /^[^@\s/]+@[^:\s]+:/.test(url.trim());
 }
 function recloneUrl(url) {
-  return isSshRemote(url) ? url : normalizeRepoUrl(url).replace(/^(https?:\/\/)[^@/\s]+@/i, "$1");
+  return isSshRemote(url) ? url : normalizeRepoUrl$1(url).replace(/^(https?:\/\/)[^@/\s]+@/i, "$1");
 }
 async function cloneWithAuthFallback(dir, url, onProgress) {
   const makeGit2 = () => onProgress ? simpleGit({
@@ -13330,7 +13565,7 @@ async function cloneWithAuthFallback(dir, url, onProgress) {
     await makeGit2().clone(url, dir);
   } catch (err) {
     const fallback = recloneUrl(url);
-    if (fallback === normalizeRepoUrl(url)) throw err;
+    if (fallback === normalizeRepoUrl$1(url)) throw err;
     await makeGit2().clone(fallback, dir);
   }
 }
@@ -14034,6 +14269,18 @@ function readMeta() {
     return null;
   }
 }
+function getUpdateHistory() {
+  const meta = readMeta();
+  const staged = readStagedUpdate();
+  const rb = canRollbackAsar();
+  return {
+    running: app$1.getVersion(),
+    current: staged?.version || null,
+    backup: rb.available ? rb.fromVersion || null : null,
+    rollbackFrom: meta?.rollbackFromVersion || null,
+    pendingRestart: !!staged
+  };
+}
 function canRollbackAsar() {
   if (!app$1.isPackaged) return { available: false };
   const resourcesDir = dirname(updatesRoot());
@@ -14387,11 +14634,31 @@ async function updateDshPlugin(name, channel, gitUrl, profile = DEFAULT_PROFILE)
     return m("dsh.updatedTo", { spec: installSpec });
   }
   const s = validateNpmSpec(name);
-  await dshPluginForward(["update", s], profile);
+  await dshPluginForward(["update", s, "--latest"], profile);
   return m("dsh.npmUpdated", { spec: s });
 }
 async function updateAllDshPlugins(profile = DEFAULT_PROFILE) {
-  return (await dshPluginForward(["update", "--latest"], profile)).slice(-2e3);
+  const current = new Map(listDshPlugins(profile).map((p) => [p.name, p.version]));
+  const targets = (await checkDshPluginUpdates(profile)).filter((u) => u.updateAvailable);
+  if (!targets.length) return "";
+  const done = [];
+  const failed = [];
+  for (const u of targets) {
+    try {
+      const pinnedToGit = !!parseGitSpec(current.get(u.name) || "");
+      if (u.channel === "npm" && pinnedToGit && u.latest) {
+        const spec = `${u.name}@${u.latest}`;
+        await installDshPlugin(spec, profile);
+        done.push(m("dsh.npmUpdated", { spec }));
+      } else {
+        done.push(await updateDshPlugin(u.name, u.channel || "npm", u.gitUrl, profile));
+      }
+    } catch (err) {
+      failed.push(`${u.name}: ${err.message}`);
+    }
+  }
+  if (!done.length) throw new Error(failed.join("\n") || m("dsh.unavailable"));
+  return [...done, ...failed].join("\n").slice(-2e3);
 }
 const NPM_REGISTRY_MIRROR = "https://registry.npmmirror.com";
 function parseGitSpec(version) {
@@ -14456,31 +14723,77 @@ async function npmLatestVersion(name) {
   });
   return res.code === 0 ? res.stdout.trim().replace(/^v/, "") : "";
 }
+function cleanVersion(s) {
+  return s.replace(/^[\^~>=<*v]+/i, "").trim();
+}
+function isSemver(s) {
+  return /^\d+\.\d+\.\d+/.test(s);
+}
+function normalizeRepoUrl(raw) {
+  const s = (raw || "").trim().replace(/^git\+/i, "");
+  if (!s) return null;
+  const gh = /^(?:github[:/]|https?:\/\/github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(s);
+  if (gh) return `https://github.com/${gh[1]}.git`;
+  if (/^(?:https?|ssh|git):\/\//i.test(s) || /^[\w.-]+@[\w.-]+:/i.test(s)) return s;
+  return null;
+}
+async function npmRepositoryUrl(name) {
+  const res = await runCli$1(
+    "npm",
+    ["view", name, "repository.url", "--registry", NPM_REGISTRY_MIRROR],
+    { timeoutMs: 3e4, shell: process.platform === "win32" }
+  );
+  return res.code === 0 ? res.stdout.trim().replace(/^["']|["']$/g, "") : "";
+}
+function installedSemverOf(raw, git) {
+  const v = cleanVersion(git ? git.ref || "" : raw);
+  return isSemver(v) ? v : null;
+}
+async function describePluginUpdate(p) {
+  const gitDep = parseGitSpec(p.version);
+  const installedSem = installedSemverOf(p.version, gitDep);
+  const repo = gitDep?.repo || normalizeRepoUrl(await npmRepositoryUrl(p.name));
+  const [npmRaw, tag] = await Promise.all([
+    npmLatestVersion(p.name),
+    repo ? latestGitTag(repo) : Promise.resolve(null)
+  ]);
+  const npmSem = isSemver(cleanVersion(npmRaw)) ? cleanVersion(npmRaw) : null;
+  const gitSem = tag && isSemver(cleanVersion(tag.version)) ? cleanVersion(tag.version) : null;
+  if (gitDep && !installedSem && tag && repo) {
+    const moved = (gitDep.ref || "").toLowerCase() !== tag.sha.toLowerCase();
+    return moved ? {
+      name: p.name,
+      updateAvailable: true,
+      latest: tag.version,
+      channel: "git",
+      gitUrl: `${repo}#${tag.version}`
+    } : { name: p.name, updateAvailable: false, channel: "git" };
+  }
+  let best = null;
+  if (npmSem) best = { ver: npmSem, channel: "npm" };
+  if (gitSem && (!best || isNewerVersion(best.ver, gitSem)))
+    best = {
+      ver: gitSem,
+      channel: "git",
+      gitUrl: repo && tag ? `${repo}#${tag.version}` : void 0
+    };
+  if (!best) return { name: p.name, updateAvailable: false, channel: gitDep ? "git" : "npm" };
+  const updateAvailable = installedSem ? isNewerVersion(installedSem, best.ver) : false;
+  if (!updateAvailable) return { name: p.name, updateAvailable: false, channel: best.channel };
+  return {
+    name: p.name,
+    updateAvailable: true,
+    latest: best.channel === "git" && tag ? tag.version : best.ver,
+    channel: best.channel,
+    gitUrl: best.gitUrl
+  };
+}
 async function checkDshPluginUpdates(profile = DEFAULT_PROFILE) {
   const plugins = listDshPlugins(profile).filter((p) => p.source === "profile");
   return Promise.all(
-    plugins.map(async (p) => {
-      const git = parseGitSpec(p.version);
-      try {
-        if (git) {
-          const tag = await latestGitTag(git.repo);
-          if (!tag) return { name: p.name, updateAvailable: false, channel: "git" };
-          let updateAvailable;
-          if (git.isSha) updateAvailable = (git.ref || "").toLowerCase() !== tag.sha.toLowerCase();
-          else if (git.ref) {
-            const instVer = git.ref.replace(/^v/i, "");
-            updateAvailable = /^\d/.test(instVer) ? isNewerVersion(instVer, tag.version) : (git.ref || "").toLowerCase() !== tag.sha.toLowerCase();
-          } else updateAvailable = false;
-          return { name: p.name, updateAvailable, latest: tag.version, channel: "git" };
-        }
-        const latest = await npmLatestVersion(p.name);
-        if (latest && isNewerVersion(p.version, latest))
-          return { name: p.name, updateAvailable: true, latest, channel: "npm" };
-        return { name: p.name, updateAvailable: false, channel: "npm" };
-      } catch {
-        return { name: p.name, updateAvailable: false };
-      }
-    })
+    plugins.map(
+      (p) => describePluginUpdate(p).catch(() => ({ name: p.name, updateAvailable: false }))
+    )
   );
 }
 async function remoteHeadSha(repoUrl) {
@@ -15349,15 +15662,10 @@ async function exportDiagnostics(registry2) {
     }
     writeFileSync$1(join(stage, "git.txt"), gitLines.join("\n"), "utf8");
     const zipPath = join(app$1.getPath("temp"), `dsh-diag-${ts}.zip`);
-    await zipFolder(stage, zipPath);
-    const { canceled, filePath } = await dialog.showSaveDialog({
-      title: m("diag.exportTitle"),
-      defaultPath: `dsh-diag-${ts}.zip`,
-      filters: [{ name: "zip", extensions: ["zip"] }]
-    });
-    if (canceled || !filePath) return null;
-    await promises.copyFile(zipPath, filePath);
-    return filePath;
+    await zipFolder$1(stage, zipPath);
+    const dest = resolveExportPath(`dsh-diag-${ts}.zip`);
+    await promises.copyFile(zipPath, dest);
+    return dest;
   } finally {
     rmSync(stage, { recursive: true, force: true });
   }
@@ -15374,8 +15682,10 @@ function safePageLogFiles() {
     return [];
   }
 }
-function zipFolder(src, dest) {
-  const ps = `Compress-Archive -LiteralPath '${src.replace(/'/g, "''")}\\*' -DestinationPath '${dest.replace(/'/g, "''")}' -Force`;
+function zipFolder$1(src, dest) {
+  const srcLit = src.replace(/'/g, "''");
+  const destLit = dest.replace(/'/g, "''");
+  const ps = `$items = Get-ChildItem -LiteralPath '${srcLit}' | ForEach-Object { $_.FullName }; Compress-Archive -LiteralPath $items -DestinationPath '${destLit}' -Force -ErrorAction Stop`;
   const encoded = Buffer.from(ps, "utf16le").toString("base64");
   return new Promise((resolve2, reject) => {
     const child = spawn("powershell.exe", ["-NoProfile", "-EncodedCommand", encoded], {
@@ -15385,11 +15695,500 @@ function zipFolder(src, dest) {
     let err = "";
     child.stderr?.on("data", (d) => err += String(d));
     child.on("error", reject);
-    child.on(
-      "close",
-      (code2) => code2 === 0 ? resolve2() : reject(new Error(`Compress-Archive failed (${code2}): ${err.trim()}`))
-    );
+    child.on("close", (code2) => {
+      if (code2 !== 0) return reject(new Error(`Compress-Archive failed (${code2}): ${err.trim()}`));
+      if (!existsSync(dest)) return reject(new Error("Compress-Archive produced no archive"));
+      resolve2();
+    });
   });
+}
+function captureSettings() {
+  const s = getSettings();
+  return {
+    defaultView: s.defaultView,
+    openExternalIn: s.openExternalIn,
+    minimizeToTray: s.minimizeToTray,
+    autoStartPages: s.autoStartPages,
+    autoStartManual: s.autoStartManual,
+    externalSites: s.externalSites,
+    theme: s.theme,
+    locale: s.locale,
+    envRoot: s.envRoot,
+    dshHome: s.dshHome,
+    openclawHome: s.openclawHome,
+    downloadDir: s.downloadDir,
+    pageEnvs: s.pageEnvs,
+    pagePorts: s.pagePorts,
+    crashAutoRestart: s.crashAutoRestart,
+    systemNotifications: s.systemNotifications,
+    accentColor: s.accentColor,
+    glassBlur: s.glassBlur,
+    memWarnMb: s.memWarnMb
+  };
+}
+function zipFolder(src, dest) {
+  const srcLit = src.replace(/'/g, "''");
+  const destLit = dest.replace(/'/g, "''");
+  const ps = `$items = Get-ChildItem -LiteralPath '${srcLit}' | ForEach-Object { $_.FullName }; Compress-Archive -LiteralPath $items -DestinationPath '${destLit}' -Force -ErrorAction Stop`;
+  const encoded = Buffer.from(ps, "utf16le").toString("base64");
+  return new Promise((resolve2, reject) => {
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+      {
+        windowsHide: true,
+        timeout: 6e4
+      }
+    );
+    let err = "";
+    child.stderr?.on("data", (d) => err += String(d));
+    child.on("error", reject);
+    child.on("close", (code2) => {
+      if (code2 !== 0) return reject(new Error(`Compress-Archive failed (${code2}): ${err.trim()}`));
+      if (!existsSync(dest)) return reject(new Error("Compress-Archive produced no archive"));
+      resolve2();
+    });
+  });
+}
+async function exportSnapshot(registry2) {
+  const pages = registry2.list().filter((p) => !p.external).map((p) => {
+    let containerJson = null;
+    try {
+      const f = join(p.dir, "container.json");
+      if (existsSync(f)) containerJson = JSON.parse(readFileSync(f, "utf-8"));
+    } catch {
+      containerJson = null;
+    }
+    return { id: p.id, name: p.name, kind: p.kind, containerJson };
+  }).filter((p) => p.containerJson !== null);
+  if (pages.length === 0) throw new Error(m("snapshot.noPages"));
+  const createdAt = Date.now();
+  const ts = new Date(createdAt).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const manifest = {
+    appVersion: app$1.getVersion(),
+    createdAt,
+    settings: captureSettings(),
+    pages
+  };
+  const stage = join(app$1.getPath("temp"), `dsh-snapshot-${ts}`);
+  const containerDir = join(stage, "container");
+  mkdirSync(containerDir, { recursive: true });
+  try {
+    writeFileSync$1(join(stage, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+    for (const p of pages) {
+      writeFileSync$1(
+        join(containerDir, `${p.id}.json`),
+        JSON.stringify(p.containerJson, null, 2),
+        "utf8"
+      );
+    }
+    const zipPath = join(app$1.getPath("temp"), `dsh-snapshot-${ts}.zip`);
+    await zipFolder(stage, zipPath);
+    const filePath = resolveExportPath(`dsh-snapshot-${ts}.zip`);
+    const { promises: fsp } = await import("node:fs");
+    await fsp.copyFile(zipPath, filePath);
+    return { path: filePath, pageIds: pages.map((p) => p.id), createdAt };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+async function importSnapshot(registry2) {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: m("snapshot.importTitle"),
+    properties: ["openFile"],
+    filters: [{ name: m("snapshot.zipFilter"), extensions: ["zip"] }]
+  });
+  if (canceled || !filePaths[0]) throw new Error(m("snapshot.badArchive"));
+  const zip = filePaths[0];
+  const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const extractTo = join(app$1.getPath("temp"), `dsh-snapshot-in-${ts}`);
+  mkdirSync(extractTo, { recursive: true });
+  try {
+    await extractZip(zip, extractTo);
+    const manifestFile = join(extractTo, "manifest.json");
+    if (!existsSync(manifestFile)) throw new Error(m("snapshot.badArchive"));
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(manifestFile, "utf-8"));
+    } catch {
+      throw new Error(m("snapshot.badArchive"));
+    }
+    if (manifest.settings && typeof manifest.settings === "object") {
+      updateSettings(manifest.settings, { syncAutoStartPin: false });
+    }
+    const pagesDir = resolvePagesDir();
+    mkdirSync(pagesDir, { recursive: true });
+    const restored = [];
+    for (const p of manifest.pages ?? []) {
+      if (!p?.id || p.containerJson == null) continue;
+      const safeId = String(p.id).replace(/[^\w.-]/g, "");
+      if (!safeId) continue;
+      const dir = join(pagesDir, safeId);
+      try {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync$1(join(dir, "container.json"), JSON.stringify(p.containerJson, null, 2), "utf8");
+        restored.push(safeId);
+      } catch {
+      }
+    }
+    registry2.reconcile();
+    registry2.emitChanged();
+    return {
+      path: zip,
+      pageIds: restored,
+      createdAt: manifest.createdAt ?? Date.now(),
+      restoredPages: restored,
+      appliedSettings: !!manifest.settings
+    };
+  } finally {
+    rmSync(extractTo, { recursive: true, force: true });
+  }
+}
+function probeUrl(url, timeoutMs = 8e3) {
+  return new Promise((resolve2) => {
+    const start = Date.now();
+    const getter = url.startsWith("https:") ? get$1 : get$2;
+    let settled = false;
+    const req = getter(url, (res) => {
+      if (settled) return;
+      settled = true;
+      const ms = Date.now() - start;
+      const status = res.statusCode ?? 0;
+      res.destroy();
+      resolve2({ ok: status > 0, ms, status });
+    });
+    req.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      resolve2({ ok: false, error: err.message });
+    });
+    req.setTimeout(timeoutMs, () => {
+      if (settled) return;
+      settled = true;
+      req.destroy();
+      resolve2({ ok: false, error: `timeout ${timeoutMs}ms` });
+    });
+  });
+}
+function probeLoopback() {
+  return new Promise((resolve2) => {
+    const start = Date.now();
+    const server = createServer((sock) => {
+      sock.end("ok");
+    });
+    server.on("error", (err) => resolve2({ ok: false, error: err.message }));
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        server.close();
+        resolve2({ ok: false, error: "no address" });
+        return;
+      }
+      const client = createConnection({ host: "127.0.0.1", port: addr.port });
+      client.on("connect", () => {
+        const ms = Date.now() - start;
+        client.destroy();
+        server.close();
+        resolve2({ ok: true, ms });
+      });
+      client.on("error", (err) => {
+        client.destroy();
+        server.close();
+        resolve2({ ok: false, error: err.message });
+      });
+    });
+  });
+}
+function reachStep(id2, p) {
+  if (p.ok) return { id: id2, ok: true, ms: p.ms, detail: m("net.reachable", { ms: p.ms ?? 0 }) };
+  return { id: id2, ok: false, detail: m("net.unreachable", { err: p.error || `HTTP ${p.status ?? "?"}` }) };
+}
+async function runNetworkProbe(npmRegistry) {
+  const proxy = {
+    http: process.env.HTTP_PROXY || process.env.http_proxy || "",
+    https: process.env.HTTPS_PROXY || process.env.https_proxy || "",
+    no: process.env.NO_PROXY || process.env.no_proxy || ""
+  };
+  const proxyStep = {
+    id: "proxy",
+    ok: true,
+    // informational — presence isn't a failure
+    detail: proxy.http || proxy.https ? proxy.http || proxy.https : m("net.proxyNone")
+  };
+  const [gateway, github, npm, mirror] = await Promise.all([
+    probeLoopback(),
+    probeUrl("https://github.com"),
+    probeUrl("https://registry.npmjs.org/-/ping"),
+    probeUrl("https://registry.npmmirror.com/-/ping")
+  ]);
+  const steps = [
+    reachStep("gateway", gateway),
+    reachStep("github", github),
+    reachStep("npm", npm),
+    reachStep("npmmirror", mirror),
+    proxyStep
+  ];
+  const healthy = gateway.ok && github.ok && (npm.ok || mirror.ok);
+  return { steps, proxy, healthy };
+}
+function listInterfaces() {
+  const out = [];
+  let ifaces = {};
+  try {
+    ifaces = os.networkInterfaces();
+  } catch {
+    return out;
+  }
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    const list = addrs ?? [];
+    const v4 = list.find((a) => String(a.family) === "IPv4" || String(a.family) === "4");
+    const info = {
+      name,
+      family: v4 ? "IPv4" : String(list[0]?.family ?? "") || "",
+      internal: Boolean(v4?.internal ?? list[0]?.internal),
+      address: v4?.address ?? void 0,
+      netmask: v4?.netmask ?? void 0,
+      mac: v4?.mac ?? void 0,
+      cidr: v4?.cidr ?? void 0
+    };
+    out.push(info);
+  }
+  return out;
+}
+function readCountersWindows() {
+  return new Promise((resolve2) => {
+    const script = "Get-NetAdapterStatistics | Where-Object { $_.Name -notmatch 'Loopback' } | Measure-Object -Property ReceivedBytes,SentBytes -Sum | ForEach-Object { $_.Property + '|' + $_.Sum }";
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+      { windowsHide: true, timeout: 8e3 }
+    );
+    let out = "";
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve2(v);
+    };
+    child.stdout?.on("data", (d) => out += String(d));
+    child.on("error", () => finish(null));
+    child.on("close", () => {
+      let rx = 0;
+      let tx = 0;
+      for (const line of out.split(/\r?\n/)) {
+        const [prop, sum] = line.trim().split("|");
+        const n = Number(sum);
+        if (!Number.isFinite(n)) continue;
+        if (prop === "ReceivedBytes") rx += n;
+        else if (prop === "SentBytes") tx += n;
+      }
+      finish(rx || tx ? { rxBytes: rx, txBytes: tx } : null);
+    });
+  });
+}
+function readCountersPosix() {
+  try {
+    const text = readFileSync("/proc/net/dev", "utf-8");
+    let rx = 0;
+    let tx = 0;
+    for (const line of text.split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      const name = line.slice(0, idx).trim();
+      if (name === "lo") continue;
+      const cols = line.slice(idx + 1).trim().split(/\s+/).map(Number);
+      if (Number.isFinite(cols[0])) rx += cols[0];
+      if (Number.isFinite(cols[8])) tx += cols[8];
+    }
+    return rx || tx ? { rxBytes: rx, txBytes: tx } : null;
+  } catch {
+    return null;
+  }
+}
+async function getNetworkStats() {
+  const interfaces = listInterfaces();
+  const counters = process.platform === "win32" ? await readCountersWindows() : readCountersPosix();
+  return { interfaces, counters, sampleAt: Date.now() };
+}
+function getSystemInfo() {
+  const cpus = os.cpus();
+  let locale = "";
+  let timezone = "";
+  try {
+    const dtf = Intl.DateTimeFormat().resolvedOptions();
+    locale = dtf.locale || "";
+    timezone = dtf.timeZone || "";
+  } catch {
+  }
+  const interfaces = listInterfaces();
+  return {
+    osType: os.type(),
+    osRelease: os.release(),
+    platform: process.platform,
+    arch: os.arch(),
+    hostname: os.hostname(),
+    cpuModel: cpus[0]?.model?.trim(),
+    cpuCores: cpus.length,
+    totalMem: os.totalmem(),
+    freeMem: os.freemem(),
+    osUptimeSec: os.uptime(),
+    appUptimeSec: process.uptime(),
+    locale,
+    timezone,
+    home: os.homedir(),
+    appVersion: app$1.getVersion(),
+    packaged: app$1.isPackaged,
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    userData: app$1.getPath("userData"),
+    interfaceCount: interfaces.filter((i) => !i.internal).length,
+    installDir: resolveInstallDir()
+  };
+}
+const lastCpu = /* @__PURE__ */ new Map();
+function sampleWindows(roots) {
+  return new Promise((resolve2, reject) => {
+    const list = roots.join(",");
+    const script = [
+      `$roots = @(${list})`,
+      "$procs = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId",
+      "function Get-Tree($root){",
+      "  $acc = New-Object System.Collections.Generic.List[int]",
+      "  $stack = New-Object System.Collections.Generic.Stack[int]",
+      "  $stack.Push($root)",
+      "  while($stack.Count -gt 0){",
+      "    $cur = $stack.Pop(); $acc.Add($cur)",
+      "    foreach($p in $procs){ if($p.ParentProcessId -eq $cur){ $stack.Push($p.ProcessId) } }",
+      "  }",
+      "  return $acc",
+      "}",
+      "foreach($root in $roots){",
+      "  $ws = 0; $cpu = 0",
+      "  foreach($id in (Get-Tree $root)){",
+      "    $gp = Get-Process -Id $id -ErrorAction SilentlyContinue",
+      "    if($gp){ $ws += $gp.WorkingSet64; try { $cpu += [double]$gp.CPU } catch {} }",
+      "  }",
+      '  Write-Output "$root|$ws|$cpu"',
+      "}"
+    ].join("\n");
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+      windowsHide: true,
+      timeout: 15e3
+    });
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (d) => out += String(d));
+    child.stderr?.on("data", (d) => err += String(d));
+    child.on("error", reject);
+    child.on("close", (code2) => {
+      if (code2 !== 0) {
+        reject(new Error(`powershell sample failed (${code2}): ${err.trim() || m("dsh.exitCode", { code: String(code2) })}`));
+        return;
+      }
+      const map = /* @__PURE__ */ new Map();
+      for (const line of out.split(/\r?\n/)) {
+        const parts = line.trim().split("|");
+        if (parts.length !== 3) continue;
+        const root = Number(parts[0]);
+        if (!Number.isFinite(root)) continue;
+        map.set(root, { ws: Number(parts[1]) || 0, cpu: Number(parts[2]) || 0 });
+      }
+      resolve2(map);
+    });
+  });
+}
+function samplePosix(roots) {
+  const map = /* @__PURE__ */ new Map();
+  const procs = [];
+  let entries = [];
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    return map;
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    try {
+      const stat2 = readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const rparen = stat2.lastIndexOf(")");
+      const fields = stat2.slice(rparen + 2).trim().split(/\s+/);
+      const ppid = Number(fields[1]);
+      const utime = Number(fields[11]);
+      const stime = Number(fields[12]);
+      let rssKb = 0;
+      try {
+        const status = readFileSync(`/proc/${pid}/status`, "utf-8");
+        const mm = status.match(/VmRSS:\s+(\d+)\s+kB/);
+        if (mm) rssKb = Number(mm[1]);
+      } catch {
+      }
+      procs.push({ pid, ppid, rssKb, cpuTicks: utime + stime });
+    } catch {
+    }
+  }
+  for (const root of roots) {
+    let ws = 0;
+    let cpuTicks = 0;
+    for (const p of descendantsOf(procs, root)) {
+      ws += p.rssKb * 1024;
+      cpuTicks += p.cpuTicks;
+    }
+    map.set(root, { ws, cpu: cpuTicks / 100 });
+  }
+  return map;
+}
+function descendantsOf(procs, root) {
+  const out = [];
+  const stack = [root];
+  const seen = /* @__PURE__ */ new Set();
+  while (stack.length) {
+    const cur = stack.pop();
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    for (const p of procs) if (p.ppid === cur) {
+      stack.push(p.pid);
+      out.push(p);
+    }
+  }
+  return out;
+}
+async function collectPageMetrics(registry2, memWarnMb) {
+  const running = registry2.running().filter((p) => p.pid);
+  if (running.length === 0) return [];
+  const byPid = /* @__PURE__ */ new Map();
+  for (const p of running) byPid.set(p.pid, p.id);
+  const roots = [...byPid.keys()];
+  const now = Date.now();
+  let samples;
+  try {
+    samples = process.platform === "win32" ? await sampleWindows(roots) : samplePosix(roots);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const [root, s] of samples) {
+    const pageId = byPid.get(root);
+    if (!pageId) continue;
+    const prev = lastCpu.get(root);
+    let cpu = 0;
+    if (prev) {
+      const wallSec = (now - prev.at) / 1e3;
+      const cpuSec = s.cpu - prev.cpu;
+      if (wallSec > 0 && cpuSec >= 0) cpu = Math.round(cpuSec / wallSec * 1e3) / 10;
+    }
+    lastCpu.set(root, { cpu: s.cpu, at: now });
+    const memMb = Math.round(s.ws / 1024 / 1024);
+    out.push({ pageId, pid: root, cpu, memMb, overLimit: memWarnMb > 0 && memMb > memWarnMb });
+  }
+  return out;
+}
+function pruneMetricsBaseline(livePids) {
+  const keep = new Set(livePids);
+  for (const pid of [...lastCpu.keys()]) if (!keep.has(pid)) lastCpu.delete(pid);
 }
 const icon = join$1(import.meta.dirname, "../../resources/icon.png");
 function appIconPath() {
@@ -15403,9 +16202,11 @@ function appIconPath() {
 let tray = null;
 let trayImage = null;
 let updatePending = false;
+let resourceWarn = false;
 const BADGE_COLORS = {
   1: [245, 158, 11],
-  2: [239, 68, 68]
+  2: [245, 192, 0],
+  3: [239, 68, 68]
 };
 function composeImage(level) {
   if (!trayImage || level === 0) return trayImage;
@@ -15468,18 +16269,31 @@ function rebuildTrayMenu() {
     }
   ];
   const alert = stopped.some((p) => p.status === "error");
-  tray.setToolTip(alert ? m("tray.tooltipAlert") : m("tray.tooltip", { n: running.length }));
+  const level = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0;
+  tray.setToolTip(
+    alert ? m("tray.tooltipAlert") : resourceWarn ? m("tray.tooltipResource") : m("tray.tooltip", { n: running.length })
+  );
   tray.setContextMenu(Menu.buildFromTemplate(template));
-  const img = composeImage(alert ? 2 : updatePending ? 1 : 0);
+  const img = composeImage(level);
   if (img) tray.setImage(img);
 }
 function setTrayUpdatePending(v) {
   if (updatePending === v) return;
   updatePending = v;
+  refreshBadge();
+}
+function setTrayResourceWarn(v) {
+  if (resourceWarn === v) return;
+  resourceWarn = v;
+  refreshBadge();
+}
+function refreshBadge() {
+  if (!tray) return;
   const registry2 = hooks.getRegistry();
   const alert = registry2 ? registry2.list().some((p) => p.status === "error" && !p.external) : false;
-  const img = composeImage(alert ? 2 : v ? 1 : 0);
-  if (tray && img) tray.setImage(img);
+  const level = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0;
+  const img = composeImage(level);
+  if (img) tray.setImage(img);
 }
 function createTray(injected) {
   if (tray) return;
@@ -15621,6 +16435,8 @@ class PtyManager {
 }
 let surveyTimer = null;
 const UPDATE_SURVEY_MS = 30 * 6e4;
+let metricsTimer = null;
+const METRICS_POLL_MS = 5e3;
 function registerIpc(registry2) {
   const ok = (data) => ({ ok: true, data });
   const fail = (err) => ({
@@ -15922,11 +16738,87 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
+  ipcMain$1.handle(IPC.ExportSnapshot, async () => {
+    try {
+      return ok(await exportSnapshot(registry2));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ImportSnapshot, async () => {
+    try {
+      return ok(await importSnapshot(registry2));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.RunNetworkProbe, async () => {
+    try {
+      return ok(await runNetworkProbe());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetUpdateHistory, () => {
+    try {
+      return ok(getUpdateHistory());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetPageMetrics, async () => {
+    try {
+      return ok(await collectPageMetrics(registry2, getSettings().memWarnMb ?? 0));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetSystemInfo, () => {
+    try {
+      return ok(getSystemInfo());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetNetworkStats, async () => {
+    try {
+      return ok(await getNetworkStats());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  startLogStream((ev) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnLogLine, ev);
+    }
+  });
+  if (metricsTimer) clearInterval(metricsTimer);
+  metricsTimer = setInterval(async () => {
+    try {
+      const metrics = await collectPageMetrics(registry2, getSettings().memWarnMb ?? 0);
+      pruneMetricsBaseline(
+        registry2.running().map((p) => p.pid).filter(Boolean)
+      );
+      setTrayResourceWarn(metrics.some((mm) => mm.overLimit));
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send(IPC.OnPageMetrics, metrics);
+      }
+    } catch {
+    }
+  }, METRICS_POLL_MS);
+  metricsTimer.unref?.();
   ipcMain$1.handle(
     IPC.UpdateSettings,
     (_e, partial) => {
       try {
-        if (partial.defaultView) setDefaultView(partial.defaultView);
+        if (partial.defaultView) {
+          const prevDv = getSettings().defaultView;
+          const prevId = prevDv.kind === "page" ? prevDv.pageId : null;
+          let nextId2 = partial.defaultView.kind === "page" ? partial.defaultView.pageId : null;
+          if (nextId2 && registry2.get(nextId2)?.external) nextId2 = null;
+          syncAutoStartForDefaultView(prevId, nextId2);
+          setDefaultView(partial.defaultView);
+        }
         const rest = { ...partial };
         delete rest.defaultView;
         if (Object.keys(rest).length) updateSettings(rest);
@@ -16252,19 +17144,6 @@ let sequence = 0;
 function nextId() {
   sequence += 1;
   return `dl-${Date.now().toString(36)}-${sequence}`;
-}
-function uniquePath(dir, filename) {
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-  }
-  const ext = extname(filename);
-  const stem = basename(filename, ext);
-  for (let i = 0; i < 1e3; i += 1) {
-    const candidate = join(dir, i === 0 ? filename : `${stem} (${i})${ext}`);
-    if (!existsSync(candidate)) return candidate;
-  }
-  return join(dir, `${stem} (${Date.now()})${ext}`);
 }
 function broadcast(payload) {
   for (const win of BrowserWindow.getAllWindows()) {

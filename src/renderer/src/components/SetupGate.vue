@@ -278,11 +278,12 @@ const nodeProgress = computed(() => updates.nodeProgress)
   overflow-y: auto;
   background:
     radial-gradient(120% 60% at 50% -10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
-    color-mix(in srgb, var(--surface) 88%, transparent);
+    rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.72));
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
   border-radius: 14px;
-  -webkit-backdrop-filter: blur(32px) saturate(145%);
-  backdrop-filter: blur(32px) saturate(145%);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
+    saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
   box-shadow:
     var(--shadow),
     0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset,

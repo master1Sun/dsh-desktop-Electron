@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, FolderOpened } from '@element-plus/icons-vue'
+import { Delete, FolderOpened, Download, Menu } from '@element-plus/icons-vue'
 import { usePagesStore, type PageState } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import { useRuntimesStore } from '../stores/runtimes'
 import { CONTAINER_REPO_URL } from '@shared/types'
+import type { PageMetrics } from '@shared/types'
 import { t } from '../i18n'
 
 /** Mirror of the main-process check: a filesystem path typed where a URL was expected. */
@@ -19,6 +20,9 @@ const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
 const runtimes = useRuntimesStore()
 const emit = defineEmits<{ close: [] }>()
+
+/** 页面面板竖排分类 tab：git 导入 / 目录导入 / 已安装列表。 */
+const activeTab = ref('git')
 
 /**
  * A hosted dsh/openclaw row can't start without its CLI runtime (both are provisioned on demand
@@ -194,7 +198,7 @@ const logsVisible = ref(false)
 /* ---- per-page config dialog: port override + the env dirs THIS project declares ---- */
 const configFor = ref<PageState | null>(null)
 const configVisible = ref(false)
-const configDraft = reactive({ port: '', envs: {} as Record<string, string> })
+const configDraft = reactive({ port: '', envs: {} as Record<string, string>, autoStart: false })
 const configSaving = ref(false)
 
 const configEnvVars = computed(() => configFor.value?.envVars ?? [])
@@ -202,6 +206,7 @@ const configEnvVars = computed(() => configFor.value?.envVars ?? [])
 function openConfig(page: PageState): void {
   configFor.value = page
   configDraft.port = String(page.containerPort || page.port || '')
+  configDraft.autoStart = (settingsStore.settings.autoStartPages || []).includes(page.id)
   const stored = settingsStore.settings.pageEnvs?.[page.id] || {}
   configDraft.envs = {}
   for (const v of page.envVars ?? []) configDraft.envs[v.key] = stored[v.key] || ''
@@ -233,6 +238,16 @@ async function saveConfig(): Promise<void> {
     if (Object.keys(vars).length) next[page.id] = vars
     else delete next[page.id]
     await settingsStore.patch({ pageEnvs: next })
+    // Auto-start toggle: only write when it changed, so a plain port/env edit doesn't
+    // churn the sticky-pin diff. Flipping it here is an explicit user action, so main
+    // records it in autoStartManual — a later 默认打开 change won't silently undo it.
+    const curAuto = settingsStore.settings.autoStartPages || []
+    if (configDraft.autoStart !== curAuto.includes(page.id)) {
+      const nextAuto = configDraft.autoStart
+        ? [...curAuto, page.id]
+        : curAuto.filter((x) => x !== page.id)
+      await settingsStore.patch({ autoStartPages: nextAuto })
+    }
     ElMessage.success(t('pageMgr.msgConfigSaved'))
     configVisible.value = false
   } catch (err) {
@@ -290,12 +305,69 @@ function formatTime(ms: number): string {
     return String(ms)
   }
 }
+
+/* ---- #20 resource badges ----
+   The main process polls every running page's CPU/RSS and pushes the snapshot here;
+   we keep a local map keyed by pageId so rows refresh without a store round trip. */
+const metricsMap = reactive<Record<string, PageMetrics>>({})
+let offMetrics: (() => void) | undefined
+onMounted(() => {
+  offMetrics = window.container.onPageMetrics?.((list) => {
+    for (const id of Object.keys(metricsMap)) delete metricsMap[id]
+    for (const m of list) metricsMap[m.pageId] = m
+  })
+  window.container
+    .getPageMetrics?.()
+    .then((res) => {
+      if (res?.ok) for (const m of (res.data as PageMetrics[]) ?? []) metricsMap[m.pageId] = m
+    })
+    .catch(() => undefined)
+})
+onBeforeUnmount(() => offMetrics?.())
+
+function fmtCpu(v: number): string {
+  return v >= 10 ? String(Math.round(v)) : v.toFixed(1)
+}
+
+/* ---- #16 health + dependency visualization ----
+   `health` is pushed on PageState by the main-process health monitor while running. */
+function healthLabel(row: PageState): string {
+  const h = row.health
+  if (!h || h.status === 'unknown') return t('pageMgr.healthUnknown')
+  if (h.status === 'ok') return t('pageMgr.healthOk')
+  return h.fails > 1 ? t('pageMgr.healthFails', { n: h.fails }) : t('pageMgr.healthFail')
+}
+function healthClass(row: PageState): string {
+  const h = row.health
+  if (!h || h.status === 'unknown') return 'health-unknown'
+  return h.status === 'ok' ? 'health-ok' : 'health-fail'
+}
+interface DepView {
+  id: string
+  name: string
+  running: boolean
+}
+function depsOf(row: PageState): DepView[] {
+  const ids = row.dependsOn ?? []
+  return ids.map((id) => {
+    const p = pagesStore.pages.find((x) => x.id === id)
+    return { id, name: p?.name ?? id, running: p?.status === 'running' }
+  })
+}
+function hasDownDep(row: PageState): boolean {
+  return depsOf(row).some((d) => !d.running)
+}
 </script>
 
 <template>
   <div class="page-manager">
-    <el-tabs>
-      <el-tab-pane :label="t('pageMgr.tabGit')">
+    <el-tabs v-model="activeTab" class="v-tabs" tab-position="left">
+      <el-tab-pane name="git">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Download /></el-icon>{{ t('pageMgr.tabGit') }}</span
+          >
+        </template>
         <p class="hint">{{ t('pageMgr.hintGit') }}</p>
         <el-form label-position="top" @submit.prevent="installGit">
           <el-form-item :label="t('pageMgr.labelRepo')">
@@ -339,7 +411,12 @@ function formatTime(ms: number): string {
         </el-form>
       </el-tab-pane>
 
-      <el-tab-pane :label="t('pageMgr.tabDir')">
+      <el-tab-pane name="dir">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><FolderOpened /></el-icon>{{ t('pageMgr.tabDir') }}</span
+          >
+        </template>
         <p class="hint">{{ t('pageMgr.hintDir') }}</p>
         <el-form label-position="top" @submit.prevent="installDir">
           <el-form-item :label="t('pageMgr.labelLocalPath')">
@@ -388,152 +465,202 @@ function formatTime(ms: number): string {
           </div>
         </el-form>
       </el-tab-pane>
-    </el-tabs>
 
-    <div class="installed">
-      <div class="installed-head neon">
-        <span>{{ t('pageMgr.installed', { n: pagesStore.pages.length }) }}</span>
-        <el-button size="small" text @click="pagesStore.refresh()">{{
-          t('common.refresh')
-        }}</el-button>
-      </div>
-      <el-table :data="pagesStore.pages" size="small" :empty-text="t('pageMgr.msgEmpty')">
-        <el-table-column
-          prop="name"
-          :label="t('pageMgr.colName')"
-          min-width="120"
-          show-overflow-tooltip
-        >
-          <template #default="{ row }">
-            <div class="cell-name">
-              <!-- A missing runtime never "starts": keep the dot grey instead of implying
-                   progress (the amber 启动中 dot used to spin forever on these rows). -->
-              <span class="status-dot" :class="runtimeMissing(row) ? 'stopped' : row.status" />
-              {{ row.name }}
-            </div>
-            <div class="cell-sub">{{ row.description || row.dir }}</div>
-            <div v-if="runtimeMissing(row)" class="runtime-missing">
-              <el-button size="small" text type="warning" @click="guideForMissing(row)">
-                {{ t('setup.runtimeMissingTag') }} · {{ t('setup.installBtn') }}
-              </el-button>
-            </div>
-            <div
-              v-if="row.lastError"
-              class="cell-sub err-text"
-              style="cursor: pointer"
-              :title="t('pageMgr.viewLogs')"
-              @click="showLogs(row)"
-            >
-              {{ row.lastError }}
-            </div>
-            <el-button
-              v-if="row.portHolder && !row.external"
-              size="small"
-              type="warning"
-              plain
-              round
-              :loading="killing === row.id"
-              @click="killHolderAndRetry(row)"
-            >
-              {{
-                t('pageMgr.killPort', {
-                  name: row.portHolder.name,
-                  pid: row.portHolder.pid
-                })
-              }}
-            </el-button>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('pageMgr.colPort')" width="88" show-overflow-tooltip>
-          <template #default="{ row }">
-            <template v-if="row.external">
-              <span class="cell-sub">{{ t('pageMgr.external') }}</span>
-            </template>
-            <template v-else-if="row.kind === 'terminal'">
-              <span class="cell-sub">{{ t('pageMgr.terminalRunning') }}</span>
-            </template>
-            <template v-else-if="row.containerPort || row.port">
-              <code>:{{ row.containerPort || row.port }}</code>
-              <span v-if="row.containerPort && row.containerPort !== row.port" class="cell-sub">
-                {{ t('pageMgr.custom') }}
-              </span>
-            </template>
-            <span v-else class="err-text">{{ t('pageMgr.notSet') }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('pageMgr.colStatus')" width="70">
-          <template #default="{ row }">
-            <!-- When the runtime isn't installed, 启动中/失败 is noise — the actionable fact is
-                 未安装, so it owns the status cell (the name row links to the install guide). -->
-            <el-tag v-if="runtimeMissing(row)" size="small" type="warning" effect="plain" round>
-              {{ t('setup.missingTag') }}
-            </el-tag>
-            <el-tag
-              v-else
-              size="small"
-              :type="
-                row.status === 'running'
-                  ? 'success'
-                  : row.status === 'error'
-                    ? 'danger'
-                    : row.status === 'starting'
-                      ? 'warning'
-                      : 'info'
-              "
-              round
-            >
-              {{
-                {
-                  running: t('pageMgr.statusRunning'),
-                  starting: t('pageMgr.statusStarting'),
-                  error: t('pageMgr.statusError'),
-                  stopped: t('pageMgr.statusStopped')
-                }[row.status]
-              }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column
-          :label="t('pageMgr.colAction')"
-          width="300"
-          align="right"
-          class-name="col-actions"
-        >
-          <template #default="{ row }">
-            <el-button
-              v-if="!row.external && (row.kind === 'terminal' || row.containerPort || row.port)"
-              size="small"
-              text
-              :loading="pagesStore.busy[row.id]"
-              @click="
-                row.status === 'running'
-                  ? pagesStore.stop(row.id)
-                  : runtimeMissing(row)
-                    ? guideForMissing(row)
-                    : runRow(row)
-              "
-            >
-              {{ row.status === 'running' ? t('pageMgr.actionStop') : t('pageMgr.actionStart') }}
-            </el-button>
-            <el-button v-if="!row.external" size="small" text @click="openConfig(row)">
-              {{ t('pageMgr.actionConfig') }}
-            </el-button>
-            <el-button size="small" text @click="openTerminal(row)">
-              {{ t('pageMgr.actionTerminal') }}
-            </el-button>
-            <el-button size="small" text @click="showLogs(row)">{{
-              t('pageMgr.actionLogs')
+      <el-tab-pane name="installed">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Menu /></el-icon>{{ t('pageMgr.tabInstalled') }}</span
+          >
+        </template>
+        <div class="installed">
+          <div class="installed-head neon">
+            <span>{{ t('pageMgr.installed', { n: pagesStore.pages.length }) }}</span>
+            <el-button size="small" text @click="pagesStore.refresh()">{{
+              t('common.refresh')
             }}</el-button>
-            <span v-if="row.builtin" class="builtin-tag" :title="t('pageMgr.builtinTip')">{{
-              t('pageMgr.builtin')
-            }}</span>
-            <el-button v-else size="small" text type="danger" @click="remove(row)">
-              <el-icon><Delete /></el-icon>
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
+          </div>
+          <el-table :data="pagesStore.pages" size="small" :empty-text="t('pageMgr.msgEmpty')">
+            <el-table-column
+              prop="name"
+              :label="t('pageMgr.colName')"
+              min-width="120"
+              show-overflow-tooltip
+            >
+              <template #default="{ row }">
+                <div class="cell-name">
+                  <!-- A missing runtime never "starts": keep the dot grey instead of implying
+                   progress (the amber 启动中 dot used to spin forever on these rows). -->
+                  <span class="status-dot" :class="runtimeMissing(row) ? 'stopped' : row.status" />
+                  {{ row.name }}
+                </div>
+                <div class="cell-sub">{{ row.description || row.dir }}</div>
+                <!-- #16 health + dependency / #20 resource badges (running rows only) -->
+                <div
+                  v-if="
+                    row.status === 'running' &&
+                    (row.health || metricsMap[row.id] || row.dependsOn?.length)
+                  "
+                  class="cell-badges"
+                >
+                  <span v-if="row.health" class="health-badge" :class="healthClass(row)">
+                    {{ healthLabel(row) }}
+                  </span>
+                  <span
+                    v-if="row.dependsOn?.length"
+                    class="dep-badge"
+                    :class="{ 'dep-down': hasDownDep(row) }"
+                    :title="
+                      t('pageMgr.dependsOn', {
+                        deps: depsOf(row)
+                          .map((d) => d.name)
+                          .join('、')
+                      })
+                    "
+                  >
+                    {{
+                      t('pageMgr.dependsOn', {
+                        deps: depsOf(row)
+                          .map((d) => d.name)
+                          .join('、')
+                      })
+                    }}
+                  </span>
+                  <span
+                    v-if="metricsMap[row.id]"
+                    class="metric-badge"
+                    :class="{ 'metric-over': metricsMap[row.id].overLimit }"
+                  >
+                    {{ t('pageMgr.metricsCpu', { v: fmtCpu(metricsMap[row.id].cpu) }) }} ·
+                    {{ t('pageMgr.metricsMem', { v: Math.round(metricsMap[row.id].memMb) }) }}
+                    <em v-if="metricsMap[row.id].overLimit">{{ t('pageMgr.metricsOver') }}</em>
+                  </span>
+                </div>
+                <div v-if="runtimeMissing(row)" class="runtime-missing">
+                  <el-button size="small" text type="warning" @click="guideForMissing(row)">
+                    {{ t('setup.runtimeMissingTag') }} · {{ t('setup.installBtn') }}
+                  </el-button>
+                </div>
+                <div
+                  v-if="row.lastError"
+                  class="cell-sub err-text"
+                  style="cursor: pointer"
+                  :title="t('pageMgr.viewLogs')"
+                  @click="showLogs(row)"
+                >
+                  {{ row.lastError }}
+                </div>
+                <el-button
+                  v-if="row.portHolder && !row.external"
+                  size="small"
+                  type="warning"
+                  plain
+                  round
+                  :loading="killing === row.id"
+                  @click="killHolderAndRetry(row)"
+                >
+                  {{
+                    t('pageMgr.killPort', {
+                      name: row.portHolder.name,
+                      pid: row.portHolder.pid
+                    })
+                  }}
+                </el-button>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('pageMgr.colPort')" width="88" show-overflow-tooltip>
+              <template #default="{ row }">
+                <template v-if="row.external">
+                  <span class="cell-sub">{{ t('pageMgr.external') }}</span>
+                </template>
+                <template v-else-if="row.kind === 'terminal'">
+                  <span class="cell-sub">{{ t('pageMgr.terminalRunning') }}</span>
+                </template>
+                <template v-else-if="row.containerPort || row.port">
+                  <code>:{{ row.containerPort || row.port }}</code>
+                  <span v-if="row.containerPort && row.containerPort !== row.port" class="cell-sub">
+                    {{ t('pageMgr.custom') }}
+                  </span>
+                </template>
+                <span v-else class="err-text">{{ t('pageMgr.notSet') }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('pageMgr.colStatus')" width="70">
+              <template #default="{ row }">
+                <!-- When the runtime isn't installed, 启动中/失败 is noise — the actionable fact is
+                 未安装, so it owns the status cell (the name row links to the install guide). -->
+                <el-tag v-if="runtimeMissing(row)" size="small" type="warning" effect="plain" round>
+                  {{ t('setup.missingTag') }}
+                </el-tag>
+                <el-tag
+                  v-else
+                  size="small"
+                  :type="
+                    row.status === 'running'
+                      ? 'success'
+                      : row.status === 'error'
+                        ? 'danger'
+                        : row.status === 'starting'
+                          ? 'warning'
+                          : 'info'
+                  "
+                  round
+                >
+                  {{
+                    {
+                      running: t('pageMgr.statusRunning'),
+                      starting: t('pageMgr.statusStarting'),
+                      error: t('pageMgr.statusError'),
+                      stopped: t('pageMgr.statusStopped')
+                    }[row.status]
+                  }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column
+              :label="t('pageMgr.colAction')"
+              width="300"
+              align="right"
+              class-name="col-actions"
+            >
+              <template #default="{ row }">
+                <el-button
+                  v-if="!row.external && (row.kind === 'terminal' || row.containerPort || row.port)"
+                  size="small"
+                  text
+                  :loading="pagesStore.busy[row.id]"
+                  @click="
+                    row.status === 'running'
+                      ? pagesStore.stop(row.id)
+                      : runtimeMissing(row)
+                        ? guideForMissing(row)
+                        : runRow(row)
+                  "
+                >
+                  {{
+                    row.status === 'running' ? t('pageMgr.actionStop') : t('pageMgr.actionStart')
+                  }}
+                </el-button>
+                <el-button v-if="!row.external" size="small" text @click="openConfig(row)">
+                  {{ t('pageMgr.actionConfig') }}
+                </el-button>
+                <el-button size="small" text @click="openTerminal(row)">
+                  {{ t('pageMgr.actionTerminal') }}
+                </el-button>
+                <el-button size="small" text @click="showLogs(row)">{{
+                  t('pageMgr.actionLogs')
+                }}</el-button>
+                <span v-if="row.builtin" class="builtin-tag" :title="t('pageMgr.builtinTip')">{{
+                  t('pageMgr.builtin')
+                }}</span>
+                <el-button v-else size="small" text type="danger" @click="remove(row)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </el-tab-pane>
+    </el-tabs>
 
     <el-dialog
       v-model="logsVisible"
@@ -588,6 +715,10 @@ function formatTime(ms: number): string {
               {{ t('pageMgr.configPortOverride', { port: configFor.containerPort }) }}</template
             >
           </span>
+        </el-form-item>
+        <el-form-item :label="t('appmgr.autoStart')">
+          <el-switch v-model="configDraft.autoStart" size="small" />
+          <span class="cfg-hint">{{ t('pageMgr.configAutoStartTip') }}</span>
         </el-form-item>
         <el-form-item v-for="v in configEnvVars" :key="v.key" :label="v.label || v.key">
           <el-input
@@ -671,14 +802,7 @@ function formatTime(ms: number): string {
   max-width: 440px;
 }
 .installed {
-  margin-top: 16px;
-  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
-  /* frosted glass card */
-  background: color-mix(in srgb, var(--surface) 80%, transparent);
-  -webkit-backdrop-filter: blur(18px) saturate(125%);
-  backdrop-filter: blur(18px) saturate(125%);
-  border-radius: var(--radius-md, 12px);
-  padding: 14px 16px 4px;
+  min-width: 0;
 }
 .installed-head {
   display: flex;
@@ -700,6 +824,49 @@ function formatTime(ms: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* #16 / #20 inline badges under a running row: health, deps, CPU/RAM. */
+.cell-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+}
+.health-badge,
+.dep-badge,
+.metric-badge {
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.health-ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+.health-fail {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 45%, var(--border));
+}
+.health-unknown {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.dep-badge.dep-down {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.metric-badge {
+  font-variant-numeric: tabular-nums;
+}
+.metric-badge em {
+  font-style: normal;
+  margin-left: 4px;
+  color: var(--warn);
+  font-weight: 600;
 }
 /* The 运行环境未安装 shortcut sits under the row name; keep it off .cell-sub's single-line
    ellipsis clipping so the button stays clickable across its full width. */

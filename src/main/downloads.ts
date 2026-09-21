@@ -1,8 +1,7 @@
 import { BrowserWindow, Notification, session, shell } from 'electron'
-import { existsSync, mkdirSync } from 'node:fs'
-import { basename, dirname, extname, join } from 'node:path'
+import { basename, dirname } from 'node:path'
 import { IPC, type DownloadProgress } from '../shared/types'
-import { resolveDownloadDir } from './store'
+import { resolveDownloadDir, uniquePath } from './store'
 import { m } from './i18n'
 
 /**
@@ -27,26 +26,6 @@ let sequence = 0
 function nextId(): string {
   sequence += 1
   return `dl-${Date.now().toString(36)}-${sequence}`
-}
-
-/**
- * Pick a non-colliding path in `dir` for `filename`, appending " (1)", " (2)" … before the
- * extension. DownloadItem writes straight to whatever path we hand it, so without this two
- * same-named downloads would clobber each other. Ensures `dir` exists first.
- */
-function uniquePath(dir: string, filename: string): string {
-  try {
-    mkdirSync(dir, { recursive: true })
-  } catch {
-    /* DownloadItem will surface a write error if the dir really can't be made */
-  }
-  const ext = extname(filename)
-  const stem = basename(filename, ext)
-  for (let i = 0; i < 1000; i += 1) {
-    const candidate = join(dir, i === 0 ? filename : `${stem} (${i})${ext}`)
-    if (!existsSync(candidate)) return candidate
-  }
-  return join(dir, `${stem} (${Date.now()})${ext}`)
 }
 
 function broadcast(payload: DownloadProgress): void {

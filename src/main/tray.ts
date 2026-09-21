@@ -23,15 +23,19 @@ let tray: Tray | null = null
 /** resized 16px base icon, kept for badge composition (toBitmap → paint → createFromBitmap) */
 let trayImage: NativeImage | null = null
 let updatePending = false
+/** #20: a running page is over its memory budget (gold dot; alert still outranks it). */
+let resourceWarn = false
 
-// 0 = idle, 1 = update (orange), 2 = alert (red); higher wins so a crash outranks an update.
-const BADGE_COLORS: Record<1 | 2, [number, number, number]> = {
+// 0 = idle, 1 = update (orange), 2 = resource over-budget (gold), 3 = alert (red);
+// higher wins, so a crash outranks a resource warning which outranks a pending update.
+const BADGE_COLORS: Record<1 | 2 | 3, [number, number, number]> = {
   1: [0xf5, 0x9e, 0x0b],
-  2: [0xef, 0x44, 0x44]
+  2: [0xf5, 0xc0, 0x00],
+  3: [0xef, 0x44, 0x44]
 }
 
 /** Overlay a colored dot on the icon's bottom-right corner; falls back to the bare image. */
-function composeImage(level: 0 | 1 | 2): NativeImage | null {
+function composeImage(level: 0 | 1 | 2 | 3): NativeImage | null {
   if (!trayImage || level === 0) return trayImage
   try {
     const { width, height } = trayImage.getSize()
@@ -103,20 +107,41 @@ export function rebuildTrayMenu(): void {
     }
   ]
   const alert = stopped.some((p) => p.status === 'error')
-  tray.setToolTip(alert ? m('tray.tooltipAlert') : m('tray.tooltip', { n: running.length }))
+  const level: 0 | 1 | 2 | 3 = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0
+  tray.setToolTip(
+    alert
+      ? m('tray.tooltipAlert')
+      : resourceWarn
+        ? m('tray.tooltipResource')
+        : m('tray.tooltip', { n: running.length })
+  )
   tray.setContextMenu(Menu.buildFromTemplate(template))
-  const img = composeImage(alert ? 2 : updatePending ? 1 : 0)
+  const img = composeImage(level)
   if (img) tray.setImage(img)
 }
 
-/** Orange dot: an OTA update is available or staged (alert still outranks it). */
+/** Orange dot: an OTA update is available or staged (alert/resource still outrank it). */
 export function setTrayUpdatePending(v: boolean): void {
   if (updatePending === v) return
   updatePending = v
+  refreshBadge()
+}
+
+/** #20: gold dot when any running page crosses its memory budget (alert outranks it). */
+export function setTrayResourceWarn(v: boolean): void {
+  if (resourceWarn === v) return
+  resourceWarn = v
+  refreshBadge()
+}
+
+/** Recompute the badge tier from the current flags + registry alert state. */
+function refreshBadge(): void {
+  if (!tray) return
   const registry = hooks.getRegistry()
   const alert = registry ? registry.list().some((p) => p.status === 'error' && !p.external) : false
-  const img = composeImage(alert ? 2 : v ? 1 : 0)
-  if (tray && img) tray.setImage(img)
+  const level: 0 | 1 | 2 | 3 = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0
+  const img = composeImage(level)
+  if (img) tray.setImage(img)
 }
 
 export function createTray(injected: typeof hooks): void {

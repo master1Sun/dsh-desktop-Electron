@@ -37,6 +37,10 @@ export interface PageState {
    * can't flash the wrong verdict during the status-IPC round trip.
    */
   runtimeMissing?: boolean
+  /** #18/#16: page ids that must be running first (container.json `dependsOn`). */
+  dependsOn?: string[]
+  /** #16: last health-probe outcome while running; `unknown` before the first probe resolves. */
+  health?: { status: 'ok' | 'fail' | 'unknown'; fails: number; lastAt?: number; url?: string }
 }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {

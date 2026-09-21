@@ -34,5 +34,9 @@ export const useDshStore = defineStore('dsh', () => {
   const uninstallPlugin = (name: string, profile: string): Promise<IpcResult> =>
     run(`uninstall:${name}`, () => window.container.dshUninstallPlugin(name, profile))
 
-  return { busy, startedAt, installPlugin, uninstallPlugin }
+  /** One pnpm pass updates every profile plugin; keyed so the progress strip can label it. */
+  const updateAllPlugins = (profile: string): Promise<IpcResult> =>
+    run('update:all', () => window.container.dshUpdateAll(profile))
+
+  return { busy, startedAt, installPlugin, uninstallPlugin, updateAllPlugins }
 })

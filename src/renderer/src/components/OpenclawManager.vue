@@ -130,8 +130,20 @@ async function openHomeTerminal(): Promise<void> {
           </el-button>
         </div>
       </div>
-      <div class="sub">{{ t('openclawMgr.cliPath', { path: status.binPath ?? '' }) }}</div>
-      <div class="sub">{{ t('openclawMgr.homeDir', { dir: status.home }) }}</div>
+      <div class="info-grid">
+        <div class="info-row">
+          <span class="info-label">{{ t('openclawMgr.infoCli') }}</span>
+          <code class="info-val">{{ status.binPath || '—' }}</code>
+        </div>
+        <div class="info-row">
+          <span class="info-label">{{ t('openclawMgr.infoHome') }}</span>
+          <code class="info-val">{{ status.home }}</code>
+        </div>
+        <div class="info-row">
+          <span class="info-label">{{ t('openclawMgr.infoPort') }}</span>
+          <code class="info-val">{{ status.port || '—' }}</code>
+        </div>
+      </div>
 
       <div v-if="token" class="sub token-row">
         {{ t('openclawMgr.gatewayToken') }}
@@ -235,6 +247,33 @@ async function openHomeTerminal(): Promise<void> {
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0 5px;
+}
+
+.info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 10px;
+}
+.info-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.info-label {
+  flex-shrink: 0;
+  min-width: 84px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.info-val {
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  word-break: break-all;
+  user-select: all;
 }
 
 .token-row {

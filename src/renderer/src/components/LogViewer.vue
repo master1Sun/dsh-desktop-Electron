@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { LogFileInfo, LogReadResult } from '@shared/types'
+import type { LogFileInfo, LogReadResult, LogLineEvent } from '@shared/types'
 import { t } from '../i18n'
 
 /**
@@ -15,10 +15,41 @@ const key = ref('main')
 const filter = ref('')
 const tail = ref(400)
 const content = ref('')
-const auto = ref(false)
 const busy = ref(false)
 const diagBusy = ref(false)
-let timer: ReturnType<typeof setInterval> | null = null
+
+/* ---- #22 live stream ----
+   The main process tails log files with fs.watch and pushes only newly-completed
+   lines per file; we append those straight to the current view for millisecond-level
+   following. This is the single auto-follow mechanism — the coarse 3s poll it replaced
+   was redundant, so only the manual 刷新 button remains alongside it (for re-reading
+   after a filter change or to catch up on anything written while the panel was closed). */
+const live = ref(true)
+const preEl = ref<HTMLElement | null>(null)
+let offLog: (() => void) | undefined
+
+function scrollBottom(): void {
+  void nextTick(() => {
+    const el = preEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+function matchesFilter(line: string): boolean {
+  const f = filter.value.trim()
+  return !f || line.toLowerCase().includes(f.toLowerCase())
+}
+
+function onLogEvent(ev: LogLineEvent): void {
+  if (!live.value || ev.key !== key.value) return
+  const fresh = (ev.lines || []).filter(matchesFilter)
+  if (!fresh.length) return
+  const merged = content.value ? `${content.value}\n${fresh.join('\n')}` : fresh.join('\n')
+  // Keep the buffer bounded to the selected tail length so long sessions don't grow forever.
+  const all = merged.split('\n')
+  content.value = all.slice(Math.max(0, all.length - tail.value)).join('\n')
+  scrollBottom()
+}
 
 async function loadFiles(): Promise<void> {
   try {
@@ -47,14 +78,6 @@ async function loadContent(): Promise<void> {
   } finally {
     busy.value = false
   }
-}
-
-function applyAuto(on: boolean): void {
-  if (timer) {
-    clearInterval(timer)
-    timer = null
-  }
-  if (on) timer = setInterval(loadContent, 3000)
 }
 
 function onKeyChange(): void {
@@ -89,10 +112,13 @@ async function doExport(): Promise<void> {
 onMounted(() => {
   void loadFiles().then(() => {
     onFilesChange()
-    return loadContent()
+    return loadContent().then(scrollBottom)
   })
+  offLog = window.container.onLogLine?.(onLogEvent)
 })
-onBeforeUnmount(() => applyAuto(false))
+onBeforeUnmount(() => {
+  offLog?.()
+})
 </script>
 
 <template>
@@ -116,14 +142,23 @@ onBeforeUnmount(() => applyAuto(false))
         @clear="loadContent"
       />
       <el-select v-model="tail" size="small" style="width: 110px" @change="loadContent">
-        <el-option v-for="n in [200, 400, 800, 2000]" :key="n" :label="`${n} ${t('panel.logTail')}`" :value="n" />
+        <el-option
+          v-for="n in [200, 400, 800, 2000]"
+          :key="n"
+          :label="`${n} ${t('panel.logTail')}`"
+          :value="n"
+        />
       </el-select>
-      <el-switch v-model="auto" size="small" :active-text="t('panel.logAuto')" @change="applyAuto" />
-      <el-button size="small" :loading="busy" @click="loadContent">{{ t('panel.logRefresh') }}</el-button>
+      <el-switch v-model="live" size="small" :active-text="t('panel.logLive')" />
+      <el-button size="small" :loading="busy" @click="loadContent">{{
+        t('panel.logRefresh')
+      }}</el-button>
       <span class="lv-spacer" />
-      <el-button size="small" :loading="diagBusy" @click="doExport">{{ t('panel.exportDiagBtn') }}</el-button>
+      <el-button size="small" :loading="diagBusy" @click="doExport">{{
+        t('panel.exportDiagBtn')
+      }}</el-button>
     </div>
-    <pre class="lv-pre">{{ content || t('panel.logEmpty') }}</pre>
+    <pre ref="preEl" class="lv-pre">{{ content || t('panel.logEmpty') }}</pre>
   </div>
 </template>
 

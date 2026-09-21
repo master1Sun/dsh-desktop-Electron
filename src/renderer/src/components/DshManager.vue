@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CopyDocument, Hide, Refresh, View } from '@element-plus/icons-vue'
+import { CopyDocument, Hide, Refresh, View, Monitor, Operation } from '@element-plus/icons-vue'
 import { usePagesStore } from '../stores/pages'
 import { useDshStore } from '../stores/dsh'
 import EmptyState from './EmptyState.vue'
-import type { DshPluginInfo, DshTokenResult } from '@shared/types'
+import type { DshPluginInfo, DshPluginUpdate, DshTokenResult } from '@shared/types'
 import { t } from '../i18n'
 
 const pagesStore = usePagesStore()
 const dsh = useDshStore()
+
+/** DSH 管理面板竖排分类 tab：概览 / 插件管理。 */
+const activeTab = ref('overview')
 
 interface DshStatusInfo {
   installed: boolean
@@ -24,6 +27,20 @@ interface DshStatusInfo {
 const status = ref<DshStatusInfo | null>(null)
 const plugins = ref<DshPluginInfo[]>([])
 const loading = ref(false)
+
+/* Plugin update detection: main checks every profile plugin in one pass (npm view /
+   git ls-remote) and returns a DshPluginUpdate per plugin. We keep it separate from the
+   plain plugin list so the table renders immediately while the (network-bound) lookup
+   resolves in the background; the "全部更新" button appears only once we know N>0. */
+const pluginUpdates = ref<DshPluginUpdate[]>([])
+const updatesLoading = ref(false)
+const updatable = computed(() => pluginUpdates.value.filter((u) => u.updateAvailable))
+/** map name -> latest version, for the per-row "可更新" tag */
+const latestByName = computed(() => {
+  const m: Record<string, string> = {}
+  for (const u of pluginUpdates.value) if (u.updateAvailable && u.latest) m[u.name] = u.latest
+  return m
+})
 
 /** the dsh web UI's auth token, read from the running page's launch URL (null while unavailable) */
 const tokenState = ref<DshTokenResult | null>(null)
@@ -81,6 +98,7 @@ const opLabel = computed(() => {
   if (!b) return ''
   if (b.startsWith('install:')) return t('dshMgr.opInstalling', { spec: b.slice(8) })
   if (b.startsWith('uninstall:')) return t('dshMgr.opUninstalling', { name: b.slice(10) })
+  if (b === 'update:all') return t('dshMgr.opUpdatingAll')
   return ''
 })
 const opElapsed = computed(() =>
@@ -100,6 +118,8 @@ async function load(): Promise<void> {
       const p = await window.container.dshListPlugins(profile.value)
       if (p.ok) plugins.value = (p.data as DshPluginInfo[]) || []
       else ElMessage.warning(p.error || t('dshMgr.msgPluginListFail'))
+      // Kick off the (slower) update lookup without blocking the list render.
+      void loadUpdates()
     }
     // Independent of the CLI install state: the token lives on the running page, not in the package.
     void loadToken()
@@ -152,6 +172,36 @@ async function install(): Promise<void> {
   }
   ElMessage.success(t('dshMgr.msgInstalled', { spec }))
   installForm.spec = ''
+  await load()
+}
+
+/**
+ * Ask main which profile plugins have a newer version. Best-effort: a failed lookup just
+ * leaves the list empty so the 全部更新 button stays hidden rather than raising an alarm.
+ */
+async function loadUpdates(): Promise<void> {
+  updatesLoading.value = true
+  try {
+    const r = await window.container.dshCheckUpdates(profile.value)
+    if (r.ok) pluginUpdates.value = (r.data as DshPluginUpdate[]) || []
+    else pluginUpdates.value = []
+  } catch {
+    pluginUpdates.value = []
+  } finally {
+    updatesLoading.value = false
+  }
+}
+
+/** Update every plugin that has a newer version in a single pnpm pass, then re-sync. */
+async function updateAll(): Promise<void> {
+  if (dsh.busy || !updatable.value.length) return
+  const n = updatable.value.length
+  const res = await dsh.updateAllPlugins(profile.value)
+  if (!res.ok) {
+    ElMessage.error(res.error || t('dshMgr.msgUpdateAllFail'))
+    return
+  }
+  ElMessage.success(t('dshMgr.msgUpdatedAll', { n }))
   await load()
 }
 
@@ -213,131 +263,181 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
         :description="t('dshMgr.alertNoPnpmDesc')"
       />
 
-      <div class="profile-row">
-        <span class="foot-label">{{ t('dshMgr.profileLabel') }}</span>
-        <el-input
-          v-model="profile"
-          size="small"
-          style="width: 180px"
-          :placeholder="t('dshMgr.profilePlaceholder')"
-          @keyup.enter="load"
-        />
-        <el-button size="small" :loading="loading" @click="load">
-          {{ t('dshMgr.switchRefresh') }}
-        </el-button>
-        <span class="foot-hint">{{ t('dshMgr.profileTemplatesHint') }}</span>
-      </div>
-
-      <div class="head neon">
-        <div class="ver">
-          <span class="status-dot running" /> @deepseek-ai/dsh <b>v{{ status.version }}</b>
-          <el-tag size="small" effect="plain" round>{{
-            t('dshMgr.verTag', { profile: status.profile })
-          }}</el-tag>
-        </div>
-        <div class="head-actions">
-          <el-button size="small" text @click="load">{{ t('common.refresh') }}</el-button>
-        </div>
-      </div>
-      <div class="sub">{{ t('dshMgr.profileDir', { dir: status.profileDir }) }}</div>
-
-      <div v-if="token" class="sub token-row">
-        {{ t('dshMgr.launchToken') }}
-        <el-tag size="small" effect="plain" round>{{
-          t('dshMgr.tokenSourcePage', { id: token.pageId })
-        }}</el-tag>
-        <code class="token-val">{{ tokenRevealed ? token.token : maskedToken }}</code>
-        <el-button
-          size="small"
-          text
-          :title="tokenRevealed ? t('dshMgr.tokenHide') : t('dshMgr.tokenShow')"
-          @click="tokenRevealed = !tokenRevealed"
-        >
-          <el-icon><component :is="tokenRevealed ? Hide : View" /></el-icon>
-        </el-button>
-        <el-button size="small" text :title="t('dshMgr.tokenCopy')" @click="copyToken">
-          <el-icon><CopyDocument /></el-icon>
-        </el-button>
-        <el-button
-          size="small"
-          text
-          :loading="tokenLoading"
-          :title="t('dshMgr.tokenReread')"
-          @click="loadToken"
-        >
-          <el-icon><Refresh /></el-icon>
-        </el-button>
-      </div>
-      <div v-else class="sub token-hint">
-        {{ tokenHint }}
-        <el-button size="small" text :loading="tokenLoading" @click="loadToken">
-          {{ t('dshMgr.tokenRetry') }}
-        </el-button>
-      </div>
-
-      <el-form class="install-row" @submit.prevent="install">
-        <el-form-item style="margin-bottom: 8px">
-          <el-input
-            v-model="installForm.spec"
-            :placeholder="t('dshMgr.installPlaceholder')"
-            clearable
-            @keyup.enter="install"
-          >
-            <template #append>
-              <el-button :loading="dsh.busy === `install:${installForm.spec.trim()}`" @click="install">
-                {{ t('dshMgr.install') }}
-              </el-button>
-            </template>
-          </el-input>
-        </el-form-item>
-      </el-form>
-
-      <!-- Operation progress strip: visible while any long-running CLI op is active -->
-      <div v-if="opLabel" class="op-progress">
-        <span class="op-spinner" />
-        <span class="op-text">{{ opLabel }}</span>
-        <span v-if="opElapsedText" class="op-elapsed">{{ opElapsedText }}</span>
-      </div>
-
-      <el-table :data="plugins" size="small" :empty-text="t('dshMgr.pluginsEmpty')">
-        <el-table-column :label="t('dshMgr.colPlugin')" min-width="220">
-          <template #default="{ row }">
-            <div class="cell-name">{{ row.name }}</div>
-            <div class="cell-sub">
-              <span>{{ row.version }}</span>
+      <el-tabs v-model="activeTab" class="v-tabs" tab-position="left">
+        <el-tab-pane name="overview">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><Monitor /></el-icon>{{ t('dshMgr.tabOverview') }}</span
+            >
+          </template>
+          <div class="head neon">
+            <div class="ver">
+              <span class="status-dot running" /> @deepseek-ai/dsh <b>v{{ status.version }}</b>
+              <el-tag size="small" effect="plain" round>{{
+                t('dshMgr.verTag', { profile: status.profile })
+              }}</el-tag>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('dshMgr.colSource')" width="90">
-          <template #default="{ row }">
-            <el-tag size="small" round :type="sourceTag(row.source)">{{
-              row.source === 'bundle' ? t('dshMgr.sourceBundle') : t('dshMgr.sourceInstalled')
-            }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('dshMgr.colActions')" width="120" align="right">
-          <template #default="{ row }">
-            <template v-if="row.source === 'profile'">
-              <el-button
-                size="small"
-                text
-                type="danger"
-                :loading="dsh.busy === `uninstall:${row.name}`"
-                @click="uninstall(row)"
-              >
-                {{ t('dshMgr.uninstall') }}
-              </el-button>
-            </template>
-            <span v-else class="cell-sub">{{ t('dshMgr.bundleOnly') }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
+            <div class="head-actions">
+              <el-button size="small" text @click="load">{{ t('common.refresh') }}</el-button>
+            </div>
+          </div>
+          <div class="info-grid">
+            <div class="info-row">
+              <span class="info-label">{{ t('dshMgr.infoRunPath') }}</span>
+              <code class="info-val">{{ status.binPath || '—' }}</code>
+            </div>
+            <div class="info-row">
+              <span class="info-label">{{ t('dshMgr.infoProfileDir') }}</span>
+              <code class="info-val">{{ status.profileDir }}</code>
+            </div>
+          </div>
+          <div class="info-note">{{ t('dshMgr.profileNote') }}</div>
 
-      <div class="dsh-footer">
-        <el-button size="small" text :disabled="!status?.installed" @click="openTerminal">
-          {{ t('dshMgr.dshTerminal') }}
-        </el-button>
-      </div>
+          <div v-if="token" class="sub token-row">
+            {{ t('dshMgr.launchToken') }}
+            <el-tag size="small" effect="plain" round>{{
+              t('dshMgr.tokenSourcePage', { id: token.pageId })
+            }}</el-tag>
+            <code class="token-val">{{ tokenRevealed ? token.token : maskedToken }}</code>
+            <el-button
+              size="small"
+              text
+              :title="tokenRevealed ? t('dshMgr.tokenHide') : t('dshMgr.tokenShow')"
+              @click="tokenRevealed = !tokenRevealed"
+            >
+              <el-icon><component :is="tokenRevealed ? Hide : View" /></el-icon>
+            </el-button>
+            <el-button size="small" text :title="t('dshMgr.tokenCopy')" @click="copyToken">
+              <el-icon><CopyDocument /></el-icon>
+            </el-button>
+            <el-button
+              size="small"
+              text
+              :loading="tokenLoading"
+              :title="t('dshMgr.tokenReread')"
+              @click="loadToken"
+            >
+              <el-icon><Refresh /></el-icon>
+            </el-button>
+          </div>
+          <div v-else class="sub token-hint">
+            {{ tokenHint }}
+            <el-button size="small" text :loading="tokenLoading" @click="loadToken">
+              {{ t('dshMgr.tokenRetry') }}
+            </el-button>
+          </div>
+
+          <div class="dsh-footer">
+            <el-button size="small" text :disabled="!status?.installed" @click="openTerminal">
+              {{ t('dshMgr.dshTerminal') }}
+            </el-button>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane name="plugins">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><Operation /></el-icon>{{ t('dshMgr.tabPlugins') }}</span
+            >
+          </template>
+          <el-form class="install-row" @submit.prevent="install">
+            <el-form-item style="margin-bottom: 8px">
+              <el-input
+                v-model="installForm.spec"
+                :placeholder="t('dshMgr.installPlaceholder')"
+                clearable
+                @keyup.enter="install"
+              >
+                <template #append>
+                  <el-button
+                    :loading="dsh.busy === `install:${installForm.spec.trim()}`"
+                    @click="install"
+                  >
+                    {{ t('dshMgr.install') }}
+                  </el-button>
+                </template>
+              </el-input>
+            </el-form-item>
+          </el-form>
+
+          <!-- Plugin update toolbar: re-check on demand; 全部更新 only when N>0 updates are known -->
+          <div class="plugin-tools">
+            <el-button
+              size="small"
+              text
+              :loading="updatesLoading"
+              :title="t('dshMgr.recheckUpdate')"
+              @click="loadUpdates"
+            >
+              {{ t('dshMgr.recheckUpdate') }}
+            </el-button>
+            <span v-if="!updatesLoading && !updatable.length" class="uptodate">
+              {{ t('dshMgr.allUpToDate') }}
+            </span>
+            <el-button
+              v-if="updatable.length"
+              size="small"
+              type="primary"
+              :loading="dsh.busy === 'update:all'"
+              :disabled="!!dsh.busy && dsh.busy !== 'update:all'"
+              @click="updateAll"
+            >
+              {{ t('dshMgr.updateAll') }}<span class="ua-count">（{{ updatable.length }}）</span>
+            </el-button>
+          </div>
+
+          <!-- Operation progress strip: visible while any long-running CLI op is active -->
+          <div v-if="opLabel" class="op-progress">
+            <span class="op-spinner" />
+            <span class="op-text">{{ opLabel }}</span>
+            <span v-if="opElapsedText" class="op-elapsed">{{ opElapsedText }}</span>
+          </div>
+
+          <el-table :data="plugins" size="small" :empty-text="t('dshMgr.pluginsEmpty')">
+            <el-table-column :label="t('dshMgr.colPlugin')" min-width="220">
+              <template #default="{ row }">
+                <div class="cell-name">{{ row.name }}</div>
+                <div class="cell-sub">
+                  <span>{{ row.version }}</span>
+                  <el-tag
+                    v-if="latestByName[row.name]"
+                    size="small"
+                    type="warning"
+                    effect="light"
+                    round
+                    class="upd-tag"
+                  >
+                    {{ t('dshMgr.updatableTag', { latest: latestByName[row.name] }) }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('dshMgr.colSource')" width="90">
+              <template #default="{ row }">
+                <el-tag size="small" round :type="sourceTag(row.source)">{{
+                  row.source === 'bundle' ? t('dshMgr.sourceBundle') : t('dshMgr.sourceInstalled')
+                }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('dshMgr.colActions')" width="120" align="right">
+              <template #default="{ row }">
+                <template v-if="row.source === 'profile'">
+                  <el-button
+                    size="small"
+                    text
+                    type="danger"
+                    :loading="dsh.busy === `uninstall:${row.name}`"
+                    @click="uninstall(row)"
+                  >
+                    {{ t('dshMgr.uninstall') }}
+                  </el-button>
+                </template>
+                <span v-else class="cell-sub">{{ t('dshMgr.bundleOnly') }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
     </template>
   </div>
 </template>
@@ -393,6 +493,24 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
 .install-row {
   margin-bottom: 10px;
 }
+.plugin-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.plugin-tools .uptodate {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.ua-count {
+  margin-left: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.upd-tag {
+  margin-left: 2px;
+}
 .cell-name {
   font-weight: 550;
 }
@@ -404,37 +522,52 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
   gap: 6px;
   flex-wrap: wrap;
 }
-.foot-label {
+.info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 6px;
+}
+.info-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.info-label {
+  flex-shrink: 0;
+  min-width: 84px;
   font-size: 12px;
   color: var(--text-dim);
 }
-.profile-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
+.info-val {
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  word-break: break-all;
+  user-select: all;
 }
-/* Form rows (profile picker + install path) and the plugin list read on hover with a
+.info-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0 0 14px;
+  line-height: 1.6;
+}
+/* The install form rows and the plugin list read on hover with a
    glassy accent wash instead of an opaque block — mirrors the other panels. */
-.profile-row:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  border-radius: 8px;
-}
 .dsh-manager :deep(.el-form-item):hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border-radius: 8px;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
-  transition: background 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
 }
 .dsh-manager :deep(.el-table__body tr:hover > td) {
   background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
   -webkit-backdrop-filter: blur(4px) saturate(125%);
   backdrop-filter: blur(4px) saturate(125%);
-}
-.foot-hint {
-  font-size: 12px;
-  color: var(--text-dim);
 }
 .upd-name {
   font-weight: 600;

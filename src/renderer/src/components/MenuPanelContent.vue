@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { QuestionFilled, Download, Connection, Document } from '@element-plus/icons-vue'
 import PageManager from './PageManager.vue'
 import DshManager from './DshManager.vue'
 import OpenclawManager from './OpenclawManager.vue'
@@ -16,7 +17,12 @@ import type {
   IpcResult,
   NodeVersionInfo,
   UpdateCheckResult,
-  UpdateProgress
+  UpdateProgress,
+  UpdateHistory,
+  NetProbeResult,
+  SnapshotResult,
+  SystemInfo,
+  NetworkStats
 } from '@shared/types'
 import { parseAppPanel } from '@shared/types'
 import { t } from '../i18n'
@@ -89,7 +95,11 @@ async function rollbackNow(row: UpdateCheckResult): Promise<void> {
     await ElMessageBox.confirm(
       t('panel.rollbackConfirm', { version: row.rollbackVersion || '?' }),
       t('panel.rollbackTitle'),
-      { type: 'warning', confirmButtonText: t('panel.rollbackBtn'), cancelButtonText: t('common.cancel') }
+      {
+        type: 'warning',
+        confirmButtonText: t('panel.rollbackBtn'),
+        cancelButtonText: t('common.cancel')
+      }
     )
   } catch {
     return
@@ -190,9 +200,14 @@ async function doNodeRestore(): Promise<void> {
   }
 }
 
+/** 帮助面板的竖排分类 tab：关于 / 更新 / 诊断 / 日志（与 SettingsPanel 同构）。 */
+const helpTab = ref('about')
+
 onMounted(() => {
   if (props.panel !== 'help') return
   void loadNodeVersions()
+  void loadHistory()
+  void loadSystemInfo()
 })
 
 /** `app:<id>` → the page id for the generic AppManager, else null. */
@@ -255,6 +270,207 @@ const progressPercent = (p: UpdateProgress): number =>
 /** Indeterminate only while fetching release objects before the artifact size is known. */
 const progressIndeterminate = (p: UpdateProgress): boolean =>
   p.phase === 'fetch' && p.percent === undefined
+
+/* ---- #17 container OTA version history ----
+   Small read-only table distilled from update-meta.json: what's running now, the
+   staged (pending-restart) asar, the one-level rollback backup, and the last rollback. */
+const history = ref<UpdateHistory | null>(null)
+async function loadHistory(): Promise<void> {
+  try {
+    const res = (await window.container.getUpdateHistory?.()) as IpcResult | null
+    if (res?.ok) history.value = (res.data as UpdateHistory) ?? null
+  } catch {
+    history.value = null
+  }
+}
+const historyRows = computed(() => {
+  const h = history.value
+  if (!h) return []
+  const rows: { label: string; version: string; pending?: boolean }[] = []
+  rows.push({ label: t('panel.historyRunning'), version: h.running })
+  if (h.current && h.current !== h.running)
+    rows.push({ label: t('panel.historyPending'), version: h.current, pending: true })
+  if (h.backup) rows.push({ label: t('panel.historyBackup'), version: h.backup })
+  if (h.rollbackFrom) rows.push({ label: t('panel.historyRollbackFrom'), version: h.rollbackFrom })
+  return rows
+})
+
+/* ---- #21 network diagnostic wizard ----
+   Runs the main-process probe (loopback / GitHub / npm / mirror / proxy) and lists
+   each hop so the user sees exactly where the chain breaks. */
+const netProbing = ref(false)
+const netResult = ref<NetProbeResult | null>(null)
+const netStepLabel = (id: string): string =>
+  ({
+    gateway: t('panel.netStepGateway'),
+    github: t('panel.netStepGithub'),
+    npm: t('panel.netStepNpm'),
+    npmmirror: t('panel.netStepNpmmirror'),
+    proxy: t('panel.netStepProxy')
+  })[id] ?? id
+async function runNetProbe(): Promise<void> {
+  if (netProbing.value) return
+  netProbing.value = true
+  try {
+    const res = (await window.container.runNetworkProbe?.()) as IpcResult | null
+    if (res?.ok) netResult.value = (res.data as NetProbeResult) ?? null
+    else ElMessage.error(res?.error || t('panel.netProbeTitle'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    netProbing.value = false
+  }
+}
+
+/* ---- Help 关于与运行: system / runtime overview ----
+   A one-shot snapshot pulled when the help panel mounts and re-fetched by its 刷新 button. */
+const sysInfo = ref<SystemInfo | null>(null)
+const sysLoading = ref(false)
+async function loadSystemInfo(): Promise<void> {
+  if (sysLoading.value) return
+  sysLoading.value = true
+  try {
+    // Optional-call chain: a missing/older bridge method short-circuits to null, never rejects.
+    const res = (await window.container.getSystemInfo?.()) as IpcResult | null
+    if (res?.ok) sysInfo.value = res.data as SystemInfo
+  } catch {
+    /* keep the last snapshot */
+  } finally {
+    sysLoading.value = false
+  }
+}
+
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
+}
+function fmtRate(bps: number): string {
+  return `${fmtBytes(bps)}/s`
+}
+function fmtDuration(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (d) return `${d}d ${h}h ${m}m`
+  if (h) return `${h}h ${m}m`
+  return `${m}m ${s % 60}s`
+}
+
+/* ---- Help 网络与工具: live network interfaces + throughput ----
+   Polled every 2s while the diagnose tab is open; the byte counters are cumulative since
+   boot, so the rate is the delta between two samples over the elapsed wall-clock. */
+const netStats = ref<NetworkStats | null>(null)
+const netRxRate = ref(0)
+const netTxRate = ref(0)
+let netTimer: number | undefined
+let netSampling = false
+async function sampleNet(): Promise<void> {
+  if (netSampling) return
+  netSampling = true
+  try {
+    const res = (await window.container.getNetworkStats?.()) as IpcResult | null
+    if (!res?.ok) return
+    const cur = res.data as NetworkStats
+    const prev = netStats.value
+    if (prev?.counters && cur.counters) {
+      const dt = (cur.sampleAt - prev.sampleAt) / 1000
+      if (dt > 0) {
+        netRxRate.value = Math.max(0, (cur.counters.rxBytes - prev.counters.rxBytes) / dt)
+        netTxRate.value = Math.max(0, (cur.counters.txBytes - prev.counters.txBytes) / dt)
+      }
+    } else {
+      netRxRate.value = 0
+      netTxRate.value = 0
+    }
+    netStats.value = cur
+  } catch {
+    /* a failed tick is skipped; the next one retries */
+  } finally {
+    netSampling = false
+  }
+}
+function stopNetPoll(): void {
+  if (netTimer) {
+    clearInterval(netTimer)
+    netTimer = undefined
+  }
+}
+function startNetPoll(): void {
+  stopNetPoll()
+  void sampleNet()
+  netTimer = window.setInterval(sampleNet, 2000)
+}
+
+// Drive the live poll only while the diagnose tab is actually showing, so we never keep
+// spawning PowerShell for a hidden panel. Covers both tab switches and panel unmount.
+watch(
+  () => [props.panel, helpTab.value] as const,
+  ([panel, tab]) => {
+    if (panel === 'help' && tab === 'diagnose') startNetPoll()
+    else stopNetPoll()
+  }
+)
+onBeforeUnmount(stopNetPoll)
+
+/* ---- #15 config snapshot / migration package ----
+   Export bundles the page manifest + each container.json + relevant settings into a zip;
+   import restores them onto a fresh machine. Both drive a native file dialog in main. */
+const snapshotBusy = ref<'export' | 'import' | null>(null)
+async function doExportSnapshot(): Promise<void> {
+  if (snapshotBusy.value) return
+  snapshotBusy.value = 'export'
+  try {
+    const res = (await window.container.exportSnapshot?.()) as IpcResult | null
+    if (res?.ok) {
+      const d = res.data as SnapshotResult | undefined
+      ElMessage.success(t('panel.snapshotExported', { path: d?.path || '' }))
+    } else if (res) {
+      ElMessage.error(res.error || t('panel.snapshotExportFailed'))
+    }
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    snapshotBusy.value = null
+  }
+}
+async function doImportSnapshot(): Promise<void> {
+  if (snapshotBusy.value) return
+  try {
+    await ElMessageBox.confirm(t('panel.snapshotImportConfirm'), t('panel.importSnapshotBtn'), {
+      type: 'warning',
+      confirmButtonText: t('panel.importSnapshotBtn'),
+      cancelButtonText: t('common.cancel')
+    })
+  } catch {
+    return
+  }
+  snapshotBusy.value = 'import'
+  try {
+    const res = (await window.container.importSnapshot?.()) as IpcResult | null
+    if (res?.ok) {
+      const d = res.data as SnapshotResult | undefined
+      ElMessage.success(
+        t('panel.snapshotImported', { n: d?.restoredPages?.length ?? d?.pageIds?.length ?? 0 })
+      )
+      await pagesStore.refresh().catch(() => undefined)
+      await loadHistory()
+    } else if (res) {
+      ElMessage.error(res.error || t('panel.snapshotImportFailed'))
+    }
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    snapshotBusy.value = null
+  }
+}
 </script>
 
 <template>
@@ -288,196 +504,418 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
       <OpenclawManager />
     </section>
 
-    <!-- Help: 关于 + 更新 merged into one panel (desktop convention). -->
+    <!-- Help: 关于 + 更新 + 诊断 + 日志 merged into one panel, split by a vertical tab rail. -->
     <section v-else-if="props.panel === 'help'" class="sec help">
-      <div class="kv">
-        <span>{{ t('panel.aboutNode') }}</span>
-        <strong :class="props.runtime.ok ? 'ok-text' : 'err-text'">
-          {{ props.runtime.version || t('panel.notDetected') }}
-        </strong>
-        <el-tag v-if="props.runtime.override" size="small" effect="plain" round type="warning">
-          {{ t('panel.nodeTagUpdated') }}
-        </el-tag>
-        <span class="node-update-ctl">
-          <el-select
-            v-model="nodeSel"
-            size="small"
-            :placeholder="t('panel.nodeVersionPick')"
-            :loading="nodeLoading"
-            :disabled="updates.nodeBusy"
-            style="width: 190px"
-          >
-            <el-option
-              v-for="v in nodeVersions"
-              :key="v.version"
-              :label="nodeVersionLabel(v)"
-              :value="v.version"
-              :disabled="v.version === props.runtime.version"
+      <el-tabs v-model="helpTab" class="help-tabs" tab-position="left">
+        <el-tab-pane name="about">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><QuestionFilled /></el-icon>{{ t('panel.tabAbout') }}</span
+            >
+          </template>
+          <div class="kv">
+            <span>{{ t('panel.aboutNode') }}</span>
+            <strong :class="props.runtime.ok ? 'ok-text' : 'err-text'">
+              {{ props.runtime.version || t('panel.notDetected') }}
+            </strong>
+            <el-tag v-if="props.runtime.override" size="small" effect="plain" round type="warning">
+              {{ t('panel.nodeTagUpdated') }}
+            </el-tag>
+            <span class="node-update-ctl">
+              <el-select
+                v-model="nodeSel"
+                size="small"
+                :placeholder="t('panel.nodeVersionPick')"
+                :loading="nodeLoading"
+                :disabled="updates.nodeBusy"
+                style="width: 190px"
+              >
+                <el-option
+                  v-for="v in nodeVersions"
+                  :key="v.version"
+                  :label="nodeVersionLabel(v)"
+                  :value="v.version"
+                  :disabled="v.version === props.runtime.version"
+                />
+              </el-select>
+              <el-button
+                size="small"
+                type="primary"
+                :disabled="!nodeSel || nodeSel === props.runtime.version"
+                :loading="updates.nodeBusy"
+                @click="doNodeUpdate"
+              >
+                {{ props.runtime.ok ? t('panel.nodeUpdateBtn') : t('panel.installBtn') }}
+              </el-button>
+              <el-button
+                v-if="props.runtime.override"
+                size="small"
+                text
+                :disabled="updates.nodeBusy"
+                @click="doNodeRestore"
+              >
+                {{ t('panel.nodeRestoreBtn') }}
+              </el-button>
+            </span>
+          </div>
+          <div v-if="nodeError" class="node-load-err">
+            <span class="cell-sub err-text">{{ nodeError }}</span>
+            <el-button size="small" text :loading="nodeLoading" @click="loadNodeVersions">
+              {{ t('panel.retry') }}
+            </el-button>
+          </div>
+          <div v-if="updates.nodeProgress" class="upd-progress node-prog">
+            <el-progress
+              class="node-prog-bar"
+              :percentage="updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)"
+              :stroke-width="6"
+              :indeterminate="
+                updates.nodeProgress.phase === 'extract' ||
+                (updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)) === 0
+              "
+              striped
+              :striped-flow="updates.nodeProgress.phase === 'extract'"
             />
-          </el-select>
-          <el-button
-            size="small"
-            type="primary"
-            :disabled="!nodeSel || nodeSel === props.runtime.version"
-            :loading="updates.nodeBusy"
-            @click="doNodeUpdate"
-          >
-            {{ props.runtime.ok ? t('panel.nodeUpdateBtn') : t('panel.installBtn') }}
-          </el-button>
-          <el-button
-            v-if="props.runtime.override"
-            size="small"
-            text
-            :disabled="updates.nodeBusy"
-            @click="doNodeRestore"
-          >
-            {{ t('panel.nodeRestoreBtn') }}
-          </el-button>
-        </span>
-      </div>
-      <div v-if="nodeError" class="node-load-err">
-        <span class="cell-sub err-text">{{ nodeError }}</span>
-        <el-button size="small" text :loading="nodeLoading" @click="loadNodeVersions">
-          {{ t('panel.retry') }}
-        </el-button>
-      </div>
-      <div v-if="updates.nodeProgress" class="upd-progress node-prog">
-        <el-progress
-          class="node-prog-bar"
-          :percentage="updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)"
-          :stroke-width="6"
-          :indeterminate="
-            updates.nodeProgress.phase === 'extract' ||
-            (updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)) === 0
-          "
-          striped
-          :striped-flow="updates.nodeProgress.phase === 'extract'"
-        />
-        <span class="cell-sub">{{ updates.nodeProgress.message }}</span>
-      </div>
-      <div class="kv">
-        <span>{{ t('panel.aboutRuntimePath') }}</span>
-        <code>{{ props.runtime.path || '-' }}</code>
-      </div>
-      <div class="kv">
-        <span>Pages</span>
-        <strong>{{
-          t('panel.aboutPagesRunning', { running: props.runningCount, total: props.totalCount })
-        }}</strong>
-      </div>
-      <div class="line" />
-      <div class="head neon">
-        <span>{{ t('panel.updatesTitle') }}</span>
-        <el-button size="small" :loading="updates.checking" @click="emit('check-updates')">
-          {{ t('panel.checkUpdates') }}
-        </el-button>
-      </div>
-      <el-table :data="updates.results" size="small" :empty-text="t('panel.updatesEmpty')">
-        <el-table-column :label="t('panel.colName')" min-width="200">
-          <template #default="{ row }">
-            <span>{{ row.name }}</span>
-            <el-tag
-              v-if="row.isContainer"
-              size="small"
-              effect="plain"
-              round
-              style="margin-left: 8px"
-              >{{ t('panel.tagContainer') }}</el-tag
+            <span class="cell-sub">{{ updates.nodeProgress.message }}</span>
+          </div>
+          <div class="kv">
+            <span>{{ t('panel.aboutRuntimePath') }}</span>
+            <code>{{ props.runtime.path || '-' }}</code>
+          </div>
+          <div class="kv">
+            <span>Pages</span>
+            <strong>{{
+              t('panel.aboutPagesRunning', { running: props.runningCount, total: props.totalCount })
+            }}</strong>
+          </div>
+
+          <!-- System / runtime overview -->
+          <div class="line" />
+          <div class="head">
+            <span>{{ t('panel.sysTitle') }}</span>
+            <el-button size="small" text :loading="sysLoading" @click="loadSystemInfo">
+              {{ t('panel.sysRefresh') }}
+            </el-button>
+          </div>
+          <div v-if="sysInfo" class="sys-grid">
+            <div class="sys-row">
+              <span>{{ t('panel.sysOs') }}</span>
+              <code>{{ sysInfo.osType }} {{ sysInfo.osRelease }} · {{ sysInfo.arch }}</code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysHost') }}</span>
+              <code>{{ sysInfo.hostname }}</code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysCpu') }}</span>
+              <code>
+                {{ sysInfo.cpuModel || '?' }} ·
+                {{ t('panel.sysCpuCores', { n: sysInfo.cpuCores }) }}
+              </code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysMem') }}</span>
+              <code>{{
+                t('panel.sysMemUsed', {
+                  used: fmtBytes(sysInfo.totalMem - sysInfo.freeMem),
+                  total: fmtBytes(sysInfo.totalMem)
+                })
+              }}</code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysUptime') }}</span>
+              <code>{{ fmtDuration(sysInfo.osUptimeSec) }}</code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysAppUptime') }}</span>
+              <code>{{ fmtDuration(sysInfo.appUptimeSec) }}</code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysLocale') }}</span>
+              <code>{{ sysInfo.locale || '-' }} / {{ sysInfo.timezone || '-' }}</code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysAppVersion') }}</span>
+              <code>
+                {{ sysInfo.appVersion }}
+                <el-tag size="small" effect="plain" round>
+                  {{ sysInfo.packaged ? t('panel.packagedYes') : t('panel.packagedNo') }}
+                </el-tag>
+              </code>
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysRuntimes') }}</span>
+              <code
+                >Electron {{ sysInfo.electron }} · Chrome {{ sysInfo.chrome }} · Node
+                {{ sysInfo.node }}</code
+              >
+            </div>
+            <div class="sys-row">
+              <span>{{ t('panel.sysInterfaces') }}</span>
+              <code>{{ sysInfo.interfaceCount }}</code>
+            </div>
+            <div class="sys-row sys-wide">
+              <span>{{ t('panel.sysUserData') }}</span>
+              <code>{{ sysInfo.userData }}</code>
+            </div>
+            <div class="sys-row sys-wide">
+              <span>{{ t('panel.sysInstallDir') }}</span>
+              <code>{{ sysInfo.installDir }}</code>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane name="updates">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><Download /></el-icon>{{ t('panel.tabUpdates') }}</span
             >
-            <el-tag
-              v-else-if="sourceTag(row)"
-              size="small"
-              effect="plain"
-              round
-              type="warning"
-              style="margin-left: 8px"
-              >{{ sourceTag(row) }}</el-tag
-            >
-            <div class="cell-sub">{{ subLabel(row) }}</div>
-            <div v-if="progressOf(row)" class="upd-progress">
-              <el-progress
-                :percentage="progressPercent(progressOf(row)!)"
-                :stroke-width="6"
-                :show-text="false"
-                :indeterminate="progressIndeterminate(progressOf(row)!)"
-                striped
-                :striped-flow="progressIndeterminate(progressOf(row)!)"
-              />
-              <span class="cell-sub">{{ progressOf(row)?.message }}</span>
+          </template>
+          <div class="head neon">
+            <span>{{ t('panel.updatesTitle') }}</span>
+            <el-button size="small" :loading="updates.checking" @click="emit('check-updates')">
+              {{ t('panel.checkUpdates') }}
+            </el-button>
+          </div>
+          <el-table :data="updates.results" size="small" :empty-text="t('panel.updatesEmpty')">
+            <el-table-column :label="t('panel.colName')" min-width="200">
+              <template #default="{ row }">
+                <span>{{ row.name }}</span>
+                <el-tag
+                  v-if="row.isContainer"
+                  size="small"
+                  effect="plain"
+                  round
+                  style="margin-left: 8px"
+                  >{{ t('panel.tagContainer') }}</el-tag
+                >
+                <el-tag
+                  v-else-if="sourceTag(row)"
+                  size="small"
+                  effect="plain"
+                  round
+                  type="warning"
+                  style="margin-left: 8px"
+                  >{{ sourceTag(row) }}</el-tag
+                >
+                <div class="cell-sub">{{ subLabel(row) }}</div>
+                <div v-if="progressOf(row)" class="upd-progress">
+                  <el-progress
+                    :percentage="progressPercent(progressOf(row)!)"
+                    :stroke-width="6"
+                    :show-text="false"
+                    :indeterminate="progressIndeterminate(progressOf(row)!)"
+                    striped
+                    :striped-flow="progressIndeterminate(progressOf(row)!)"
+                  />
+                  <span class="cell-sub">{{ progressOf(row)?.message }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('panel.colBranch')" width="120">
+              <template #default="{ row }">
+                <code v-if="refLabel(row)">{{ refLabel(row) }}</code>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('panel.colStatus')" width="120">
+              <template #default="{ row }">
+                <el-tag size="small" round :type="statusType(row)">{{ statusLabel(row) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('panel.colAction')" width="90" align="right">
+              <template #default="{ row }">
+                <el-button
+                  v-if="row.pendingRestart"
+                  size="small"
+                  type="primary"
+                  round
+                  @click="relaunchNow"
+                >
+                  {{ t('panel.restartNowBtn') }}
+                </el-button>
+                <el-button
+                  v-else-if="notInstalledBuiltin(row)"
+                  size="small"
+                  type="primary"
+                  round
+                  :loading="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
+                  @click="installBuiltinRow(row)"
+                >
+                  {{ t('panel.installBtn') }}
+                </el-button>
+                <el-button
+                  v-else-if="row.hasUpdate && row.canAutoUpdate"
+                  size="small"
+                  type="primary"
+                  round
+                  :loading="updates.updating === row.name"
+                  @click="updates.perform(row)"
+                >
+                  {{ t('panel.updateBtn') }}
+                </el-button>
+                <el-button
+                  v-else-if="row.isContainer && row.canRollback"
+                  size="small"
+                  round
+                  type="warning"
+                  plain
+                  @click="rollbackNow(row)"
+                >
+                  {{ t('panel.rollbackBtn') }}
+                </el-button>
+                <el-tooltip
+                  v-else-if="row.hasUpdate"
+                  :content="t('panel.manualTip')"
+                  placement="top"
+                >
+                  <el-button size="small" round disabled>{{ t('panel.manualBtn') }}</el-button>
+                </el-tooltip>
+                <el-button
+                  v-else-if="row.pageId"
+                  size="small"
+                  round
+                  :loading="resetting === row.name"
+                  @click="resetBuiltinRow(row)"
+                >
+                  {{ t('panel.resetBtn') }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <!-- #17 container OTA version history -->
+          <template v-if="historyRows.length">
+            <div class="line" />
+            <div class="head">
+              <span>{{ t('panel.historyTitle') }}</span>
+            </div>
+            <div class="history-grid">
+              <div v-for="r in historyRows" :key="r.label" class="history-row">
+                <span class="history-label" :class="{ 'history-pending': r.pending }">{{
+                  r.label
+                }}</span>
+                <code class="history-ver">{{ r.version }}</code>
+              </div>
             </div>
           </template>
-        </el-table-column>
-        <el-table-column :label="t('panel.colBranch')" width="120">
-          <template #default="{ row }">
-            <code v-if="refLabel(row)">{{ refLabel(row) }}</code>
+        </el-tab-pane>
+
+        <el-tab-pane name="diagnose">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><Connection /></el-icon>{{ t('panel.tabDiagnose') }}</span
+            >
           </template>
-        </el-table-column>
-        <el-table-column :label="t('panel.colStatus')" width="120">
-          <template #default="{ row }">
-            <el-tag size="small" round :type="statusType(row)">{{ statusLabel(row) }}</el-tag>
+          <!-- Live network: interfaces + real-time throughput (sampled every 2s while open) -->
+          <div class="head">
+            <span>{{ t('panel.netLiveTitle') }}</span>
+            <el-button size="small" text :loading="!netStats" @click="sampleNet">
+              {{ t('panel.netRefresh') }}
+            </el-button>
+          </div>
+          <div v-if="netStats" class="net-live">
+            <div class="net-rate">
+              <span class="rate-down"
+                >{{ t('panel.netRx') }} <b>{{ fmtRate(netRxRate) }}</b></span
+              >
+              <span class="rate-up"
+                >{{ t('panel.netTx') }} <b>{{ fmtRate(netTxRate) }}</b></span
+              >
+              <span v-if="netStats.counters" class="rate-total cell-sub">
+                {{ t('panel.netTotal') }} ↓{{ fmtBytes(netStats.counters.rxBytes) }} · ↑{{
+                  fmtBytes(netStats.counters.txBytes)
+                }}
+              </span>
+            </div>
+            <div v-if="!netStats.counters" class="cell-sub">{{ t('panel.netNoCounter') }}</div>
+            <div class="net-sub-label">{{ t('panel.netInterfaces') }}</div>
+            <div v-if="netStats.interfaces.length" class="iface-list">
+              <div
+                v-for="it in netStats.interfaces"
+                :key="it.name"
+                class="iface-row"
+                :class="{ 'iface-internal': it.internal }"
+              >
+                <span class="iface-name">{{ it.name }}</span>
+                <code v-if="it.address" class="iface-addr">{{ it.address }}</code>
+                <span v-if="it.mac" class="iface-mac cell-sub">{{ it.mac }}</span>
+                <el-tag v-if="it.internal" size="small" effect="plain" round>{{
+                  t('panel.netInternal')
+                }}</el-tag>
+              </div>
+            </div>
+            <div v-else class="cell-sub">{{ t('panel.netNoInterface') }}</div>
+          </div>
+
+          <div class="line" />
+          <!-- #15 config snapshot / migration package -->
+          <div class="head">
+            <span>{{ t('panel.snapshotTitle') }}</span>
+            <span class="tools-ctl">
+              <el-button
+                size="small"
+                :loading="snapshotBusy === 'export'"
+                @click="doExportSnapshot"
+              >
+                {{ t('panel.exportSnapshotBtn') }}
+              </el-button>
+              <el-button
+                size="small"
+                :loading="snapshotBusy === 'import'"
+                @click="doImportSnapshot"
+              >
+                {{ t('panel.importSnapshotBtn') }}
+              </el-button>
+            </span>
+          </div>
+          <!-- #21 network diagnostic wizard -->
+          <div class="head" style="margin-top: 12px">
+            <span>{{ t('panel.netProbeTitle') }}</span>
+            <el-button size="small" type="primary" :loading="netProbing" @click="runNetProbe">
+              {{ netResult ? t('panel.netRerun') : t('panel.netProbeBtn') }}
+            </el-button>
+          </div>
+          <div v-if="netProbing && !netResult" class="cell-sub">{{ t('panel.netProbing') }}</div>
+          <div v-if="netResult" class="net-result">
+            <div class="net-summary" :class="netResult.healthy ? 'ok-text' : 'err-text'">
+              {{ netResult.healthy ? t('panel.netHealthy') : t('panel.netUnhealthy') }}
+            </div>
+            <div v-for="s in netResult.steps" :key="s.id" class="net-step">
+              <span class="net-dot" :class="s.ok ? 'net-ok' : 'net-fail'" />
+              <span class="net-name">{{ netStepLabel(s.id) }}</span>
+              <span v-if="s.ms != null" class="net-ms">{{ s.ms }}ms</span>
+              <span v-if="s.detail" class="net-detail cell-sub">{{ s.detail }}</span>
+            </div>
+            <div v-if="netResult.proxy" class="net-proxy cell-sub">
+              {{
+                t('panel.netProxy', {
+                  p:
+                    [
+                      netResult.proxy.https && `https=${netResult.proxy.https}`,
+                      netResult.proxy.http && `http=${netResult.proxy.http}`
+                    ]
+                      .filter(Boolean)
+                      .join(' ') ||
+                    netResult.proxy.no ||
+                    '-'
+                })
+              }}
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane name="logs">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><Document /></el-icon>{{ t('panel.tabLogs') }}</span
+            >
           </template>
-        </el-table-column>
-        <el-table-column :label="t('panel.colAction')" width="90" align="right">
-          <template #default="{ row }">
-            <el-button
-              v-if="row.pendingRestart"
-              size="small"
-              type="primary"
-              round
-              @click="relaunchNow"
-            >
-              {{ t('panel.restartNowBtn') }}
-            </el-button>
-            <el-button
-              v-else-if="notInstalledBuiltin(row)"
-              size="small"
-              type="primary"
-              round
-              :loading="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
-              @click="installBuiltinRow(row)"
-            >
-              {{ t('panel.installBtn') }}
-            </el-button>
-            <el-button
-              v-else-if="row.hasUpdate && row.canAutoUpdate"
-              size="small"
-              type="primary"
-              round
-              :loading="updates.updating === row.name"
-              @click="updates.perform(row)"
-            >
-              {{ t('panel.updateBtn') }}
-            </el-button>
-            <el-button
-              v-else-if="row.isContainer && row.canRollback"
-              size="small"
-              round
-              type="warning"
-              plain
-              @click="rollbackNow(row)"
-            >
-              {{ t('panel.rollbackBtn') }}
-            </el-button>
-            <el-tooltip v-else-if="row.hasUpdate" :content="t('panel.manualTip')" placement="top">
-              <el-button size="small" round disabled>{{ t('panel.manualBtn') }}</el-button>
-            </el-tooltip>
-            <el-button
-              v-else-if="row.pageId"
-              size="small"
-              round
-              :loading="resetting === row.name"
-              @click="resetBuiltinRow(row)"
-            >
-              {{ t('panel.resetBtn') }}
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-      <div class="line" />
-      <div class="head">
-        <span>{{ t('panel.logViewerTitle') }}</span>
-      </div>
-      <LogViewer />
+          <div class="head">
+            <span>{{ t('panel.logViewerTitle') }}</span>
+          </div>
+          <LogViewer />
+        </el-tab-pane>
+      </el-tabs>
     </section>
   </div>
 </template>
@@ -485,6 +923,66 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
 <style scoped>
 .sec {
   padding: 2px;
+}
+
+/* Vertical (left) tab rail for the Help panel, mirroring SettingsPanel: a compact
+   icon+label column, active item gets a soft accent wash, the EP hairline between the
+   nav and the content is dropped so the two columns read as one card. */
+.help-tabs {
+  display: flex;
+  align-items: stretch;
+  min-height: 240px;
+}
+.help-tabs :deep(.el-tabs__header) {
+  margin: 0 16px 0 0;
+}
+.help-tabs :deep(.el-tabs__nav-wrap)::after {
+  display: none;
+}
+.help-tabs :deep(.el-tabs__nav) {
+  padding: 2px;
+}
+/* EP defaults vertical tabs to right-aligned (`.el-tabs--left .el-tabs__item.is-left`,
+   specificity 0,3,0); stack a second component class to beat it so icon+label sit left. */
+.help-tabs.help-tabs :deep(.el-tabs__item.is-left) {
+  justify-content: flex-start;
+  text-align: left;
+}
+.help-tabs :deep(.el-tabs__item) {
+  height: auto;
+  padding: 12px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.help-tabs :deep(.el-tabs__item + .el-tabs__item) {
+  margin-top: 8px;
+}
+.help-tabs :deep(.el-tabs__item:hover) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.help-tabs :deep(.el-tabs__item.is-active) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+.help-tabs :deep(.el-tabs__active-bar) {
+  display: none;
+}
+.help-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  overflow: hidden;
+}
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.tab-label .el-icon {
+  font-size: 15px;
 }
 
 .head {
@@ -596,5 +1094,172 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
 }
 .err-text {
   color: var(--err);
+}
+
+/* #17 version history mini-table */
+.history-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.history-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.history-label {
+  color: var(--text-dim);
+  width: 96px;
+  flex: none;
+}
+.history-label.history-pending {
+  color: var(--warn);
+}
+.history-ver {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+/* #21 network diagnostic results */
+.tools-ctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.net-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.net-summary {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.net-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.net-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.net-dot.net-ok {
+  background: var(--ok);
+}
+.net-dot.net-fail {
+  background: var(--err);
+}
+.net-name {
+  width: 96px;
+  flex: none;
+}
+.net-ms {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.net-detail {
+  max-width: 260px;
+}
+.net-proxy {
+  margin-top: 2px;
+}
+
+/* 关于与运行 — system overview: a two-column label/value grid; `sys-wide` rows
+   (paths) span the full width so long directories stay on one readable line. */
+.sys-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 20px;
+  font-size: 12.5px;
+}
+.sys-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.sys-row > span {
+  color: var(--text-dim);
+  flex: none;
+  width: 84px;
+}
+.sys-row code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 6px;
+}
+.sys-row.sys-wide {
+  grid-column: 1 / -1;
+}
+.sys-row.sys-wide code {
+  white-space: normal;
+  word-break: break-all;
+}
+
+/* 网络与工具 — live throughput + interface list. */
+.net-live {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.net-rate {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.net-rate .rate-down b {
+  color: var(--ok);
+}
+.net-rate .rate-up b {
+  color: var(--accent);
+}
+.net-rate .rate-total {
+  margin-left: auto;
+}
+.net-sub-label {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
+  margin-top: 2px;
+}
+.iface-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.iface-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.iface-row.iface-internal {
+  opacity: 0.6;
+}
+.iface-name {
+  flex: none;
+  min-width: 96px;
+  font-weight: 550;
+}
+.iface-addr {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 6px;
+}
+.iface-mac {
+  max-width: none;
 }
 </style>

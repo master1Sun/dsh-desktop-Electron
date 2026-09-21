@@ -13,18 +13,17 @@ import {
   promises as fsp
 } from 'node:fs'
 import { join } from 'node:path'
-import { app, dialog } from 'electron'
+import { app } from 'electron'
 import * as os from 'node:os'
 import { logsDir } from './logger'
-import { getSettings } from './store'
-import { m } from './i18n'
+import { getSettings, resolveExportPath } from './store'
 import type { PageRegistry } from './pages'
 
 /**
  * One-click diagnostic bundle for field bugs ("it doesn't start on my machine").
  * Collects everything that distinguishes the user's machine from ours — versions,
  * resolved settings (secrets masked), per-page container.json + status, log tails,
- * per-project git HEAD — into a folder, zips it, and hands it to a save dialog.
+ * per-project git HEAD — into a folder, zips it, and saves it into the configured 下载目录.
  *
  * Everything here is best-effort by design: a missing file or a failed `git` call
  * downgrades that one section to a note inside the bundle; the export itself only
@@ -84,8 +83,9 @@ function maskSettings(): Record<string, unknown> {
 }
 
 /**
- * Build the bundle and copy it to a user-chosen path. Resolves the saved .zip path,
- * or null when the user cancelled the dialog. Throws only if staging itself fails.
+ * Build the bundle and save it into the configured 下载目录 (same folder webview downloads
+ * use, with a collision-safe name — no "Save As" prompt). Resolves the saved .zip path.
+ * Throws only if staging itself fails.
  */
 export async function exportDiagnostics(registry: PageRegistry): Promise<string | null> {
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
@@ -199,17 +199,12 @@ export async function exportDiagnostics(registry: PageRegistry): Promise<string 
     }
     writeFileSync(join(stage, 'git.txt'), gitLines.join('\n'), 'utf8')
 
-    // ---- zip + save dialog ----
+    // ---- zip, then drop into the configured 下载目录 (follows webview downloads) ----
     const zipPath = join(app.getPath('temp'), `dsh-diag-${ts}.zip`)
     await zipFolder(stage, zipPath)
-    const { canceled, filePath } = await dialog.showSaveDialog({
-      title: m('diag.exportTitle'),
-      defaultPath: `dsh-diag-${ts}.zip`,
-      filters: [{ name: 'zip', extensions: ['zip'] }]
-    })
-    if (canceled || !filePath) return null
-    await fsp.copyFile(zipPath, filePath)
-    return filePath
+    const dest = resolveExportPath(`dsh-diag-${ts}.zip`)
+    await fsp.copyFile(zipPath, dest)
+    return dest
   } finally {
     rmSync(stage, { recursive: true, force: true })
   }
@@ -236,10 +231,18 @@ function safePageLogFiles(): { name: string }[] {
  * Compress-Archive through -EncodedCommand: a plain `-Command` with our (possibly
  * Chinese-path) arguments arrives at PowerShell in the OEM codepage and silently
  * mangles them; base64 UTF-16LE sidesteps the whole codepage mess.
+ *
+ * NOTE: `-LiteralPath 'src\*'` never expands the `*` — Compress-Archive then matches nothing
+ * and emits *no archive* while still exiting 0, so the downstream copy silently fails. Enumerate
+ * the folder's real children and pass those literal paths instead (correct root-level layout that
+ * also survives a temp dir name carrying wildcard chars like `[` or `]`).
  */
 function zipFolder(src: string, dest: string): Promise<void> {
+  const srcLit = src.replace(/'/g, "''")
+  const destLit = dest.replace(/'/g, "''")
   const ps =
-    `Compress-Archive -LiteralPath '${src.replace(/'/g, "''")}\\*' -DestinationPath '${dest.replace(/'/g, "''")}' -Force`
+    `$items = Get-ChildItem -LiteralPath '${srcLit}' | ForEach-Object { $_.FullName }; ` +
+    `Compress-Archive -LiteralPath $items -DestinationPath '${destLit}' -Force -ErrorAction Stop`
   const encoded = Buffer.from(ps, 'utf16le').toString('base64')
   return new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded], {
@@ -249,8 +252,10 @@ function zipFolder(src: string, dest: string): Promise<void> {
     let err = ''
     child.stderr?.on('data', (d) => (err += String(d)))
     child.on('error', reject)
-    child.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(`Compress-Archive failed (${code}): ${err.trim()}`))
-    )
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`Compress-Archive failed (${code}): ${err.trim()}`))
+      if (!existsSync(dest)) return reject(new Error('Compress-Archive produced no archive'))
+      resolve()
+    })
   })
 }

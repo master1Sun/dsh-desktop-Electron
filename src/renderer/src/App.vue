@@ -554,9 +554,69 @@ watchEffect(() => {
   if (settingsStore.loaded && !userPinnedTheme) applyTheme(settingsStore.settings.theme)
 })
 
+/**
+ * #25: runtime accent override. Empty keeps each theme's CSS-defined `--accent` (light and dark
+ * differ); a hex is written onto the document element so it wins over both `:root` and
+ * `html.dark`, and Element Plus's `--el-color-primary*` (derived via `color-mix(var(--accent))`)
+ * follows automatically. `--accent-strong` is a darkened variant for hover/active states.
+ */
+function applyAccent(hex?: string): void {
+  const root = document.documentElement
+  if (!hex) {
+    root.style.removeProperty('--accent')
+    root.style.removeProperty('--accent-strong')
+    return
+  }
+  root.style.setProperty('--accent', hex)
+  root.style.setProperty('--accent-strong', `color-mix(in srgb, ${hex} 82%, #000)`)
+}
+
+/** #25: frosted-blur strength — write the base token the glass surfaces scale off.
+    Set the px token (used by blur()) and its unitless mirror --glass-blur-n (used by the
+    tint/saturate ratios) together so they never drift. */
+function applyGlassBlur(px?: number): void {
+  const root = document.documentElement
+  if (typeof px !== 'number') {
+    root.style.removeProperty('--glass-blur')
+    root.style.removeProperty('--glass-blur-n')
+    return
+  }
+  root.style.setProperty('--glass-blur', `${px}px`)
+  root.style.setProperty('--glass-blur-n', `${px}`)
+}
+
+/** #25: background transparency — the frosted-surface opacity. A percentage (0–100, full
+ range: 0 = fully transparent, 100 = fully opaque) is written onto --glass-tint-a, overriding
+ the blur-coupled stylesheet default so blur and transparency are independent axes. Undefined
+ removes the override and falls back to that coupling. */
+function applyGlassAlpha(pct?: number): void {
+  const root = document.documentElement
+  if (typeof pct !== 'number') {
+    root.style.removeProperty('--glass-tint-a')
+    return
+  }
+  const alpha = Math.min(1, Math.max(0, pct / 100))
+  root.style.setProperty('--glass-tint-a', alpha.toFixed(3))
+}
+
+watchEffect(() => {
+  if (!settingsStore.loaded) return
+  applyAccent(settingsStore.settings.accentColor)
+  applyGlassBlur(settingsStore.settings.glassBlur)
+  applyGlassAlpha(settingsStore.settings.glassAlpha)
+})
+
 // Apply the persisted UI language as soon as settings load, and keep the Element Plus
 // locale in lockstep so its built-in component text (empty states, pagination…) matches.
 const currentEpLocale = computed(() => epLocale())
+
+/**
+ * Global ElMessage defaults: every toast pops bottom-right (EP anchors + stacks them
+ * upward there natively) and de-duplicates identical repeats. A stable reference so the
+ * ConfigProvider watcher doesn't re-merge a fresh object on each App re-render. Sizes are
+ * trimmed to a compact "small toast" via the `.el-message` overrides in glass.css.
+ */
+const messageConfig = { placement: 'bottom-right', offset: 16, grouping: true }
 watchEffect(() => {
   if (settingsStore.loaded) i18nLocale.value = settingsStore.settings.locale || 'zh'
 })
@@ -741,7 +801,7 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
 </script>
 
 <template>
-  <el-config-provider :locale="currentEpLocale">
+  <el-config-provider :locale="currentEpLocale" :message="messageConfig">
     <div class="shell">
       <!-- Ambient aurora: fixed, non-interactive; glass chrome bleeds it through. -->
       <div class="aurora" aria-hidden="true">

@@ -42,6 +42,8 @@ const ANNOUNCE_GRACE_MS = 1500
  * the full retry set again). */
 const CRASH_RETRY_DELAYS_MS = [2_000, 5_000, 15_000]
 const STABLE_RESET_MS = 5 * 60_000
+/** #18: exit-78 (resource busy) reclaim-and-retry is budget-free, but cap it to avoid a hot loop. */
+const MAX_RECLAIM_RETRIES = 3
 
 /* ---- health check (container.json `healthUrl`) ----
  * Port-LISTEN alone can't tell "booting" from "alive but hung": a server that binds
@@ -146,6 +148,21 @@ interface RuntimeEntry {
   healthTimer?: NodeJS.Timeout
   /** consecutive failed health probes (a pass resets it to 0). */
   healthFails: number
+  /** last health probe outcome: undefined = not yet probed, true/false = pass/fail. */
+  lastHealthOk?: boolean
+  /** epoch ms of the last completed health probe (pass or fail). */
+  lastHealthAt?: number
+  /** #18: exit-78 reclaim-retries used this run without burning the crash budget (bounded). */
+  reclaimRetries?: number
+}
+
+/**
+ * #18: did the child die because a dependency declared an incompatible engine (npm's
+ * EBADENGINE)? Restarting can't fix an engine mismatch, so the crash guard fails fast
+ * instead of burning the backoff budget. Scan the recent log tail for the marker.
+ */
+function detectEngineMismatch(e: RuntimeEntry): boolean {
+  return e.logs.some((l) => /EBADENGINE/i.test(l))
 }
 
 export interface PagesRoot {
@@ -567,7 +584,17 @@ export class PageRegistry extends EventEmitter {
           : undefined,
       portHolder: e.portHolder,
       crashes: e.crashes || undefined,
-      nextRestartAt: e.nextRestartAt
+      nextRestartAt: e.nextRestartAt,
+      // #16: only a page that declares a healthUrl has a meaningful probe outcome; others
+      // leave it undefined so the panel skips the badge rather than showing a false "unknown".
+      health: e.meta.healthUrl
+        ? {
+            status: e.lastHealthOk === undefined ? 'unknown' : e.lastHealthOk ? 'ok' : 'fail',
+            fails: e.healthFails,
+            lastAt: e.lastHealthAt,
+            url: healthTarget(e.meta, port) ?? undefined
+          }
+        : undefined
     }
   }
 
@@ -720,8 +747,23 @@ export class PageRegistry extends EventEmitter {
         e.meta.kind !== 'terminal' &&
         getSettings().crashAutoRestart !== false
       ) {
-        e.crashes++
-        this.scheduleCrashRestart(e, code)
+        // #18 tier the exit so a doomed restart doesn't burn the budget or spam the toast:
+        // - EBADENGINE (dependency needs a different Node): restarting can't help — fail fast.
+        // - exit 78 (EX_CONFIG / resource busy, e.g. a lost state-dir lock): reclaim the
+        //   orphan and retry immediately WITHOUT consuming a crash rung.
+        // - anything else: the normal backoff ladder.
+        if (detectEngineMismatch(e)) {
+          e.lastError = msg('page.logEngineMismatch')
+          e.logs.push(`[container] ${e.lastError}`)
+          console.warn(`[pages] ${e.meta.id}: EBADENGINE — not restarting (engine mismatch)`)
+        } else if (code === 78 && (e.reclaimRetries ?? 0) < MAX_RECLAIM_RETRIES) {
+          e.reclaimRetries = (e.reclaimRetries ?? 0) + 1
+          e.logs.push(`[container] ${msg('page.logReclaimRetry')}`)
+          this.scheduleReclaimRestart(e)
+        } else {
+          e.crashes++
+          this.scheduleCrashRestart(e, code)
+        }
       }
       e.proc = undefined
       e.pid = undefined
@@ -739,6 +781,10 @@ export class PageRegistry extends EventEmitter {
         if (target && !(await waitHealth(target, HEALTH_READY_TIMEOUT_MS))) {
           throw new Error(msg('page.healthFail', { url: target }))
         }
+        // Initial probe passed — seed the health badge so it reads green immediately
+        // rather than "unknown" until the first 30s poll lands.
+        e.lastHealthOk = true
+        e.lastHealthAt = Date.now()
       }
       let launchUrl = url
       if (isOpenclaw) {
@@ -756,7 +802,10 @@ export class PageRegistry extends EventEmitter {
       clearTimeout(e.stableTimer)
       e.stableTimer = setTimeout(() => {
         e.stableTimer = undefined
-        if (e.status === 'running') e.crashes = 0
+        if (e.status === 'running') {
+          e.crashes = 0
+          e.reclaimRetries = 0
+        }
       }, STABLE_RESET_MS)
       e.stableTimer.unref?.()
       this.emitProgress(e, 'ready')
@@ -1208,19 +1257,25 @@ export class PageRegistry extends EventEmitter {
   private startHealthMonitor(e: RuntimeEntry): void {
     this.stopHealthMonitor(e)
     if (!e.meta.healthUrl) return
-    e.healthTimer = setInterval(() => {
+    const probe = (): void => {
       if (e.status !== 'running' || !e.proc || this.quitting) return
       const target = healthTarget(e.meta, e.resolvedPort ?? e.meta.containerPort ?? e.meta.port)
       if (!target) return
       void probeHealth(target).then((alive) => {
         // Re-check after the async probe — a stop/restart may have landed meanwhile.
         if (e.status !== 'running' || !e.proc) return
+        e.lastHealthAt = Date.now()
         if (alive) {
+          e.lastHealthOk = true
           e.healthFails = 0
           return
         }
+        e.lastHealthOk = false
         e.healthFails++
-        if (e.healthFails < HEALTH_FAIL_LIMIT) return
+        if (e.healthFails < HEALTH_FAIL_LIMIT) {
+          this.emitChanged()
+          return
+        }
         e.healthFails = 0
         e.logs.push(`[container] ${msg('page.logHealthKill', { n: HEALTH_FAIL_LIMIT })}`)
         console.warn(`[pages] ${e.meta.id}: ${HEALTH_FAIL_LIMIT} failed health probes — restarting`)
@@ -1230,7 +1285,11 @@ export class PageRegistry extends EventEmitter {
           e.proc.kill('SIGTERM')
         }
       })
-    }, HEALTH_POLL_MS)
+    }
+    // Probe once shortly after going green (so the badge isn't stuck on "unknown" for a
+    // full poll interval), then settle into the steady 30s cadence.
+    setTimeout(probe, 1500).unref?.()
+    e.healthTimer = setInterval(probe, HEALTH_POLL_MS)
     e.healthTimer.unref?.()
   }
 
@@ -1238,6 +1297,8 @@ export class PageRegistry extends EventEmitter {
     if (e.healthTimer) clearInterval(e.healthTimer)
     e.healthTimer = undefined
     e.healthFails = 0
+    e.lastHealthOk = undefined
+    e.lastHealthAt = undefined
   }
 
   /** Cancel the guard's pending auto-restart / budget-refill timers for one entry. */
@@ -1289,6 +1350,34 @@ export class PageRegistry extends EventEmitter {
         // schedules the next rung, so nothing extra to do but keep it off the console.
         console.warn(`[pages] crash-restart ${e.meta.id} failed:`, (err as Error).message)
       })
+    }, delay)
+    e.restartTimer.unref?.()
+  }
+
+  /**
+   * #18: exit-78 (resource busy) reclaim-and-retry. Mirrors scheduleCrashRestart's shape
+   * but does NOT consume the crash budget — it reclaims the orphan holding the resource and
+   * restarts on the shortest rung. Bounded by MAX_RECLAIM_RETRIES (checked by the caller) so
+   * a page that keeps hitting 78 can't hot-loop; once the cap is spent the caller falls back
+   * to the normal budgeted ladder.
+   */
+  private scheduleReclaimRestart(e: RuntimeEntry): void {
+    this.clearRestartTimers(e)
+    const delay = CRASH_RETRY_DELAYS_MS[0]
+    e.nextRestartAt = Date.now() + delay
+    this.emitChanged()
+    e.restartTimer = setTimeout(() => {
+      e.restartTimer = undefined
+      e.nextRestartAt = undefined
+      if (this.quitting || e.proc) return
+      void this.reclaimOrphan(e, e.meta.id)
+        .catch((err) => console.warn(`[pages] ${e.meta.id} reclaim failed:`, (err as Error).message))
+        .finally(() => {
+          if (this.quitting || e.proc) return
+          this.start(e.meta.id, { fromCrashGuard: true }).catch((err) => {
+            console.warn(`[pages] reclaim-restart ${e.meta.id} failed:`, (err as Error).message)
+          })
+        })
     }, delay)
     e.restartTimer.unref?.()
   }

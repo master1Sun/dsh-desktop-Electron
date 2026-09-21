@@ -9,6 +9,18 @@
   --el-font-family: var(--font-app);
   --accent: #4f8cff;
   --accent-strong: #2f6fe4;
+  /* #25: base frosted-blur strength; .glass/.glass-soft/inputs scale off it. Overridden
+     at runtime from settings.glassBlur via documentElement.style.setProperty.
+     --glass-blur carries the px used by blur(); --glass-blur-n is the same value unitless,
+     for the alpha/saturate ratios (CSS calc can't divide/subtract across a unit). Both are
+     kept in sync by applyGlassBlur()/previewGlassBlur(). */
+  --glass-blur: 30px;
+  --glass-blur-n: 30;
+  /* Blur-coupled frosting: the bigger --glass-blur, the more the surface tint thins out,
+     so the slider actually *shows* (a near-opaque tint makes the backdrop invisible and
+     blur 0↔60 indistinguishable). rgb channels + a plain alpha keep the calc simple. */
+  --glass-tint-rgb: 255 255 255;
+  --glass-tint-a: clamp(0.6, calc(0.85 - var(--glass-blur-n, 30) / 150), 0.85);
   --bg: #f3f5fa;
   --surface: #ffffff;
   --surface-2: #f7f9fc;
@@ -24,6 +36,9 @@
 }
 
 html.dark {
+  /* Dark frosting reads with a black tint; slightly thinner so the blur shows through. */
+  --glass-tint-rgb: 0 0 0;
+  --glass-tint-a: clamp(0.5, calc(0.78 - var(--glass-blur-n, 30) / 180), 0.78);
   --accent: #5b9bff;
   --accent-strong: #7cb0ff;
   --bg: #000000;

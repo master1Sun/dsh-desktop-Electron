@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { accessSync, existsSync, mkdirSync } from 'node:fs'
 import { constants } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, basename, extname } from 'node:path'
 import Store from 'electron-store'
 import type { ContainerSettings, DefaultView } from '../shared/types'
 
@@ -14,6 +14,8 @@ const DEFAULTS: ContainerSettings = {
   launchAtStartup: false,
   // auto-run the bundled runtimes on launch: openclaw (gateway) + dsh-web (server)
   autoStartPages: ['openclaw', 'dsh-web'],
+  // empty until the user pins a page's auto-start by hand; see ContainerSettings.autoStartManual
+  autoStartManual: [],
   lastExternalUrls: [],
   externalSites: [],
   theme: 'auto',
@@ -30,7 +32,18 @@ const DEFAULTS: ContainerSettings = {
   // a page that crashes after having run is relaunched automatically; off surfaces the error only
   crashAutoRestart: true,
   // rare user-action-needed events (guard gave up, staged update) go to the OS notification center
-  systemNotifications: true
+  systemNotifications: true,
+  // #25: '' keeps each theme's CSS-defined accent; a hex overrides it live in both modes.
+  accentColor: '',
+  // #25: matches the stylesheet default (.glass blur 30px); slider overrides --glass-blur live.
+  glassBlur: 30,
+  // #25: frosted-surface opacity (%); slider overrides --glass-tint-a live (independent of blur).
+  glassAlpha: 60,
+  // #20: RSS (MB) over which a running page is flagged over-budget (tray resource badge).
+  memWarnMb: 800,
+  // bottom-docked terminal height the user dragged out; keep the default in sync with
+  // TerminalDrawer's DEFAULT_H.
+  terminalHeight: 320
 }
 
 let store: Store<ContainerSettings> | null = null
@@ -46,12 +59,47 @@ export function getSettings(): ContainerSettings {
   return { ...DEFAULTS, ...(getStore().store as ContainerSettings) }
 }
 
-export function updateSettings(partial: Partial<ContainerSettings>): ContainerSettings {
+export function updateSettings(
+  partial: Partial<ContainerSettings>,
+  opts: { syncAutoStartPin?: boolean } = {}
+): ContainerSettings {
   const s = getStore()
+  // An explicit auto-start-pages write only ever comes from a user flipping a page's switch
+  // (AppManager / Pages config) — the default-open coupling uses syncAutoStartForDefaultView
+  // and never routes through here. Diff old vs new so pages the user turned ON become sticky
+  // pins and pages turned OFF lose the pin (and won't be re-added by a later default change).
+  // A snapshot restore passes syncAutoStartPin:false: it brings its own autoStartManual, so
+  // diffing against the pre-restore list would mis-pin the whole set.
+  if (Array.isArray(partial.autoStartPages) && opts.syncAutoStartPin !== false) {
+    const prev = new Set((s.get('autoStartPages') || []) as string[])
+    const next = new Set(partial.autoStartPages)
+    const manual = new Set((s.get('autoStartManual') || []) as string[])
+    for (const id of next) if (!prev.has(id)) manual.add(id)
+    for (const id of prev) if (!next.has(id)) manual.delete(id)
+    s.set('autoStartManual', [...manual] as never)
+  }
   for (const [k, v] of Object.entries(partial)) {
     if (v !== undefined) s.set(k as keyof ContainerSettings, v as never)
   }
   return getSettings()
+}
+
+/**
+ * Keep the auto-start list in step with the 默认打开 selection, with a sticky manual override:
+ * the new default page starts at boot (added), and the page it replaced stops auto-starting
+ * *unless* the user had pinned it on by hand. Called by the UpdateSettings handler before it
+ * persists the new default view; `null` id means "no page / non-startable (e.g. external)".
+ */
+export function syncAutoStartForDefaultView(
+  prevPageId: string | null,
+  nextPageId: string | null
+): void {
+  const s = getStore()
+  const manual = new Set((s.get('autoStartManual') || []) as string[])
+  const auto = new Set((s.get('autoStartPages') || []) as string[])
+  if (prevPageId && prevPageId !== nextPageId && !manual.has(prevPageId)) auto.delete(prevPageId)
+  if (nextPageId) auto.add(nextPageId)
+  s.set('autoStartPages', [...auto] as never)
 }
 
 export function setDefaultView(view: DefaultView): void {
@@ -258,4 +306,30 @@ export function defaultDownloadDir(): string {
 export function resolveDownloadDir(): string {
   const override = (getSettings().downloadDir || '').trim()
   return override ? expandHome(override) : defaultDownloadDir()
+}
+
+/**
+ * Pick a non-colliding path in `dir` for `filename`, appending " (1)", " (2)" … before the
+ * extension, and ensure `dir` exists first. Shared by webview downloads and the app's own
+ * exports (diagnostics / migration package) so every file the container writes follows the
+ * same 下载目录 setting and never silently clobbers an earlier one.
+ */
+export function uniquePath(dir: string, filename: string): string {
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {
+    /* a caller-facing write error surfaces if the dir really can't be made */
+  }
+  const ext = extname(filename)
+  const stem = basename(filename, ext)
+  for (let i = 0; i < 1000; i += 1) {
+    const candidate = join(dir, i === 0 ? filename : `${stem} (${i})${ext}`)
+    if (!existsSync(candidate)) return candidate
+  }
+  return join(dir, `${stem} (${Date.now()})${ext}`)
+}
+
+/** A collision-free path for one exported file inside the configured 下载目录. */
+export function resolveExportPath(filename: string): string {
+  return uniquePath(resolveDownloadDir(), filename)
 }

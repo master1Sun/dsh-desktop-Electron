@@ -104,6 +104,12 @@ const zh: Dict = {
     themeAuto: '跟随系统',
     themeLight: '亮色',
     themeDark: '暗色',
+    accentColor: '主题色',
+    accentReset: '恢复默认',
+    accentTip: '覆盖高亮色（白天/黑夜均生效）；恢复默认则各自使用内置主题色。',
+    glassFx: '毛玻璃效果',
+    glassFxTip:
+      '一个滑条同时调节磨砂模糊与背景通透度：0 = 实心（不透明、无模糊），100 = 强磨砂（大模糊、最通透）。',
     language: '语言',
     langZh: '中文',
     langEn: 'English',
@@ -154,6 +160,42 @@ const zh: Dict = {
     envInjectDefault: '，默认 {path}'
   },
   panel: {
+    /** 帮助面板竖排分类 tab 标题。 */
+    tabAbout: '关于与运行',
+    tabUpdates: '更新检测',
+    tabDiagnose: '网络与工具',
+    tabLogs: '运行日志',
+    snapshotTitle: '配置快照与迁移',
+    /* 关于与运行：系统/运行时概览 */
+    sysTitle: '系统信息',
+    sysRefresh: '刷新',
+    sysOs: '操作系统',
+    sysHost: '主机名',
+    sysCpu: 'CPU',
+    sysCpuCores: '{n} 核',
+    sysMem: '内存',
+    sysMemUsed: '已用 {used} / 共 {total}',
+    sysUptime: '系统运行',
+    sysAppUptime: '本应用运行',
+    sysLocale: '地区/时区',
+    sysAppVersion: '容器版本',
+    sysPackaged: '打包',
+    packagedYes: '安装包',
+    packagedNo: '开发模式',
+    sysRuntimes: '运行栈',
+    sysUserData: '用户数据',
+    sysInstallDir: '安装目录',
+    sysInterfaces: '网卡数',
+    /* 网络与工具：实时网络信息 */
+    netLiveTitle: '实时网络',
+    netRx: '↓ 接收',
+    netTx: '↑ 发送',
+    netTotal: '累计',
+    netInterfaces: '网络接口',
+    netNoInterface: '未检测到网络接口',
+    netNoCounter: '此系统不支持实时流量统计',
+    netInternal: '本地回环',
+    netRefresh: '刷新',
     updatesTitle: '版本更新检测',
     checkUpdates: '立即检测',
     colName: '名称',
@@ -202,7 +244,6 @@ const zh: Dict = {
     logViewerTitle: '运行日志',
     logFilter: '过滤关键字',
     logTail: '行',
-    logAuto: '自动刷新',
     logRefresh: '刷新',
     logEmpty: '（空）',
     exportDiagBtn: '导出诊断报告',
@@ -212,7 +253,38 @@ const zh: Dict = {
     rollbackTitle: '回退版本',
     rollbackConfirm:
       '将用上次在线更新前的版本 v{version} 替换当前程序并自动重启；回退完成后需重新检查更新。确定回退吗？',
-    rollbackFailed: '回退调度失败，请查看日志'
+    rollbackFailed: '回退调度失败，请查看日志',
+    // #15 迁移包
+    exportSnapshotBtn: '导出迁移包',
+    importSnapshotBtn: '导入迁移包',
+    snapshotExported: '迁移包已导出：{path}',
+    snapshotExportFailed: '导出迁移包失败',
+    snapshotImported: '迁移包已导入，恢复 {n} 个页面配置',
+    snapshotImportFailed: '导入迁移包失败',
+    snapshotImportConfirm:
+      '导入会覆盖现有页面配置与相关设置（端口 / 环境目录 / 自启），运行中的页面不受影响。确定导入吗？',
+    // #17 版本历史
+    historyTitle: '版本历史',
+    historyRunning: '当前运行',
+    historyBackup: '可回退备份',
+    historyPending: '待重启生效',
+    historyRollbackFrom: '上次回退自',
+    historyEmpty: '暂无版本历史（完成一次在线更新后出现）',
+    // #21 网络诊断向导
+    netProbeBtn: '网络诊断',
+    netProbeTitle: '网络连通性诊断',
+    netHealthy: '各链路连通正常',
+    netUnhealthy: '部分链路不通，详见下方',
+    netProxy: '代理：{p}',
+    netRerun: '重新诊断',
+    netProbing: '正在探测…',
+    netStepGateway: '本机回环',
+    netStepGithub: 'GitHub',
+    netStepNpm: 'npm 官方源',
+    netStepNpmmirror: 'npm 镜像源',
+    netStepProxy: '代理设置',
+    // #22 日志实时流
+    logLive: '实时'
   },
   app: {
     title: '桌面控制台',
@@ -253,6 +325,7 @@ const zh: Dict = {
   pageMgr: {
     tabGit: '从 Git 安装',
     tabDir: '从本地目录安装',
+    tabInstalled: '已安装页面',
     hintGit:
       '支持 https / git@ 仓库地址：任意带 node http 服务的项目会作为页面内嵌展示，纯 CLI 项目（package.json 含 bin 且无 web 框架依赖）会被自动识别为终端应用，并生成 container.json。克隆到 pages/<repo名>；若项目自带 container.json 则以自带配置为准，可手动写 kind / startCommand 覆盖自动判断。',
     labelRepo: '仓库地址',
@@ -307,6 +380,8 @@ const zh: Dict = {
     configNoEnv:
       '该项目未声明可配置的环境目录；在它的 container.json 里加 "envVars": [{ "key": "MYAPP_HOME", "label": "数据目录" }] 后重新打开即可在此配置。',
     configCancel: '取消',
+    configAutoStartTip:
+      '开启后该服务会随容器启动自动拉起。将其设为「默认打开」会自动开启；若未手动开过，取消「默认打开」会同时关闭；手动开过的则取消「默认打开」后仍保持开启。',
     configSave: '保存',
     msgTerminalStartFail: '终端启动失败',
     msgEnterRepo: '请输入 git 仓库地址',
@@ -320,6 +395,17 @@ const zh: Dict = {
     msgRemoved: '已移除',
     msgConfigSaved: '配置已保存，重启该页面后生效',
     msgEmpty: '还没有安装任何 page',
+    // #16 依赖 / 健康可视化
+    healthOk: '健康',
+    healthFail: '健康异常',
+    healthUnknown: '探测中',
+    healthFails: '连续 {n} 次失败',
+    dependsOn: '依赖：{deps}',
+    depsNotRunning: '依赖未运行',
+    // #20 资源占用
+    metricsCpu: 'CPU {v}%',
+    metricsMem: '内存 {v}MB',
+    metricsOver: '超限',
     builtinTip: '容器内置页面，不可删除',
     viewLogs: '查看日志',
     unknown: '未知',
@@ -333,20 +419,23 @@ const zh: Dict = {
     msgHolderGone: '端口已无占用，正在重新启动…'
   },
   dshMgr: {
+    /** DSH 管理面板竖排分类 tab 标题。 */
+    tabOverview: '概览',
+    tabPlugins: '插件管理',
     emptyError: '未安装 @deepseek-ai/dsh',
     installHint: 'npm install @deepseek-ai/dsh@0.1.6-alpha.2',
     recheck: '重新检测',
     alertNoPnpm: '未找到 pnpm',
     alertNoPnpmDesc:
       'dsh 的插件安装/卸载/更新都通过 pnpm 执行，请先执行 npm install -g pnpm 后点击「刷新」。',
-    profileLabel: 'profile',
-    profilePlaceholder: 'web',
-    switchRefresh: '应用',
-    profileTemplatesHint: 'dsh 自带模板：web / acp / headless / sdk；首次使用由 dsh 自动初始化',
+    infoRunPath: 'dsh 运行路径',
+    infoProfileDir: 'profile 目录',
     verTag: 'profile: {profile}',
-    updateAll: 'npm 全部更新',
+    updateAll: '全部更新',
     checking: '检查更新中…',
-    profileDir: 'profile 目录：{dir} · 插件管理经 dsh plugin（pnpm）执行',
+    recheckUpdate: '检查更新',
+    allUpToDate: '已全部是最新版本',
+    profileNote: '插件的安装 / 卸载 / 更新均在该 profile 目录内经 dsh plugin（pnpm）执行',
     launchToken: 'dsh 令牌',
     tokenSourcePage: '来自运行中的页面 {id}',
     tokenNoPage:
@@ -387,6 +476,7 @@ const zh: Dict = {
     msgUninstalled: '已卸载 {name}',
     msgUpdated: '已更新',
     msgUpdateAllDone: '已通过 npm 批量更新',
+    msgUpdatedAll: '已更新 {n} 个插件',
     msgInstallFail: '安装失败',
     msgUninstallFail: '卸载失败',
     msgUpdateFail: '更新失败',
@@ -405,9 +495,10 @@ const zh: Dict = {
     emptyError: '未找到 openclaw CLI',
     setupHint: 'npm run setup:openclaw',
     recheck: '重新检测',
-    verTag: '自带最新版',
-    cliPath: 'CLI：{path}',
-    homeDir: '配置目录（OpenClaw Home）：{dir}',
+    verTag: '内置运行时',
+    infoCli: 'CLI 路径',
+    infoHome: 'OpenClaw Home',
+    infoPort: 'Gateway 端口',
     gatewayToken: 'Gateway 令牌',
     tokenEnv: '环境变量',
     tokenConfig: '配置文件',
@@ -423,9 +514,9 @@ const zh: Dict = {
     msgInitedRestart: '已生成 Gateway 令牌，正在重启 gateway 以生效',
     msgExists: '已存在 Gateway 令牌，无需重复生成',
     msgInitFail: '初始化令牌失败',
-    alertTitle: '首次启动会自动就绪，无需手动配置鉴权',
+    alertTitle: '首次启动自动就绪，无需手动配置鉴权',
     alertDesc:
-      '容器会在 ~/.openclaw/openclaw.json 缺失时写入最小 {gateway:{mode:"local"}}；网关无 token 时自动生成运行时 token 并配对本地设备，Control UI 根路径即可打开。频道 / 模型仍需在「终端」里跑 openclaw onboard 自行配置。容器只负责启停 gateway 与内嵌打开页面。',
+      '容器会在 ~/.openclaw/openclaw.json 缺失时写入最小配置（gateway.mode=local）；网关若无令牌则自动生成运行时令牌并配对本地设备，直接打开 Control UI 根路径即可。频道 / 模型仍需在「终端」中运行 openclaw onboard 自行配置——容器只负责 gateway 的启停与页面内嵌。',
     openclawTerminal: '在 OpenClaw Home 打开终端',
     msgTokenCopied: '令牌已复制到剪贴板',
     msgCopyFail: '复制失败，请手动选中'
@@ -500,6 +591,7 @@ const zh: Dict = {
     closeAllConfirmBtn: '全部关闭',
     emptyHint: '点各面板的「终端」按钮在此打开内嵌 shell',
     collapsed: '终端（点击展开，可拖动）',
+    resize: '拖动调整终端高度，双击恢复默认',
     rootTitle: '容器根目录'
   },
   palette: {
@@ -686,6 +778,13 @@ const en: Dict = {
     themeAuto: 'Follow system',
     themeLight: 'Light',
     themeDark: 'Dark',
+    accentColor: 'Accent color',
+    accentReset: 'Reset',
+    accentTip:
+      'Overrides the highlight color (applies in both light and dark); Reset falls back to each theme’s built-in accent.',
+    glassFx: 'Frosted glass',
+    glassFxTip:
+      'One slider drives both the frost blur and see-through: 0 = solid (opaque, no blur), 100 = heavy frost (max blur, most transparent).',
     language: 'Language',
     langZh: '中文',
     langEn: 'English',
@@ -736,6 +835,42 @@ const en: Dict = {
     envInjectDefault: ', default {path}'
   },
   panel: {
+    /** Help-panel vertical tab titles. */
+    tabAbout: 'About & Runtime',
+    tabUpdates: 'Updates',
+    tabDiagnose: 'Network & Tools',
+    tabLogs: 'Run Logs',
+    snapshotTitle: 'Config snapshot & migration',
+    /* About & Runtime: system/runtime overview */
+    sysTitle: 'System',
+    sysRefresh: 'Refresh',
+    sysOs: 'OS',
+    sysHost: 'Hostname',
+    sysCpu: 'CPU',
+    sysCpuCores: '{n} cores',
+    sysMem: 'Memory',
+    sysMemUsed: '{used} used / {total} total',
+    sysUptime: 'System uptime',
+    sysAppUptime: 'App uptime',
+    sysLocale: 'Locale/Timezone',
+    sysAppVersion: 'Container',
+    sysPackaged: 'Build',
+    packagedYes: 'Packaged',
+    packagedNo: 'Dev mode',
+    sysRuntimes: 'Runtimes',
+    sysUserData: 'User data',
+    sysInstallDir: 'Install dir',
+    sysInterfaces: 'Adapters',
+    /* Network & Tools: live network info */
+    netLiveTitle: 'Live network',
+    netRx: '↓ Down',
+    netTx: '↑ Up',
+    netTotal: 'Total',
+    netInterfaces: 'Network interfaces',
+    netNoInterface: 'No network interface detected',
+    netNoCounter: 'Live throughput is not supported on this system',
+    netInternal: 'Loopback',
+    netRefresh: 'Refresh',
     updatesTitle: 'Version update check',
     checkUpdates: 'Check now',
     colName: 'Name',
@@ -786,7 +921,6 @@ const en: Dict = {
     logViewerTitle: 'Run logs',
     logFilter: 'Filter keyword',
     logTail: 'lines',
-    logAuto: 'Auto refresh',
     logRefresh: 'Refresh',
     logEmpty: '(empty)',
     exportDiagBtn: 'Export diagnostics',
@@ -796,7 +930,38 @@ const en: Dict = {
     rollbackTitle: 'Version rollback',
     rollbackConfirm:
       'Replaces the running program with v{version} (the version before the last OTA update) and relaunches automatically; after the rollback you will need to re-check for updates. Roll back now?',
-    rollbackFailed: 'Failed to schedule the rollback — check the logs'
+    rollbackFailed: 'Failed to schedule the rollback — check the logs',
+    // #15 migration package
+    exportSnapshotBtn: 'Export migration package',
+    importSnapshotBtn: 'Import migration package',
+    snapshotExported: 'Migration package exported: {path}',
+    snapshotExportFailed: 'Failed to export the migration package',
+    snapshotImported: 'Migration package imported — restored {n} page configs',
+    snapshotImportFailed: 'Failed to import the migration package',
+    snapshotImportConfirm:
+      'Importing overwrites existing page configs and related settings (port / env dir / autostart); running pages are unaffected. Import now?',
+    // #17 version history
+    historyTitle: 'Version history',
+    historyRunning: 'Running',
+    historyBackup: 'Rollback backup',
+    historyPending: 'Pending restart',
+    historyRollbackFrom: 'Last rolled back from',
+    historyEmpty: 'No version history yet (appears after one OTA update)',
+    // #21 network diagnostic wizard
+    netProbeBtn: 'Network check',
+    netProbeTitle: 'Network connectivity check',
+    netHealthy: 'All links reachable',
+    netUnhealthy: 'Some links are down — see below',
+    netProxy: 'Proxy: {p}',
+    netRerun: 'Re-run',
+    netProbing: 'Probing…',
+    netStepGateway: 'Local loopback',
+    netStepGithub: 'GitHub',
+    netStepNpm: 'npm official registry',
+    netStepNpmmirror: 'npm mirror',
+    netStepProxy: 'Proxy settings',
+    // #22 live log stream
+    logLive: 'Live'
   },
   app: {
     title: 'Desktop Console',
@@ -838,6 +1003,7 @@ const en: Dict = {
   pageMgr: {
     tabGit: 'Install from Git',
     tabDir: 'Install from local folder',
+    tabInstalled: 'Installed pages',
     hintGit:
       'Supports https / git@ repo URLs: any node HTTP-serving project is embedded as a page, while a pure CLI project (a package.json carrying a bin with no web-framework dependency) is auto-detected as a terminal app and gets a generated container.json. Cloned into pages/<repo-name>; if the project ships its own container.json that wins, so you can override the auto-detection via kind / startCommand.',
     labelRepo: 'Repository URL',
@@ -893,6 +1059,8 @@ const en: Dict = {
     configNoEnv:
       'This project declares no configurable env dir. Add "envVars": [{ "key": "MYAPP_HOME", "label": "Data dir" }] to its container.json and reopen to configure it here.',
     configCancel: 'Cancel',
+    configAutoStartTip:
+      'When on, this service launches automatically with the container. Setting it as the “default page” turns this on; if never enabled by hand, unsetting the default turns it off — a manually enabled one stays on even after the default moves away.',
     configSave: 'Save',
     msgTerminalStartFail: 'Failed to start terminal',
     msgEnterRepo: 'Enter a git repository URL',
@@ -907,6 +1075,17 @@ const en: Dict = {
     msgRemoved: 'Removed',
     msgConfigSaved: 'Config saved; takes effect after restarting the page',
     msgEmpty: 'No pages installed yet',
+    // #16 dependency / health visualization
+    healthOk: 'Healthy',
+    healthFail: 'Health failing',
+    healthUnknown: 'Probing',
+    healthFails: '{n} consecutive failures',
+    dependsOn: 'Depends: {deps}',
+    depsNotRunning: 'Dependency not running',
+    // #20 resource usage
+    metricsCpu: 'CPU {v}%',
+    metricsMem: 'MEM {v}MB',
+    metricsOver: 'Over budget',
     builtinTip: 'Built-in page; cannot be removed',
     viewLogs: 'View logs',
     unknown: 'Unknown',
@@ -920,21 +1099,24 @@ const en: Dict = {
     msgHolderGone: 'The port is no longer held — restarting…'
   },
   dshMgr: {
+    /** DSH manager vertical tab titles. */
+    tabOverview: 'Overview',
+    tabPlugins: 'Plugins',
     emptyError: '@deepseek-ai/dsh is not installed',
     installHint: 'npm install @deepseek-ai/dsh@0.1.6-alpha.2',
     recheck: 'Re-check',
     alertNoPnpm: 'pnpm not found',
     alertNoPnpmDesc:
       'dsh installs / uninstalls / updates plugins via pnpm. Run npm install -g pnpm first, then click Refresh.',
-    profileLabel: 'profile',
-    profilePlaceholder: 'web',
-    switchRefresh: 'Apply',
-    profileTemplatesHint:
-      'dsh ships templates: web / acp / headless / sdk; first use is auto-initialized by dsh',
+    infoRunPath: 'dsh run path',
+    infoProfileDir: 'profile dir',
     verTag: 'profile: {profile}',
-    updateAll: 'Update all via npm',
+    updateAll: 'Update all',
     checking: 'Checking for updates…',
-    profileDir: 'profile dir: {dir} · plugin management via dsh plugin (pnpm)',
+    recheckUpdate: 'Check updates',
+    allUpToDate: 'All plugins are up to date',
+    profileNote:
+      'Plugins are installed / uninstalled / updated inside this profile dir via dsh plugin (pnpm)',
     launchToken: 'dsh token',
     tokenSourcePage: 'from running page {id}',
     tokenNoPage:
@@ -976,6 +1158,7 @@ const en: Dict = {
     msgUninstalled: 'Uninstalled {name}',
     msgUpdated: 'Updated',
     msgUpdateAllDone: 'Batch-updated via npm',
+    msgUpdatedAll: 'Updated {n} plugin(s)',
     msgInstallFail: 'Install failed',
     msgUninstallFail: 'Uninstall failed',
     msgUpdateFail: 'Update failed',
@@ -994,9 +1177,10 @@ const en: Dict = {
     emptyError: 'openclaw CLI not found',
     setupHint: 'npm run setup:openclaw',
     recheck: 'Re-check',
-    verTag: 'Bundled latest',
-    cliPath: 'CLI: {path}',
-    homeDir: 'Config dir (OpenClaw Home): {dir}',
+    verTag: 'Bundled runtime',
+    infoCli: 'CLI path',
+    infoHome: 'OpenClaw Home',
+    infoPort: 'Gateway port',
     gatewayToken: 'Gateway token',
     tokenEnv: 'Env var',
     tokenConfig: 'Config file',
@@ -1008,7 +1192,7 @@ const en: Dict = {
     retry: 'Retry',
     alertTitle: 'Auto-ready on first launch — no manual auth needed',
     alertDesc:
-      'When ~/.openclaw/openclaw.json is missing the container writes a minimal {gateway:{mode:"local"}}; with no token the gateway auto-generates a runtime token and pairs the local device, so the Control UI root opens directly. Channels / models still need openclaw onboard in the terminal. The container only starts/stops the gateway and embeds the page.',
+      'When ~/.openclaw/openclaw.json is missing the container writes a minimal config (gateway.mode=local); with no token the gateway auto-generates a runtime token and pairs the local device, so the Control UI root opens directly. Channels / models still need openclaw onboard in the terminal — the container only starts/stops the gateway and embeds the page.',
     openclawTerminal: 'Open terminal in OpenClaw Home',
     msgTokenCopied: 'Token copied to clipboard',
     msgCopyFail: 'Copy failed; please select it manually',
@@ -1091,6 +1275,7 @@ const en: Dict = {
     closeAllConfirmBtn: 'Close all',
     emptyHint: 'Click a panel’s "Terminal" button to open an embedded shell here',
     collapsed: 'Terminal (click to expand, draggable)',
+    resize: 'Drag to resize the terminal height, double-click to reset',
     rootTitle: 'Container root'
   },
   palette: {
@@ -1172,17 +1357,21 @@ const en: Dict = {
     modReady: 'Configured',
     modTodo: 'Not set',
     modPagesTitle: 'Page manager',
-    modPagesDesc: 'Install pages from Git / local folder; start/stop, port and env dir config in one place.',
+    modPagesDesc:
+      'Install pages from Git / local folder; start/stop, port and env dir config in one place.',
     modExternalTitle: 'External sites',
-    modExternalDesc: 'Save frequent URLs as named entries, preview them embedded from the top switcher.',
+    modExternalDesc:
+      'Save frequent URLs as named entries, preview them embedded from the top switcher.',
     modDshTitle: 'DSH manager',
     modDshDesc: 'Install / update / uninstall plugins per profile; view and copy the dsh token.',
     modOpenclawTitle: 'OpenClaw manager',
-    modOpenclawDesc: 'Initialize the gateway, generate and manage the local token, start/stop the embedded page.',
+    modOpenclawDesc:
+      'Initialize the gateway, generate and manage the local token, start/stop the embedded page.',
     modSettingsTitle: 'Settings',
     modSettingsDesc: 'Default view, theme, language, launch-at-startup, env and download folders.',
     modHelpTitle: 'About & updates',
-    modHelpDesc: 'Check version updates for container / bundled Node / DSH / OpenClaw and upgrade in one click.',
+    modHelpDesc:
+      'Check version updates for container / bundled Node / DSH / OpenClaw and upgrade in one click.',
     enterLabel: 'Open'
   }
 }

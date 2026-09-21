@@ -189,7 +189,29 @@ const zh: Dict = {
   'upd.openclawUpToDate': 'OpenClaw 已是最新（{after}）',
   'upd.localNoAuto': '本地项目不支持自动更新，请在其仓库拉取新版后重装/复制',
   'upd.builtinFollowsContainer': '容器内置页面，随桌面控制台源码一起更新',
-  'upd.unknownChannel': '未知的更新方式'
+  'upd.unknownChannel': '未知的更新方式',
+
+  // #15 配置快照 / 迁移包
+  'snapshot.exportTitle': '导出迁移包',
+  'snapshot.importTitle': '导入迁移包',
+  'snapshot.zipFilter': '迁移包 (zip)',
+  'snapshot.noPages': '没有可导出的页面清单，请先导入至少一个项目',
+  'snapshot.exported': '迁移包已导出：{path}',
+  'snapshot.exportFail': '导出迁移包失败：{err}',
+  'snapshot.importFail': '导入迁移包失败：{err}',
+  'snapshot.badArchive': '迁移包格式无效或缺少 manifest.json',
+  'snapshot.restored': '已导入迁移包，恢复 {n} 个页面配置',
+  // #18 崩溃守护分级退出码
+  'page.logEngineMismatch':
+    '[container] 依赖引擎版本不匹配（EBADENGINE），自动重启无意义，已停止重试',
+  'page.logReclaimRetry':
+    '[container] 退出码 78（资源被占用），已清理残留进程并立即重试，不计入崩溃预算',
+  // #20 资源超限角标
+  'tray.tooltipResource': '桌面控制台 · 有页面资源占用超限',
+  // #21 网络诊断向导（步骤标签由渲染层按 step.id 本地化）
+  'net.proxyNone': '未检测到代理环境变量',
+  'net.reachable': '可达（{ms}ms）',
+  'net.unreachable': '不可达：{err}'
 }
 
 const en: Dict = {
@@ -372,7 +394,29 @@ const en: Dict = {
     'Local projects do not support auto-update; pull the new version in their repo, then reinstall/copy',
   'upd.builtinFollowsContainer':
     'Built-in container page — updates with the desktop container source',
-  'upd.unknownChannel': 'Unknown update channel'
+  'upd.unknownChannel': 'Unknown update channel',
+
+  // #15 config snapshot / migration package
+  'snapshot.exportTitle': 'Export migration package',
+  'snapshot.importTitle': 'Import migration package',
+  'snapshot.zipFilter': 'Migration package (zip)',
+  'snapshot.noPages': 'No page manifest to export — import at least one project first',
+  'snapshot.exported': 'Migration package exported: {path}',
+  'snapshot.exportFail': 'Failed to export the migration package: {err}',
+  'snapshot.importFail': 'Failed to import the migration package: {err}',
+  'snapshot.badArchive': 'The migration package is invalid or missing manifest.json',
+  'snapshot.restored': 'Migration package imported — restored {n} page configs',
+  // #18 crash guard exit-code tiers
+  'page.logEngineMismatch':
+    '[container] Dependency engine version mismatch (EBADENGINE); restarting is pointless, retries stopped',
+  'page.logReclaimRetry':
+    '[container] Exit code 78 (resource busy); stale process reclaimed and retried immediately, without burning the crash budget',
+  // #20 over-budget tray badge
+  'tray.tooltipResource': 'Desktop Console · a page is over its resource budget',
+  // #21 network diagnostic wizard (step labels localized by the renderer via step.id)
+  'net.proxyNone': 'No proxy environment variables detected',
+  'net.reachable': 'Reachable ({ms}ms)',
+  'net.unreachable': 'Unreachable: {err}'
 }
 
 /** Exported so tests can assert the two languages stay key-for-key in sync. */

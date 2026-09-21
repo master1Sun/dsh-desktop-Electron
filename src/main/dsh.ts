@@ -408,12 +408,40 @@ export async function updateDshPlugin(
     return msg('dsh.updatedTo', { spec: installSpec })
   }
   const s = validateNpmSpec(name)
-  await dshPluginForward(['update', s], profile)
+  await dshPluginForward(['update', s, '--latest'], profile)
   return msg('dsh.npmUpdated', { spec: s })
 }
 
+/**
+ * Update every plugin the check flagged as behind, each through the channel the check picked
+ * (npm → `pnpm update <name> --latest`; git → re-add the winning `repo#<tag>`, which also
+ * covers flipping an npm dep onto a newer git tag). Sequential on purpose: dsh/pnpm reconcile the
+ * same profile dir and must not run concurrently. Surfaces per-plugin failures in the log tail.
+ */
 export async function updateAllDshPlugins(profile = DEFAULT_PROFILE): Promise<string> {
-  return (await dshPluginForward(['update', '--latest'], profile)).slice(-2000)
+  const current = new Map(listDshPlugins(profile).map((p) => [p.name, p.version]))
+  const targets = (await checkDshPluginUpdates(profile)).filter((u) => u.updateAvailable)
+  if (!targets.length) return ''
+  const done: string[] = []
+  const failed: string[] = []
+  for (const u of targets) {
+    try {
+      // Newest is on npm but the dep is currently git-pinned: `pnpm update` won't drop the git
+      // source, so replace it with the registry version instead (the mirror of an npm→git flip).
+      const pinnedToGit = !!parseGitSpec(current.get(u.name) || '')
+      if (u.channel === 'npm' && pinnedToGit && u.latest) {
+        const spec = `${u.name}@${u.latest}`
+        await installDshPlugin(spec, profile)
+        done.push(msg('dsh.npmUpdated', { spec }))
+      } else {
+        done.push(await updateDshPlugin(u.name, u.channel || 'npm', u.gitUrl, profile))
+      }
+    } catch (err) {
+      failed.push(`${u.name}: ${(err as Error).message}`)
+    }
+  }
+  if (!done.length) throw new Error(failed.join('\n') || msg('dsh.unavailable'))
+  return [...done, ...failed].join('\n').slice(-2000)
 }
 
 const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
@@ -500,41 +528,108 @@ async function npmLatestVersion(name: string): Promise<string> {
   return res.code === 0 ? res.stdout.trim().replace(/^v/, '') : ''
 }
 
+/** Strip npm range operators / a leading `v` so a `^1.2.3` range reads as `1.2.3`. */
+function cleanVersion(s: string): string {
+  return s.replace(/^[\^~>=<*v]+/i, '').trim()
+}
+
+function isSemver(s: string): boolean {
+  return /^\d+\.\d+\.\d+/.test(s)
+}
+
+/** A git-resolvable repo URL from an npm `repository.url`, or null when unrecognised. */
+function normalizeRepoUrl(raw: string): string | null {
+  const s = (raw || '').trim().replace(/^git\+/i, '')
+  if (!s) return null
+  const gh = /^(?:github[:/]|https?:\/\/github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(s)
+  if (gh) return `https://github.com/${gh[1]}.git`
+  if (/^(?:https?|ssh|git):\/\//i.test(s) || /^[\w.-]+@[\w.-]+:/i.test(s)) return s
+  return null
+}
+
+/** `npm view <name> repository.url` — the git repo behind an npm package ('' when absent). */
+async function npmRepositoryUrl(name: string): Promise<string> {
+  const res = await runCli(
+    'npm',
+    ['view', name, 'repository.url', '--registry', NPM_REGISTRY_MIRROR],
+    { timeoutMs: 30_000, shell: process.platform === 'win32' }
+  )
+  return res.code === 0 ? res.stdout.trim().replace(/^["']|["']$/g, '') : ''
+}
+
+/** Semver currently installed per the profile, or null when pinned to a sha / branch. */
+function installedSemverOf(raw: string, git: { ref?: string } | null): string | null {
+  const v = cleanVersion(git ? git.ref || '' : raw)
+  return isSemver(v) ? v : null
+}
+
 /**
- * New-version hints for every profile plugin: npm deps are compared against the
- * mirror registry's latest (semver); git deps are compared only against the remote's latest
- * semver tag (not HEAD). A git dep with no semver tags yields no hint. The `channel` field
- * records which update path the dep should take, so the UI can route "可更新" to the right one.
- * Failed lookups yield no hint instead of an error.
+ * Newest-version hint for ONE plugin, weighing both sources: the npm mirror's latest and the
+ * backing git repo's newest semver tag. The higher version wins and sets `channel` (npm preferred
+ * on an exact tie); `gitUrl` carries the `repo#<tag>` spec so the update — including flipping an
+ * npm-pinned plugin onto a newer git tag — knows where to install from. sha-/branch-pinned git
+ * deps keep the prior "did the newest tag move?" signal rather than a cross-source comparison,
+ * since a bare sha/branch has no semver to weigh against npm. Any failed lookup omits that
+ * source rather than erroring, so one unreachable host never blanks the whole hint.
+ */
+async function describePluginUpdate(p: DshPluginInfo): Promise<DshPluginUpdate> {
+  const gitDep = parseGitSpec(p.version)
+  const installedSem = installedSemverOf(p.version, gitDep)
+  const repo = gitDep?.repo || normalizeRepoUrl(await npmRepositoryUrl(p.name))
+  const [npmRaw, tag] = await Promise.all([
+    npmLatestVersion(p.name),
+    repo ? latestGitTag(repo) : Promise.resolve(null)
+  ])
+  const npmSem = isSemver(cleanVersion(npmRaw)) ? cleanVersion(npmRaw) : null
+  const gitSem = tag && isSemver(cleanVersion(tag.version)) ? cleanVersion(tag.version) : null
+
+  // sha- or branch-pinned git dep: only report whether the repo's newest tag differs.
+  if (gitDep && !installedSem && tag && repo) {
+    const moved = (gitDep.ref || '').toLowerCase() !== tag.sha.toLowerCase()
+    return moved
+      ? {
+          name: p.name,
+          updateAvailable: true,
+          latest: tag.version,
+          channel: 'git',
+          gitUrl: `${repo}#${tag.version}`
+        }
+      : { name: p.name, updateAvailable: false, channel: 'git' }
+  }
+
+  let best: { ver: string; channel: DshUpdateChannel; gitUrl?: string } | null = null
+  if (npmSem) best = { ver: npmSem, channel: 'npm' }
+  if (gitSem && (!best || isNewerVersion(best.ver, gitSem)))
+    best = {
+      ver: gitSem,
+      channel: 'git',
+      gitUrl: repo && tag ? `${repo}#${tag.version}` : undefined
+    }
+  if (!best) return { name: p.name, updateAvailable: false, channel: gitDep ? 'git' : 'npm' }
+
+  const updateAvailable = installedSem ? isNewerVersion(installedSem, best.ver) : false
+  if (!updateAvailable) return { name: p.name, updateAvailable: false, channel: best.channel }
+  return {
+    name: p.name,
+    updateAvailable: true,
+    latest: best.channel === 'git' && tag ? tag.version : best.ver,
+    channel: best.channel,
+    gitUrl: best.gitUrl
+  }
+}
+
+/**
+ * New-version hints for every profile plugin, each comparing npm and git together and keeping the
+ * newest (see describePluginUpdate). The `channel`/`gitUrl` fields route "可更新" to the winning
+ * source so 全部更新 installs exactly what the check advertised.
  */
 export async function checkDshPluginUpdates(profile = DEFAULT_PROFILE): Promise<DshPluginUpdate[]> {
   const plugins = listDshPlugins(profile).filter((p) => p.source === 'profile')
   return Promise.all(
-    plugins.map(async (p): Promise<DshPluginUpdate> => {
-      const git = parseGitSpec(p.version)
-      try {
-        if (git) {
-          // git deps: only semver tags matter — never compare HEAD shas
-          const tag = await latestGitTag(git.repo)
-          if (!tag) return { name: p.name, updateAvailable: false, channel: 'git' }
-          let updateAvailable: boolean
-          if (git.isSha) updateAvailable = (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
-          else if (git.ref) {
-            const instVer = git.ref.replace(/^v/i, '')
-            updateAvailable = /^\d/.test(instVer)
-              ? isNewerVersion(instVer, tag.version)
-              : (git.ref || '').toLowerCase() !== tag.sha.toLowerCase()
-          } else updateAvailable = false
-          return { name: p.name, updateAvailable, latest: tag.version, channel: 'git' }
-        }
-        const latest = await npmLatestVersion(p.name)
-        if (latest && isNewerVersion(p.version, latest))
-          return { name: p.name, updateAvailable: true, latest, channel: 'npm' }
-        return { name: p.name, updateAvailable: false, channel: 'npm' }
-      } catch {
-        return { name: p.name, updateAvailable: false }
-      }
-    })
+    plugins.map(
+      (p): Promise<DshPluginUpdate> =>
+        describePluginUpdate(p).catch(() => ({ name: p.name, updateAvailable: false }))
+    )
   )
 }
 

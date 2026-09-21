@@ -19,24 +19,30 @@
 
 /* ---- frosted glass surfaces -------------------------------------------------
    `.glass` — primary floating surface (panels, dialogs, cards).
-   `.glass-soft` — lighter inset surface (rows, sub-cards, inputs). */
+   `.glass-soft` — lighter inset surface (rows, sub-cards, inputs).
+   Tint alpha (--glass-tint-a) and saturation both scale with --glass-blur, so the
+   settings slider visibly changes the frosting instead of blurring an invisible
+   backdrop behind a near-opaque fill. */
 .glass {
-  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a));
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
   border-radius: var(--radius-lg, 16px);
-  -webkit-backdrop-filter: blur(30px) saturate(140%);
-  backdrop-filter: blur(30px) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
+    saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
   box-shadow:
     var(--shadow),
     0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent) inset,
     0 1px 0 0 color-mix(in srgb, #ffffff 14%, transparent) inset;
 }
 .glass-soft {
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.98));
   border: 1px solid var(--border);
   border-radius: var(--radius-md, 12px);
-  -webkit-backdrop-filter: blur(20px) saturate(125%);
-  backdrop-filter: blur(20px) saturate(125%);
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur, 30px) * 0.667))
+    saturate(calc(1.15 + var(--glass-blur-n, 30) / 100));
+  backdrop-filter: blur(calc(var(--glass-blur, 30px) * 0.667))
+    saturate(calc(1.15 + var(--glass-blur-n, 30) / 100));
 }
 
 /* ---- neon title -------------------------------------------------------------
@@ -251,11 +257,100 @@ html.light .aurora .blob {
    of an opaque block — the dark-mode gap the other surfaces already fixed. */
 .el-input__wrapper,
 .el-textarea__inner {
-  background: color-mix(in srgb, var(--surface) 85%, transparent);
-  -webkit-backdrop-filter: blur(8px) saturate(120%);
-  backdrop-filter: blur(8px) saturate(120%);
+  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) + 0.1));
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur, 30px) * 0.267)) saturate(120%);
+  backdrop-filter: blur(calc(var(--glass-blur, 30px) * 0.267)) saturate(120%);
 }
 html.dark .el-input__wrapper,
 html.dark .el-textarea__inner {
-  background: color-mix(in srgb, var(--surface) 68%, transparent);
+  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) - 0.12));
+}
+
+/* ---- compact corner toasts (ElMessage) --------------------------------------
+   Placement (bottom-right) + grouping are set globally on the ConfigProvider in
+   App.vue; EP anchors and stacks them upward there on its own. This only trims the
+   surface into a *small* toast: snug padding, 12px text, a capped width so long text
+   wraps in the corner instead of spanning the window, and a lighter shadow. Toasts
+   mount on <body>, so these rules must stay global (unscoped). */
+.el-message {
+  min-width: 0;
+  max-width: min(340px, calc(100vw - 32px));
+  padding: 6px 10px;
+  gap: 6px;
+  border-radius: 9px;
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+.el-message__content,
+.el-message p {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.el-message .el-message__icon {
+  font-size: 14px;
+}
+.el-message .el-message__closeBtn {
+  font-size: 12px;
+}
+
+/* ---- vertical tab rail (`.v-tabs`) -----------------------------------------
+   Shared left-rail treatment for the Settings / Help / Pages / DSH panels: a
+   compact icon+label column, an accent wash on the active/hovered item, and the
+   Element Plus hairline between nav and content dropped so the two columns read
+   as one card. Applied via `class="v-tabs"` on an `<el-tabs tab-position="left">`;
+   the doubled `.v-tabs.v-tabs` beats EP's `.el-tabs--left .el-tabs__item.is-left`
+   (specificity 0,3,0) so icon+label truly sit left. `.tab-label` is the row. */
+.v-tabs {
+  display: flex;
+  align-items: stretch;
+  min-height: 240px;
+}
+.v-tabs .el-tabs__header {
+  margin: 0 16px 0 0;
+}
+.v-tabs .el-tabs__nav-wrap::after {
+  display: none;
+}
+.v-tabs .el-tabs__nav {
+  padding: 2px;
+}
+.v-tabs.v-tabs .el-tabs__item.is-left {
+  justify-content: flex-start;
+  text-align: left;
+}
+.v-tabs .el-tabs__item {
+  height: auto;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.v-tabs .el-tabs__item + .el-tabs__item {
+  margin-top: 8px;
+}
+.v-tabs .el-tabs__item:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.v-tabs .el-tabs__item.is-active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+.v-tabs .el-tabs__active-bar {
+  display: none;
+}
+.v-tabs .el-tabs__content {
+  flex: 1;
+  overflow: hidden;
+}
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.tab-label .el-icon {
+  font-size: 15px;
 }
