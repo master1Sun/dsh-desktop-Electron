@@ -7,6 +7,7 @@ import MenuPanelContent from './components/MenuPanelContent.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import TerminalDrawer from './components/TerminalDrawer.vue'
 import CliTerminalView from './components/CliTerminalView.vue'
+import SetupGate from './components/SetupGate.vue'
 import HomeView from './views/HomeView.vue'
 import { usePagesStore, type PageState } from './stores/pages'
 import { useSettingsStore } from './stores/settings'
@@ -259,7 +260,16 @@ function cancelStart(): void {
  */
 async function restoreDefaultView(): Promise<boolean> {
   const dv = settingsStore.settings.defaultView
-  if (activePageId.value || dv.kind !== 'page') return false
+  if (activePageId.value || dv.kind === 'none') return false
+  // A saved external address can be the default view too: point the webview straight at
+  // its URL. `site?.id` keeps the page-switcher row highlighted; a since-deleted site just
+  // loses the highlight (the view still restores).
+  if (dv.kind === 'external') {
+    if (!dv.url) return false
+    const site = settingsStore.settings.externalSites.find((s) => s.url === dv.url)
+    previewExternalUrl(dv.url, site?.id)
+    return true
+  }
   const page = pagesStore.pages.find((p) => p.id === dv.pageId)
   if (!page) return false
   // A CLI page owns the surface as soon as it is activated — no port to wait for.
@@ -772,6 +782,9 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
       <TerminalDrawer v-if="hasBridge" v-show="store.open" />
 
       <CommandPalette v-model="paletteOpen" :commands="commands" />
+
+      <!-- First-run dependency gate: a blocking overlay until the built-in Node is present. -->
+      <SetupGate />
     </div>
   </el-config-provider>
 </template>

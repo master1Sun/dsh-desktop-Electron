@@ -7,7 +7,7 @@ import { PageRegistry } from './pages'
 import { registerIpc } from './ipc'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './openclaw'
 import { pnpmBinDirs } from './dsh'
-import { getSettings, resolvePagesDir, resolveProjectDir } from './store'
+import { getSettings, resolvePagesDir, resolveProjectDir, applyLaunchAtStartup } from './store'
 import { getNodeRuntimeInfo } from './node-runtime'
 import { m, onLocaleChanged, registerLocaleSource } from './i18n'
 import { installFileLogger } from './logger'
@@ -86,6 +86,9 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let registry: PageRegistry | null = null
 let isQuitting = false
+// True when this run was kicked off by the OS login item (--autostart / wasOpenedAtLogin):
+// the window is then created but kept hidden so the app settles straight into the tray.
+let startHidden = false
 
 // A throw inside a main-process event callback (e.g. node-pty's internal onData/exit pump,
 // which isn't wrapped by an ipcMain.handle try/catch) would otherwise terminate Electron.
@@ -121,7 +124,9 @@ function markBootOk(): void {
 function ensureUnpackedForUpdate(): void {
   if (!app.isPackaged) return
   try {
-    const resources = dirname(app.getPath('exe')) // <installDir>/resources
+    // The exe sits at <installDir>\<name>.exe; bundled app.asar(.unpacked) and our updates
+    // folder both live one level down under <installDir>\resources (matches updatesRoot()).
+    const resources = join(dirname(app.getPath('exe')), 'resources')
     const appPath = app.getAppPath()
     if (!appPath.startsWith(join(resources, 'updates'))) return
     const src = join(resources, 'app.asar.unpacked')
@@ -153,7 +158,10 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
+  mainWindow.on('ready-to-show', () => {
+    // A login-item launch stays in the tray; the user opens it from there when wanted.
+    if (!startHidden) mainWindow?.show()
+  })
 
   // push OS-maximize state (incl. snap/drag) so the custom title bar updates its icon
   const pushMaximized = (): void => {
@@ -288,6 +296,12 @@ if (!gotLock) {
     electronApp.setAppUserModelId('com.dsh.desktop-container')
     ensureUnpackedForUpdate()
     markBootOk()
+
+    // Detect a boot-triggered launch before the window is created so it can come up hidden,
+    // and re-assert the OS registration so it always matches the persisted setting (a manual
+    // registry edit or an update that reset the login item self-heals on the next start).
+    startHidden = process.argv.includes('--autostart') || app.getLoginItemSettings().wasOpenedAtLogin
+    applyLaunchAtStartup(getSettings().launchAtStartup)
     app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
     // Embedded <webview> guests: keep window.open / target=_blank inside the SAME view

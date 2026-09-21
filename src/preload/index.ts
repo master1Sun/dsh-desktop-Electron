@@ -1,12 +1,20 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
-import { IPC, type InstallProgress, type PageProgress, type UpdateCheckResult, type UpdateProgress } from '../shared/types'
+import {
+  IPC,
+  type BuiltinKind,
+  type InstallProgress,
+  type PageProgress,
+  type UpdateCheckResult,
+  type UpdateProgress
+} from '../shared/types'
 
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
   nodeListVersions: () => ipcRenderer.invoke(IPC.ListNodeVersions),
   nodeUpdate: (version: string) => ipcRenderer.invoke(IPC.UpdateNodeRuntime, version),
   nodeRestoreBundled: () => ipcRenderer.invoke(IPC.RestoreBundledNode),
+  provisionBuiltin: (kind: BuiltinKind) => ipcRenderer.invoke(IPC.ProvisionBuiltin, kind),
   onNodeUpdateProgress: (cb: (p: UpdateProgress) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, p: UpdateProgress): void => cb(p)
     ipcRenderer.on(IPC.OnNodeUpdateProgress, listener)

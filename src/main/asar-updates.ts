@@ -3,6 +3,7 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -26,20 +27,68 @@ import { isNewer } from './update-service'
  * Over-the-air asar updates. The publisher (scripts/publish-update.mjs) commits the
  * compiled app.asar + version.txt to an orphan `release` branch; a packaged client
  * fetches that branch with its own git credentials, extracts the artifacts into
- * <installDir>/resources/updates/, and boot.cjs swaps the running asar on next launch.
+ * <installDir>/resources/updates/<commit>/app.asar, and boot.cjs swaps the running asar on
+ * next launch. Each release lives in its own commit folder holding a literal `app.asar`, so
+ * Electron's sibling `app.asar.unpacked` convention stays valid and a newer update can stage a
+ * different file rather than overwrite the running (Windows-locked) asar.
  *
  * The artifact is large, so the download is streamed and reports progress rather than
  * slurping a 512 MB buffer through a blocking `spawnSync` (which froze the whole main
- * process). Extraction writes to a commit-scoped `.part` file that survives an
- * interrupted attempt: a later run resumes from its current size instead of rewriting
- * from zero (断点续传), and only renames onto `app.asar.pending` once the byte count
- * matches — so boot.cjs can never pick up a truncated file.
+ * process). Extraction writes to a `.part` file that survives an interrupted attempt: a later
+ * run resumes from its current size instead of rewriting from zero (断点续传), and only
+ * renames onto `app.asar` once the byte count matches — so boot.cjs can never pick up a
+ * truncated file.
  */
 
 const RELEASE_BRANCH = 'release'
 
 /** Progress is byte-accurate; throttle IPC emissions so a fast local disk doesn't flood it. */
 const PROGRESS_INTERVAL_MS = 150
+
+/** Same floor boot.cjs uses: anything smaller is a truncated download, never a bootable update. */
+const MIN_ASAR_BYTES = 1024 * 1024
+
+export interface StagedAsarUpdate {
+  version: string
+  commit: string
+}
+
+/**
+ * Read update-meta.json and report a fully-staged (downloaded, size-verified) asar that
+ * boot.cjs has not swapped in yet. When the pending file was deleted or truncated since
+ * the meta was written, the stale pendingAsar entry is cleared so the row falls back to
+ * a normal "有更新可下载" state instead of offering a restart into nothing.
+ */
+export function readStagedUpdate(): StagedAsarUpdate | null {
+  const metaFile = join(updatesRoot(), 'update-meta.json')
+  let meta: {
+    pendingAsar?: string | null
+    currentAsar?: string | null
+    version?: string
+    commit?: string
+    broken?: boolean
+  } | null = null
+  try {
+    meta = JSON.parse(readFileSync(metaFile, 'utf-8'))
+  } catch {
+    return null
+  }
+  if (!meta?.pendingAsar || meta.broken) return null
+  const pending = join(updatesRoot(), meta.pendingAsar)
+  let size = 0
+  try {
+    size = statSync(pending).size
+  } catch {
+    size = 0
+  }
+  if (size >= MIN_ASAR_BYTES) return { version: meta.version || '', commit: meta.commit || '' }
+  try {
+    writeFileSync(metaFile, JSON.stringify({ ...meta, pendingAsar: null }))
+  } catch {
+    /* best-effort; next check just repeats the detection */
+  }
+  return null
+}
 
 export type ProgressCb = (p: UpdateProgress) => void
 
@@ -211,19 +260,29 @@ async function streamBlob(
   }
 }
 
-/** Drop partial files left by prior attempts against other commits, keeping only `keep`. */
-function pruneStaleParts(root: string, keep: string): void {
+/** Best-effort sweep of superseded release folders, keeping the commit-named ones in `keep`. */
+function pruneOldReleases(root: string, keep: Set<string>): void {
   try {
     for (const f of readdirSync(root)) {
-      if (f.startsWith('app.asar.') && f.endsWith('.part') && join(root, f) !== keep)
-        rmSync(join(root, f), { force: true })
+      if (f === 'release.git' || keep.has(f)) continue
+      const p = join(root, f)
+      try {
+        if (!statSync(p).isDirectory()) continue
+      } catch {
+        continue
+      }
+      try {
+        rmSync(p, { recursive: true, force: true })
+      } catch {
+        /* running / Windows-locked — retried on the next successful update */
+      }
     }
   } catch {
     /* best-effort cleanup */
   }
 }
 
-/** Extract app.asar of the tip commit into updates/, staged as pending. Resumable + progress. */
+/** Extract app.asar of the tip commit into updates/<commit>/app.asar, staged as pending. */
 async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: ProgressCb): Promise<void> {
   const root = updatesRoot()
   mkdirSync(root, { recursive: true })
@@ -231,9 +290,11 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
   const total = Number(runGit(['--git-dir', gitDir(), 'cat-file', '-s', rev]).trim())
   if (!Number.isFinite(total) || total <= 0) throw new Error(m('git.asarSizeUnknown'))
 
-  // Commit-scoped so a stale partial from a different release is never resumed into.
-  const part = join(root, `app.asar.${tip.commit}.part`)
-  pruneStaleParts(root, part)
+  // One folder per release; the partial lives inside it, so a stale partial from a different
+  // release is never resumed into and a running asar is never overwritten in place.
+  const dir = join(root, tip.commit)
+  mkdirSync(dir, { recursive: true })
+  const part = join(dir, 'app.asar.part')
 
   let resumeFrom = 0
   if (existsSync(part)) {
@@ -247,14 +308,34 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
   if (statSync(part).size !== total)
     throw new Error(m('git.asarSizeMismatch', { want: total, got: statSync(part).size }))
 
-  const pending = join(root, 'app.asar.pending')
-  rmSync(pending, { force: true })
-  // Rename-after-complete: a half-written file can never be picked up as .pending.
-  renameSync(part, pending)
+  const finalAsar = join(dir, 'app.asar')
+  rmSync(finalAsar, { force: true }) // same-commit re-download: replace the prior copy
+  // Rename-after-complete: a half-written file can never be picked up as the pending update.
+  renameSync(part, finalAsar)
+
+  // Preserve the running currentAsar as a rollback record and clear any stale broken flag while
+  // staging the new artifact under its commit-relative path (boot.cjs joins this onto updates/).
+  const metaFile = join(root, 'update-meta.json')
+  let prev: { currentAsar?: string | null } = {}
+  try {
+    prev = JSON.parse(readFileSync(metaFile, 'utf-8'))
+  } catch {
+    /* first update — nothing to preserve */
+  }
   writeFileSync(
-    join(root, 'update-meta.json'),
-    JSON.stringify({ pendingAsar: 'app.asar.pending', version: tip.version, commit: tip.commit })
+    metaFile,
+    JSON.stringify({
+      ...prev,
+      broken: false,
+      pendingAsar: join(tip.commit, 'app.asar'),
+      version: tip.version,
+      commit: tip.commit
+    })
   )
+  // Sweep older release folders we no longer reference; never touch the running/current one.
+  const keep = new Set<string>([tip.commit])
+  if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0])
+  pruneOldReleases(root, keep)
   onProgress?.({ name, phase: 'done', received: total, total, percent: 100 })
 }
 
@@ -271,6 +352,23 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
   }
   try {
     const current = app.getVersion()
+    // A completed download that no restart has consumed yet: surface "立即重启" and skip
+    // the network round-trip entirely — unless the staged version is behind the tip, in
+    // which case the fetch below re-points the row at the newer download.
+    const staged = readStagedUpdate()
+    if (staged && isNewer(current, staged.version)) {
+      return {
+        ...base,
+        ok: true,
+        branch: RELEASE_BRANCH,
+        localHead: current,
+        remoteHead: staged.commit.slice(0, 8),
+        currentVersion: current,
+        latestVersion: staged.version,
+        hasUpdate: false,
+        pendingRestart: true
+      }
+    }
     const tip = await fetchTip(name)
     return {
       ...base,
@@ -280,7 +378,10 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
       remoteHead: tip.commit.slice(0, 8),
       currentVersion: current,
       latestVersion: tip.version,
-      hasUpdate: isNewer(current, tip.version)
+      hasUpdate: isNewer(current, tip.version),
+      // Staged but not newer than what's running (e.g. a rollback install): boot.cjs will
+      // still swap it in, so a restart remains the only pending action.
+      pendingRestart: Boolean(staged)
     }
   } catch (err) {
     return { ...base, error: (err as Error).message }

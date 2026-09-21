@@ -2,6 +2,7 @@ import { ipcMain, shell, BrowserWindow, webContents, nativeTheme, dialog, app } 
 import {
   IPC,
   type IpcResult,
+  type BuiltinKind,
   type DefaultView,
   type DshTokenResult,
   type DshUpdateChannel,
@@ -25,10 +26,11 @@ import {
   resolveDshHome,
   resolveOpenclawHome,
   resolveEnvRoot,
-  resolveInstallDir
+  resolveInstallDir,
+  applyLaunchAtStartup
 } from './store'
 import { installFromGit, installFromLocalDir, removePage } from './installer'
-import { checkUpdates, performUpdate, clearUpdateCache } from './update-service'
+import { checkUpdates, performUpdate, clearUpdateCache, provisionBuiltin } from './update-service'
 import { logsDir } from './logger'
 import { PtyManager } from './pty'
 import {
@@ -155,21 +157,41 @@ export function registerIpc(registry: PageRegistry): void {
   })
 
   ipcMain.handle(IPC.UpdateNodeRuntime, async (e, version: string): Promise<IpcResult> => {
+    // Stream progress back to the requesting window only (mirrors PerformUpdate).
+    const sender = e.sender
+    const onProgress = (p: UpdateProgress): void => {
+      if (!sender.isDestroyed()) sender.send(IPC.OnNodeUpdateProgress, p)
+    }
     try {
-      // Stream progress back to the requesting window only (mirrors PerformUpdate).
-      const sender = e.sender
-      const onProgress = (p: UpdateProgress): void => {
-        if (!sender.isDestroyed()) sender.send(IPC.OnNodeUpdateProgress, p)
-      }
       return ok(await updateNodeRuntime(version, onProgress))
     } catch (err) {
       return fail(err)
+    } finally {
+      // Guaranteed terminal event. updateNodeRuntime only emits 'done' on success, but the
+      // window-level top progress bar (stores/tasks) is fed purely by these events — an error
+      // or abort would otherwise leave its row stuck at the last percentage forever. The
+      // panels clear their own inline bars via their awaited promise's finally, so this extra
+      // 'done' is an idempotent cleanup that only drops the persistent top-bar row.
+      onProgress({ name: 'Node', phase: 'done' })
     }
   })
 
   ipcMain.handle(IPC.RestoreBundledNode, async (): Promise<IpcResult> => {
     try {
       return ok(await restoreBundledNode())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // First-run / on-demand install of a built-in agent runtime (dsh / openclaw). Streams
+  // nothing (a 15-min `npm install -g` has no byte progress), so the renderer tracks it as an
+  // indeterminate top-bar task; clear the cache so the panel re-reads the now-present version.
+  ipcMain.handle(IPC.ProvisionBuiltin, async (_e, kind: BuiltinKind): Promise<IpcResult> => {
+    try {
+      const res = await provisionBuiltin(kind)
+      clearUpdateCache()
+      return ok(res)
     } catch (err) {
       return fail(err)
     }
@@ -218,6 +240,9 @@ export function registerIpc(registry: PageRegistry): void {
         return ok(dirName)
       } catch (err) {
         return fail(err)
+      } finally {
+        // See UpdateNodeRuntime: guarantee a terminal event so the top bar never sticks on error.
+        onProgress({ op: 'git', phase: 'done', percent: 100 })
       }
     }
   )
@@ -249,6 +274,9 @@ export function registerIpc(registry: PageRegistry): void {
         return ok(dirName)
       } catch (err) {
         return fail(err)
+      } finally {
+        // See UpdateNodeRuntime: guarantee a terminal event so the top bar never sticks on error.
+        onProgress({ op: 'dir', phase: 'done', percent: 100 })
       }
     }
   )
@@ -329,6 +357,7 @@ export function registerIpc(registry: PageRegistry): void {
         defaultView?: DefaultView
         openExternalIn?: 'embedded' | 'system-browser'
         minimizeToTray?: boolean
+        launchAtStartup?: boolean
         autoStartPages?: string[]
         theme?: 'auto' | 'light' | 'dark'
         locale?: 'zh' | 'en'
@@ -345,6 +374,11 @@ export function registerIpc(registry: PageRegistry): void {
         const rest = { ...partial }
         delete rest.defaultView
         if (Object.keys(rest).length) updateSettings(rest)
+        // Reflect an auto-start change into the OS login item right away, so the toggle takes
+        // effect on the very next boot rather than only when the app next starts.
+        if (typeof partial.launchAtStartup === 'boolean') {
+          applyLaunchAtStartup(partial.launchAtStartup)
+        }
         // The tray menu / window caption are rendered by the main process, so a language
         // change is fanned out to them explicitly (see main/index.ts). container.json text
         // is resolved in the *active* language when a manifest is read, so the cached metas
@@ -398,24 +432,31 @@ export function registerIpc(registry: PageRegistry): void {
   surveyTimer.unref?.()
 
   ipcMain.handle(IPC.PerformUpdate, async (_e, target: UpdateCheckResult): Promise<IpcResult> => {
+    // Stream download progress back to the requesting window (see UpdateProgress).
+    const sender = _e.sender
+    const onProgress = (p: UpdateProgress): void => {
+      if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p)
+    }
     try {
-      // Stream download progress back to the requesting window (see UpdateProgress).
-      const sender = _e.sender
-      const onProgress = (p: UpdateProgress): void => {
-        if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p)
-      }
       const res = await performUpdate(target, onProgress)
       clearUpdateCache()
       return ok(res)
     } catch (err) {
       return fail(err)
+    } finally {
+      // See UpdateNodeRuntime: guarantee a terminal event keyed by the same `name` the stream
+      // used, so the persistent top-bar row is dropped even when the update failed.
+      onProgress({ name: target.name, phase: 'done', percent: 100 })
     }
   })
 
   // The container updated its own source: relaunch so the new code runs. before-quit
   // still gets to shut the pages down; --dsh-relaunched bypasses the single-instance lock.
   ipcMain.handle(IPC.RelaunchApp, (): IpcResult => {
-    app.relaunch({ args: [...process.argv.slice(1), '--dsh-relaunched'] })
+    // Drop --autostart: it marks a hidden login launch and would otherwise be inherited by
+    // the relaunched process, leaving the user with a tray-only (seemingly vanished) app.
+    const args = process.argv.slice(1).filter((a) => a !== '--autostart')
+    app.relaunch({ args: [...args, '--dsh-relaunched'] })
     app.exit(0)
     return ok(true)
   })

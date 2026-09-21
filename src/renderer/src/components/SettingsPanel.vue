@@ -145,7 +145,21 @@ const viewOptions = computed(() => {
       label: `${p.name}${p.external ? t('settings.tagExternal') : p.kind === 'dsh' ? t('settings.tagDsh') : p.kind === 'terminal' ? t('settings.tagTerminal') : p.containerPort || p.port ? ` :${p.containerPort || p.port}` : ''}`
     }))
   ]
-  return { plain }
+  // Saved external addresses are default-view candidates too — one row per site, keyed by
+  // its URL (the persisted DefaultView only carries the url, not the site id).
+  const sites = settingsStore.settings.externalSites
+  const extOptions: Option[] = sites.map((s) => ({ value: `ext:${s.url}`, label: s.name }))
+  // A saved default whose site was since deleted still needs a matching option, or the
+  // select would show a blank current value — keep the raw url as a fallback row.
+  const dv = settingsStore.settings.defaultView
+  const orphanUrl = dv.kind === 'external' ? (dv.url || '').trim() : ''
+  if (orphanUrl && !sites.some((s) => s.url === orphanUrl)) {
+    extOptions.push({ value: `ext:${orphanUrl}`, label: orphanUrl })
+  }
+  const groups: { label: string; options: Option[] }[] = extOptions.length
+    ? [{ label: t('settings.externalAddress'), options: extOptions }]
+    : []
+  return { plain, groups }
 })
 
 async function patch(
@@ -188,6 +202,9 @@ function onLocaleChange(next: 'zh' | 'en'): void {
             :label="opt.label"
             :disabled="opt.disabled"
           />
+          <el-option-group v-for="g in viewOptions.groups" :key="g.label" :label="g.label">
+            <el-option v-for="sub in g.options" :key="sub.value" :value="sub.value" :label="sub.label" />
+          </el-option-group>
         </el-select>
         <div class="tip">{{ t('settings.defaultPageTip') }}</div>
       </el-form-item>
@@ -227,6 +244,14 @@ function onLocaleChange(next: 'zh' | 'en'): void {
           "
         />
         <div class="tip">{{ t('settings.minimizeTip') }}</div>
+      </el-form-item>
+
+      <el-form-item :label="t('settings.launchAtStartup')">
+        <el-switch
+          :model-value="settingsStore.settings.launchAtStartup"
+          @update:model-value="patch({ launchAtStartup: $event as boolean })"
+        />
+        <div class="tip">{{ t('settings.launchAtStartupTip') }}</div>
       </el-form-item>
 
       <el-form-item :label="t('settings.crashAutoRestart')">

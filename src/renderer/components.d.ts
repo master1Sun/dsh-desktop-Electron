@@ -18,11 +18,13 @@ declare module 'vue' {
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElButton: typeof import('element-plus/es')['ElButton']
     ElDialog: typeof import('element-plus/es')['ElDialog']
+    ElDivider: typeof import('element-plus/es')['ElDivider']
     ElForm: typeof import('element-plus/es')['ElForm']
     ElFormItem: typeof import('element-plus/es')['ElFormItem']
     ElIcon: typeof import('element-plus/es')['ElIcon']
     ElInput: typeof import('element-plus/es')['ElInput']
     ElOption: typeof import('element-plus/es')['ElOption']
+    ElOptionGroup: typeof import('element-plus/es')['ElOptionGroup']
     ElProgress: typeof import('element-plus/es')['ElProgress']
     ElRadioButton: typeof import('element-plus/es')['ElRadioButton']
     ElRadioGroup: typeof import('element-plus/es')['ElRadioGroup']
@@ -42,7 +44,9 @@ declare module 'vue' {
     PageManager: typeof import('./src/components/PageManager.vue')['default']
     PageSwitcher: typeof import('./src/components/PageSwitcher.vue')['default']
     SettingsPanel: typeof import('./src/components/SettingsPanel.vue')['default']
+    SetupGate: typeof import('./src/components/SetupGate.vue')['default']
     TerminalDrawer: typeof import('./src/components/TerminalDrawer.vue')['default']
+    TopProgressBar: typeof import('./src/components/TopProgressBar.vue')['default']
     WindowControls: typeof import('./src/components/WindowControls.vue')['default']
   }
   export interface GlobalDirectives {

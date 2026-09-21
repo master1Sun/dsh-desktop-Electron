@@ -3,25 +3,32 @@
 // asar BEFORE any application code loads. In dev (`npm run dev`) electron-vite points
 // at out/main/index.js directly and this file never runs — hence the no-op require.
 //
-// The boot-ok marker lives in userData (NOT next to the exe): a NSIS reinstall wipes
+// The marker lives in userData (NOT next to the exe): a NSIS reinstall wipes
 // resources/ including our updates dir, while userData survives — after such a reinstall
 // the stale marker must not let a broken update be retried forever.
+// NOTE: main/index.ts ensureAsciiUserData() pins userData to the ASCII leaf
+// 'dsh-desktop-container' (the Chinese name broke PowerShell/git tooling), so the
+// *current* marker path is ASCII; '桌面控制台' stays in the candidate list only as a
+// legacy fallback for machines migrated before a marker was ever written there.
 const fs = require('node:fs')
 const path = require('node:path')
 
-function appDataDir() {
+function appDataDirs() {
   const home = process.env.USERPROFILE || process.env.HOME || ''
-  return process.platform === 'win32'
-    ? path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), '桌面控制台')
-    : process.platform === 'darwin'
-      ? path.join(home, 'Library', 'Application Support', '桌面控制台')
-      : path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), '桌面控制台')
+  const leaves = ['dsh-desktop-container', '桌面控制台']
+  const base =
+    process.platform === 'win32'
+      ? process.env.APPDATA || path.join(home, 'AppData', 'Roaming')
+      : process.platform === 'darwin'
+        ? path.join(home, 'Library', 'Application Support')
+        : process.env.XDG_CONFIG_HOME || path.join(home, '.config')
+  return leaves.map((leaf) => path.join(base, leaf))
 }
 
 const APP_DIR = __dirname // <installDir>/resources when packaged (boot.cjs + app.asar live side by side)
 const UPDATES_DIR = path.join(APP_DIR, 'updates')
 const META_FILE = path.join(UPDATES_DIR, 'update-meta.json')
-const MARKER_FILE = path.join(appDataDir(), 'dsh-boot-ok-marker')
+const MARKER_FILES = appDataDirs().map((dir) => path.join(dir, 'dsh-boot-ok-marker'))
 
 function readMeta() {
   try {
@@ -40,12 +47,19 @@ function writeMeta(meta) {
   }
 }
 
+/**
+ * The asar to boot: a freshly downloaded pending one, otherwise the last promoted current one.
+ * Falling back to currentAsar is what makes an applied update persist across later launches —
+ * without it every boot after the first silently reverted to the bundled old asar.
+ */
 function resolveTargetApp(meta) {
-  if (!meta || !meta.pendingAsar) return null
-  const pending = path.join(UPDATES_DIR, meta.pendingAsar)
+  if (!meta) return null
+  const name = meta.pendingAsar || meta.currentAsar
+  if (!name) return null
+  const target = path.join(UPDATES_DIR, name)
   try {
-    if (fs.statSync(pending).size < 1024 * 1024) return null // a truncated download must never boot
-    return pending
+    if (fs.statSync(target).size < 1024 * 1024) return null // a truncated download must never boot
+    return target
   } catch {
     return null
   }
@@ -75,11 +89,15 @@ function rollBack(meta) {
 /** True when a previous boot from this exact asar reached app.whenReady at least once. */
 function markerMatches(currentAsar) {
   if (!currentAsar) return false
-  try {
-    return fs.readFileSync(MARKER_FILE, 'utf-8').trim() === path.join(UPDATES_DIR, currentAsar)
-  } catch {
-    return false
-  }
+  const target = path.join(UPDATES_DIR, currentAsar)
+  // Any candidate location holding the expected path counts — see appDataDirs().
+  return MARKER_FILES.some((file) => {
+    try {
+      return fs.readFileSync(file, 'utf-8').trim() === target
+    } catch {
+      return false
+    }
+  })
 }
 
 /**
@@ -124,7 +142,9 @@ function main() {
   if (major >= 30 && typeof app.setAppPath === 'function') {
     // Electron ≥30: official in-process override; app.getAppPath() then reports the new asar.
     app.setAppPath(target)
-    promote(meta)
+    // Only a fresh pending advances current; loading the existing current is a no-op, and an
+    // unconditional promote here would clear currentAsar (pendingAsar is null) and undo the update.
+    if (meta.pendingAsar) promote(meta)
     loadIndex(target)
     return
   }
@@ -135,7 +155,7 @@ function main() {
     loadIndex(APP_DIR)
     return
   }
-  promote(meta)
+  if (meta.pendingAsar) promote(meta)
   require('node:child_process')
     .spawn(process.execPath, [...process.argv.slice(1), '--app-path=' + target, '--dsh-asar-launched'], {
       detached: true,

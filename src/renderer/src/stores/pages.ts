@@ -42,6 +42,8 @@ async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>):
 export const usePagesStore = defineStore('pages', () => {
   const pages = reactive<PageState[]>([])
   const nodeInfo = reactive({ path: '', version: null as string | null, ok: false, override: false })
+  /** True once the first refresh() has actually reported Node; `ok:false` before that just means "unknown". */
+  const nodeInfoLoaded = ref(false)
   const busy = reactive<Record<string, boolean>>({})
   /** Latest startup progress per page (phase + live log tail); cleared once it is up. */
   const progress = reactive<Record<string, PageProgress>>({})
@@ -63,6 +65,7 @@ export const usePagesStore = defineStore('pages', () => {
           window.container.getNodeInfo()
         )
       )
+      nodeInfoLoaded.value = true
     } catch {
       /* keep last */
     }
@@ -188,6 +191,7 @@ export const usePagesStore = defineStore('pages', () => {
   return {
     pages,
     nodeInfo,
+    nodeInfoLoaded,
     busy,
     progress,
     installProgress,

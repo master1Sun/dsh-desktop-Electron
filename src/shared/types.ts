@@ -137,6 +137,8 @@ export interface ContainerSettings {
   defaultView: DefaultView
   openExternalIn: ExternalOpenMode
   minimizeToTray: boolean
+  /** register the app as a Windows login item so it starts at boot (then minimizes to tray) */
+  launchAtStartup: boolean
   autoStartPages: string[]
   lastExternalUrls: string[]
   /** user-saved named external URLs, managed + previewable from the top bar */
@@ -180,6 +182,8 @@ export interface UpdateCheckResult {
   action?: 'pull' | 'reprovision' | 'manual' | 'none' | 'apply-asar'
   /** npm package name backing an npm/builtin row */
   packageName?: string
+  /** container row: the new asar is already downloaded/staged — only a restart is missing */
+  pendingRestart?: boolean
 }
 
 export interface UpdateOutcome {
@@ -264,6 +268,10 @@ export interface InstallProgress {
   total?: number
   /** raw upstream progress line (git), shown as a detail caption */
   message?: string
+  /** external source being downloaded (git repo URL or local source dir) — surfaced in the top bar */
+  source?: string
+  /** target folder name under pages/ once known — lets the top-bar row name the imported project */
+  target?: string
 }
 
 export interface IpcResult<T = unknown> {
@@ -325,6 +333,13 @@ export interface NodeVersionInfo {
   lts: string | false
 }
 
+/**
+ * The two agent runtimes the container can (re)provision at runtime via the bundled npm.
+ * Same channel the 关于与更新 panel's reprovision rows use, so a *missing* built-in gets an
+ * "install" entry point (first-run setup) as well as an "update" one.
+ */
+export type BuiltinKind = 'dsh' | 'openclaw'
+
 export const IPC = {
   GetNodeInfo: 'container:get-node-info',
   ListPages: 'container:list-pages',
@@ -349,6 +364,8 @@ export const IPC = {
   UpdateNodeRuntime: 'container:update-node-runtime',
   /** drop the updated runtime and fall back to the installer-shipped bundled one */
   RestoreBundledNode: 'container:restore-bundled-node',
+  /** install/upgrade a built-in agent runtime (dsh / openclaw) with the bundled npm (BuiltinKind) */
+  ProvisionBuiltin: 'container:provision-builtin',
   /** stream: live progress of an in-flight bundled-Node update (UpdateProgress) */
   OnNodeUpdateProgress: 'container:node-update-progress',
   /** broadcast: live progress of an in-flight update download (UpdateProgress) */

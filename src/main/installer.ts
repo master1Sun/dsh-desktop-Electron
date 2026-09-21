@@ -173,8 +173,6 @@ export async function installFromGit(
   originUrl?: string,
   onProgress?: (p: InstallProgress) => void
 ): Promise<string> {
-  const emit = (p: Partial<InstallProgress>): void =>
-    onProgress?.({ op: 'git', phase: 'preparing', ...p } as InstallProgress)
   const url = validateRepoUrl(repoUrl)
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
   if (!dirName) {
@@ -185,6 +183,10 @@ export async function installFromGit(
   const target = join(pagesDir, dirName)
   if (existsSync(target)) throw new Error(m('dsh.pageExists', { id: dirName }))
   mkdirSync(pagesDir, { recursive: true })
+  // Tag every tick with the external address (`source`) and target folder so the window-level
+  // top progress bar can name the project and show where it is downloading from.
+  const emit = (p: Partial<InstallProgress>): void =>
+    onProgress?.({ op: 'git', phase: 'preparing', source: repoUrl, target: dirName, ...p } as InstallProgress)
   // Deep clone (not --depth 1): a later divergent history needs real merge bases to update.
   emit({ phase: 'preparing' })
   await cloneWithAuthFallback(target, url, (g) =>
@@ -300,8 +302,6 @@ export async function installFromLocalDir(
   originUrl?: string,
   onProgress?: (p: InstallProgress) => void
 ): Promise<string> {
-  const emit = (p: Partial<InstallProgress>): void =>
-    onProgress?.({ op: 'dir', phase: 'preparing', ...p } as InstallProgress)
   if (!existsSync(srcDir) || !existsSync(join(srcDir, '.')))
     throw new Error(m('install.srcMissing', { dir: srcDir }))
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
@@ -309,6 +309,9 @@ export async function installFromLocalDir(
   if (!dirName) throw new Error(m('install.dirNameFail'))
   const target = join(pagesDir, dirName)
   if (existsSync(target)) throw new Error(m('dsh.pageExists', { id: dirName }))
+  // See installFromGit: expose the source dir + target folder to the top progress bar.
+  const emit = (p: Partial<InstallProgress>): void =>
+    onProgress?.({ op: 'dir', phase: 'preparing', source: srcDir, target: dirName, ...p } as InstallProgress)
   emit({ phase: 'preparing' })
   await copyDirWithProgress(srcDir, target, emit)
   emit({ phase: 'validating' })

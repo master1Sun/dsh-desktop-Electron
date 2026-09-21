@@ -48,6 +48,8 @@ const IPC = {
   UpdateNodeRuntime: "container:update-node-runtime",
   /** drop the updated runtime and fall back to the installer-shipped bundled one */
   RestoreBundledNode: "container:restore-bundled-node",
+  /** install/upgrade a built-in agent runtime (dsh / openclaw) with the bundled npm (BuiltinKind) */
+  ProvisionBuiltin: "container:provision-builtin",
   /** stream: live progress of an in-flight bundled-Node update (UpdateProgress) */
   OnNodeUpdateProgress: "container:node-update-progress",
   /** broadcast: live progress of an in-flight update download (UpdateProgress) */
@@ -11353,6 +11355,8 @@ const DEFAULTS = {
   defaultView: { kind: "none" },
   openExternalIn: "embedded",
   minimizeToTray: true,
+  // off by default: registering a login item is an OS-level change we never make unprompted
+  launchAtStartup: false,
   // auto-run the bundled runtimes on launch: openclaw (gateway) + dsh-web (server)
   autoStartPages: ["openclaw", "dsh-web"],
   lastExternalUrls: [],
@@ -11488,6 +11492,18 @@ function resolvePageEnv(pageId, key, defaultPath, legacyPath) {
 }
 function isValidPort(port) {
   return Number.isInteger(Number(port)) && Number(port) >= 1 && Number(port) <= 65535;
+}
+function applyLaunchAtStartup(enabled) {
+  if (!app$1.isPackaged) return;
+  try {
+    app$1.setLoginItemSettings({
+      openAtLogin: enabled,
+      openAsHidden: enabled,
+      args: enabled ? ["--autostart"] : []
+    });
+  } catch (err) {
+    console.warn("[container] setLoginItemSettings failed:", err.message);
+  }
 }
 function resolvePagePort(pageId, declared) {
   const override = getSettings().pagePorts?.[pageId];
@@ -13004,7 +13020,6 @@ function validateRepoUrl(url) {
   return trimmed;
 }
 async function installFromGit(pagesDir, repoUrl, name, port, originUrl, onProgress) {
-  const emit = (p) => onProgress?.({ op: "git", phase: "preparing", ...p });
   const url = validateRepoUrl(repoUrl);
   let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
   if (!dirName) {
@@ -13015,6 +13030,7 @@ async function installFromGit(pagesDir, repoUrl, name, port, originUrl, onProgre
   const target = join(pagesDir, dirName);
   if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
   mkdirSync(pagesDir, { recursive: true });
+  const emit = (p) => onProgress?.({ op: "git", phase: "preparing", source: repoUrl, target: dirName, ...p });
   emit({ phase: "preparing" });
   await cloneWithAuthFallback(
     target,
@@ -13093,7 +13109,6 @@ async function copyDirWithProgress(srcDir, target, emit) {
   report(true);
 }
 async function installFromLocalDir(pagesDir, srcDir, name, port, originUrl, onProgress) {
-  const emit = (p) => onProgress?.({ op: "dir", phase: "preparing", ...p });
   if (!existsSync(srcDir) || !existsSync(join(srcDir, ".")))
     throw new Error(m("install.srcMissing", { dir: srcDir }));
   let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
@@ -13101,6 +13116,7 @@ async function installFromLocalDir(pagesDir, srcDir, name, port, originUrl, onPr
   if (!dirName) throw new Error(m("install.dirNameFail"));
   const target = join(pagesDir, dirName);
   if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
+  const emit = (p) => onProgress?.({ op: "dir", phase: "preparing", source: srcDir, target: dirName, ...p });
   emit({ phase: "preparing" });
   await copyDirWithProgress(srcDir, target, emit);
   emit({ phase: "validating" });
@@ -13137,6 +13153,30 @@ function removePage(pagesDir, id2) {
 }
 const RELEASE_BRANCH = "release";
 const PROGRESS_INTERVAL_MS = 150;
+const MIN_ASAR_BYTES = 1024 * 1024;
+function readStagedUpdate() {
+  const metaFile = join(updatesRoot(), "update-meta.json");
+  let meta = null;
+  try {
+    meta = JSON.parse(readFileSync(metaFile, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (!meta?.pendingAsar || meta.broken) return null;
+  const pending = join(updatesRoot(), meta.pendingAsar);
+  let size = 0;
+  try {
+    size = statSync(pending).size;
+  } catch {
+    size = 0;
+  }
+  if (size >= MIN_ASAR_BYTES) return { version: meta.version || "", commit: meta.commit || "" };
+  try {
+    writeFileSync$1(metaFile, JSON.stringify({ ...meta, pendingAsar: null }));
+  } catch {
+  }
+  return null;
+}
 function updatesRoot() {
   return join(dirname(app$1.getPath("exe")), "resources", "updates");
 }
@@ -13267,11 +13307,20 @@ async function streamBlob(rev, partPath, resumeFrom, total, name, resumed, onPro
     throw err;
   }
 }
-function pruneStaleParts(root, keep) {
+function pruneOldReleases(root, keep) {
   try {
     for (const f of readdirSync(root)) {
-      if (f.startsWith("app.asar.") && f.endsWith(".part") && join(root, f) !== keep)
-        rmSync(join(root, f), { force: true });
+      if (f === "release.git" || keep.has(f)) continue;
+      const p = join(root, f);
+      try {
+        if (!statSync(p).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      try {
+        rmSync(p, { recursive: true, force: true });
+      } catch {
+      }
     }
   } catch {
   }
@@ -13282,8 +13331,9 @@ async function downloadAsar(tip, name, onProgress) {
   const rev = `${tip.commit}:app.asar`;
   const total = Number(runGit(["--git-dir", gitDir(), "cat-file", "-s", rev]).trim());
   if (!Number.isFinite(total) || total <= 0) throw new Error(m("git.asarSizeUnknown"));
-  const part = join(root, `app.asar.${tip.commit}.part`);
-  pruneStaleParts(root, part);
+  const dir = join(root, tip.commit);
+  mkdirSync(dir, { recursive: true });
+  const part = join(dir, "app.asar.part");
   let resumeFrom = 0;
   if (existsSync(part)) {
     const size = statSync(part).size;
@@ -13293,13 +13343,28 @@ async function downloadAsar(tip, name, onProgress) {
   await streamBlob(rev, part, resumeFrom, total, name, resumeFrom > 0, onProgress);
   if (statSync(part).size !== total)
     throw new Error(m("git.asarSizeMismatch", { want: total, got: statSync(part).size }));
-  const pending = join(root, "app.asar.pending");
-  rmSync(pending, { force: true });
-  renameSync(part, pending);
+  const finalAsar = join(dir, "app.asar");
+  rmSync(finalAsar, { force: true });
+  renameSync(part, finalAsar);
+  const metaFile = join(root, "update-meta.json");
+  let prev = {};
+  try {
+    prev = JSON.parse(readFileSync(metaFile, "utf-8"));
+  } catch {
+  }
   writeFileSync$1(
-    join(root, "update-meta.json"),
-    JSON.stringify({ pendingAsar: "app.asar.pending", version: tip.version, commit: tip.commit })
+    metaFile,
+    JSON.stringify({
+      ...prev,
+      broken: false,
+      pendingAsar: join(tip.commit, "app.asar"),
+      version: tip.version,
+      commit: tip.commit
+    })
   );
+  const keep = /* @__PURE__ */ new Set([tip.commit]);
+  if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0]);
+  pruneOldReleases(root, keep);
   onProgress?.({ name, phase: "done", received: total, total, percent: 100 });
 }
 async function checkAsarUpdate(name, dir) {
@@ -13314,6 +13379,20 @@ async function checkAsarUpdate(name, dir) {
   };
   try {
     const current = app$1.getVersion();
+    const staged = readStagedUpdate();
+    if (staged && isNewer(current, staged.version)) {
+      return {
+        ...base,
+        ok: true,
+        branch: RELEASE_BRANCH,
+        localHead: current,
+        remoteHead: staged.commit.slice(0, 8),
+        currentVersion: current,
+        latestVersion: staged.version,
+        hasUpdate: false,
+        pendingRestart: true
+      };
+    }
     const tip = await fetchTip(name);
     return {
       ...base,
@@ -13323,7 +13402,10 @@ async function checkAsarUpdate(name, dir) {
       remoteHead: tip.commit.slice(0, 8),
       currentVersion: current,
       latestVersion: tip.version,
-      hasUpdate: isNewer(current, tip.version)
+      hasUpdate: isNewer(current, tip.version),
+      // Staged but not newer than what's running (e.g. a rollback install): boot.cjs will
+      // still swap it in, so a restart remains the only pending action.
+      pendingRestart: Boolean(staged)
     };
   } catch (err) {
     return { ...base, error: err.message };
@@ -14303,6 +14385,9 @@ async function reprovisionOpenclaw() {
     message: after && after !== before ? m("upd.openclawUpgraded", { after }) : m("upd.openclawUpToDate", { after: after || "?" })
   };
 }
+async function provisionBuiltin(kind) {
+  return kind === "dsh" ? updateDshSelf() : reprovisionOpenclaw();
+}
 async function performUpdate(target, onProgress) {
   switch (target.action) {
     case "pull":
@@ -14531,19 +14616,30 @@ function registerIpc(registry2) {
     }
   });
   ipcMain$1.handle(IPC.UpdateNodeRuntime, async (e, version) => {
+    const sender = e.sender;
+    const onProgress = (p) => {
+      if (!sender.isDestroyed()) sender.send(IPC.OnNodeUpdateProgress, p);
+    };
     try {
-      const sender = e.sender;
-      const onProgress = (p) => {
-        if (!sender.isDestroyed()) sender.send(IPC.OnNodeUpdateProgress, p);
-      };
       return ok(await updateNodeRuntime(version, onProgress));
     } catch (err) {
       return fail(err);
+    } finally {
+      onProgress({ name: "Node", phase: "done" });
     }
   });
   ipcMain$1.handle(IPC.RestoreBundledNode, async () => {
     try {
       return ok(await restoreBundledNode());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ProvisionBuiltin, async (_e, kind) => {
+    try {
+      const res = await provisionBuiltin(kind);
+      clearUpdateCache();
+      return ok(res);
     } catch (err) {
       return fail(err);
     }
@@ -14585,6 +14681,8 @@ function registerIpc(registry2) {
         return ok(dirName);
       } catch (err) {
         return fail(err);
+      } finally {
+        onProgress({ op: "git", phase: "done", percent: 100 });
       }
     }
   );
@@ -14609,6 +14707,8 @@ function registerIpc(registry2) {
         return ok(dirName);
       } catch (err) {
         return fail(err);
+      } finally {
+        onProgress({ op: "dir", phase: "done", percent: 100 });
       }
     }
   );
@@ -14680,6 +14780,9 @@ function registerIpc(registry2) {
         const rest = { ...partial };
         delete rest.defaultView;
         if (Object.keys(rest).length) updateSettings(rest);
+        if (typeof partial.launchAtStartup === "boolean") {
+          applyLaunchAtStartup(partial.launchAtStartup);
+        }
         if (partial.locale) {
           registry2.reconcile();
           notifyLocaleChanged();
@@ -14718,20 +14821,23 @@ function registerIpc(registry2) {
   surveyTimer = setInterval(runSurvey, UPDATE_SURVEY_MS);
   surveyTimer.unref?.();
   ipcMain$1.handle(IPC.PerformUpdate, async (_e, target) => {
+    const sender = _e.sender;
+    const onProgress = (p) => {
+      if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p);
+    };
     try {
-      const sender = _e.sender;
-      const onProgress = (p) => {
-        if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p);
-      };
       const res = await performUpdate(target, onProgress);
       clearUpdateCache();
       return ok(res);
     } catch (err) {
       return fail(err);
+    } finally {
+      onProgress({ name: target.name, phase: "done", percent: 100 });
     }
   });
   ipcMain$1.handle(IPC.RelaunchApp, () => {
-    app$1.relaunch({ args: [...process.argv.slice(1), "--dsh-relaunched"] });
+    const args = process.argv.slice(1).filter((a) => a !== "--autostart");
+    app$1.relaunch({ args: [...args, "--dsh-relaunched"] });
     app$1.exit(0);
     return ok(true);
   });
@@ -15017,6 +15123,7 @@ let mainWindow = null;
 let tray = null;
 let registry = null;
 let isQuitting = false;
+let startHidden = false;
 process.on("uncaughtException", (err) => {
   console.error("[container] uncaught exception:", err);
 });
@@ -15035,7 +15142,7 @@ function markBootOk() {
 function ensureUnpackedForUpdate() {
   if (!app$1.isPackaged) return;
   try {
-    const resources = dirname(app$1.getPath("exe"));
+    const resources = join(dirname(app$1.getPath("exe")), "resources");
     const appPath = app$1.getAppPath();
     if (!appPath.startsWith(join(resources, "updates"))) return;
     const src = join(resources, "app.asar.unpacked");
@@ -15065,7 +15172,9 @@ function createWindow() {
       webviewTag: true
     }
   });
-  mainWindow.on("ready-to-show", () => mainWindow?.show());
+  mainWindow.on("ready-to-show", () => {
+    if (!startHidden) mainWindow?.show();
+  });
   const pushMaximized = () => {
     mainWindow?.webContents.send(IPC.OnMaximizedChanged, mainWindow.isMaximized());
   };
@@ -15177,6 +15286,8 @@ if (!gotLock) {
     electronApp.setAppUserModelId("com.dsh.desktop-container");
     ensureUnpackedForUpdate();
     markBootOk();
+    startHidden = process.argv.includes("--autostart") || app$1.getLoginItemSettings().wasOpenedAtLogin;
+    applyLaunchAtStartup(getSettings().launchAtStartup);
     app$1.on("browser-window-created", (_, window) => optimizer.watchWindowShortcuts(window));
     app$1.on("web-contents-created", (_e, contents) => {
       if (contents.getType() === "webview") {

@@ -13,6 +13,8 @@ export interface Settings {
   defaultView: DefaultView
   openExternalIn: 'embedded' | 'system-browser'
   minimizeToTray: boolean
+  /** start the container at OS login, then minimize to the tray */
+  launchAtStartup: boolean
   /** health guard: auto-restart a page that crashes after it has started */
   crashAutoRestart: boolean
   autoStartPages: string[]
@@ -40,6 +42,7 @@ export const useSettingsStore = defineStore('settings', () => {
     defaultView: { kind: 'none' },
     openExternalIn: 'embedded',
     minimizeToTray: true,
+    launchAtStartup: false,
     crashAutoRestart: true,
     autoStartPages: [],
     lastExternalUrls: [],

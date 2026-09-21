@@ -10,6 +10,8 @@ const DEFAULTS: ContainerSettings = {
   defaultView: { kind: 'none' },
   openExternalIn: 'embedded',
   minimizeToTray: true,
+  // off by default: registering a login item is an OS-level change we never make unprompted
+  launchAtStartup: false,
   // auto-run the bundled runtimes on launch: openclaw (gateway) + dsh-web (server)
   autoStartPages: ['openclaw', 'dsh-web'],
   lastExternalUrls: [],
@@ -208,6 +210,27 @@ export function resolvePageEnv(
 
 export function isValidPort(port: unknown): port is number {
   return Number.isInteger(Number(port)) && Number(port) >= 1 && Number(port) <= 65535
+}
+
+/**
+ * Register (or clear) the OS login item so the container starts at boot. When enabled we pass
+ * `--autostart` as the launch argument: the main process sees it and boots straight into the tray
+ * (window created hidden) instead of popping up over the user's desktop. `openAsHidden` only
+ * applies on macOS, so the arg is what actually drives the minimize-to-tray on Windows.
+ *
+ * Dev is skipped on purpose — it would register `electron.exe` running this repo as a login item.
+ */
+export function applyLaunchAtStartup(enabled: boolean): void {
+  if (!app.isPackaged) return
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      openAsHidden: enabled,
+      args: enabled ? ['--autostart'] : []
+    })
+  } catch (err) {
+    console.warn('[container] setLoginItemSettings failed:', (err as Error).message)
+  }
 }
 
 /** User port override for a page; 0 means "not overridden, use container.json". */

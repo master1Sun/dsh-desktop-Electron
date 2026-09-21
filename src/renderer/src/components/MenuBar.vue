@@ -4,6 +4,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import whaleIcon from '../assets/whale.png'
 import PageSwitcher from './PageSwitcher.vue'
 import WindowControls from './WindowControls.vue'
+import TopProgressBar from './TopProgressBar.vue'
 import { appPanelKey, parseAppPanel, type ExternalSite } from '../../../shared/types'
 import type { PageState } from '../stores/pages'
 import { t } from '../i18n'
@@ -398,6 +399,10 @@ onBeforeUnmount(() => {
     </nav>
 
     <div class="spacer" />
+
+    <!-- Persistent install/update progress, docked on the right of the menu row (just left of
+         the window chrome). Width-capped; several tasks fold into a hover dropdown. -->
+    <TopProgressBar />
 
     <div v-if="props.terminalMode" class="webview-actions">
       <button

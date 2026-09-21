@@ -109,6 +109,9 @@ const zh: Dict = {
     minimizeOff: '关闭主窗口即退出容器',
     minimizeTip:
       '开启后点 ✕ 不退出程序，托盘菜单可恢复窗口或彻底退出（退出会停止所有 node 进程）。',
+    launchAtStartup: '开机自启',
+    launchAtStartupTip:
+      '开启后随系统登录自动启动容器，并最小化到任务栏托盘（不弹出窗口）；需要时从托盘图标恢复。',
     crashAutoRestart: '崩溃自动重启',
     crashAutoRestartTip:
       '页面启动后异常退出时自动重试（2s/5s/15s 退避）；稳定运行 5 分钟后清零。关闭后崩溃仅标红、不自动重启。',
@@ -146,6 +149,7 @@ const zh: Dict = {
     colAction: '操作',
     statusHasUpdate: '有更新',
     statusUpToDate: '已是最新',
+    statusPendingRestart: '待重启生效',
     statusFailed: '检测失败',
     tipUpdates:
       'git 项目一键 git pull --ff-only（有未提交改动自动跳过）；npm 项目比对 registry 最新版；DSH / OpenClaw 可直接升级（OpenClaw 重装后重启该页生效）。',
@@ -170,7 +174,9 @@ const zh: Dict = {
     tagBuiltin: '内置',
     aboutPagesRunning: '{running} / {total} 运行中',
     updateBtn: '更新',
+    installBtn: '安装',
     manualBtn: '手动',
+    restartNowBtn: '立即重启',
     manualTip: '本地项目不支持自动更新：请在其仓库拉取新版后重装/复制',
     notDetected: '未检测到'
   },
@@ -414,6 +420,30 @@ const zh: Dict = {
     relaunchConfirm: '桌面控制台源码已更新，需要重启应用才能运行新版本。是否立即重启？',
     relaunchNow: '立即重启'
   },
+  topbar: {
+    working: '处理中…',
+    multi: '{n} 个任务进行中',
+    hoverDetail: '悬停查看每个任务',
+    importGit: '导入项目 (Git)',
+    importDir: '导入项目 (目录)',
+    dsh: 'DSH 本体',
+    openclaw: 'OpenClaw',
+    installing: '安装中…',
+    downloading: '下载中…',
+    extracting: '解压校验中…',
+    writing: '写入中…'
+  },
+  setup: {
+    title: '初始化内置运行环境',
+    intro: '首次使用需安装容器内置的运行环境。必须先安装内置 Node，完成后才能安装 DSH 与 OpenClaw。',
+    nodeRequired: '请先安装内置 Node：DSH / OpenClaw 依赖它安装与运行。',
+    installedTag: '已安装',
+    missingTag: '未安装',
+    installBtn: '安装',
+    later: '稍后安装',
+    enter: '进入应用',
+    laterHint: 'DSH / OpenClaw 可稍后在「帮助 ▸ 关于与更新」中随时安装或升级。'
+  },
   terminal: {
     newTab: '新建终端',
     restart: '重启当前终端',
@@ -594,6 +624,9 @@ const en: Dict = {
     minimizeOff: 'Closing the main window exits the container',
     minimizeTip:
       'With this on, ✕ does not quit — the tray menu can restore the window or fully exit (which stops all node processes).',
+    launchAtStartup: 'Launch at startup',
+    launchAtStartupTip:
+      'With this on, the container starts automatically at sign-in and minimizes to the tray (no window pops up); restore it from the tray icon when needed.',
     crashAutoRestart: 'Auto-restart on crash',
     crashAutoRestartTip:
       'Retries a page that exits abnormally after it has started (2s/5s/15s backoff); the counter clears after 5 min stable. When off, crashes only flag red and never auto-restart.',
@@ -631,6 +664,7 @@ const en: Dict = {
     colAction: 'Action',
     statusHasUpdate: 'Update available',
     statusUpToDate: 'Up to date',
+    statusPendingRestart: 'Restart pending',
     statusFailed: 'Check failed',
     tipUpdates:
       'git projects: one-click git pull --ff-only (auto-skips if there are uncommitted changes); npm projects: compare against the registry latest; DSH / OpenClaw can upgrade directly (OpenClaw needs a page restart after reinstall).',
@@ -656,7 +690,9 @@ const en: Dict = {
     tagBuiltin: 'Built-in',
     aboutPagesRunning: '{running} / {total} running',
     updateBtn: 'Update',
+    installBtn: 'Install',
     manualBtn: 'Manual',
+    restartNowBtn: 'Restart now',
     manualTip:
       'Local projects do not support auto-update: pull the new version in their repo, then reinstall/copy.',
     notDetected: 'Not detected'
@@ -906,6 +942,31 @@ const en: Dict = {
     relaunchConfirm:
       'The desktop container source was updated. Restart the app to run the new version. Restart now?',
     relaunchNow: 'Restart now'
+  },
+  topbar: {
+    working: 'Working…',
+    multi: '{n} tasks in progress',
+    hoverDetail: 'Hover for per-task details',
+    importGit: 'Importing project (Git)',
+    importDir: 'Importing project (folder)',
+    dsh: 'DSH core',
+    openclaw: 'OpenClaw',
+    installing: 'Installing…',
+    downloading: 'Downloading…',
+    extracting: 'Extracting…',
+    writing: 'Writing…'
+  },
+  setup: {
+    title: 'Set up the built-in runtimes',
+    intro:
+      'The container needs its built-in runtimes installed before first use. Install the built-in Node first — DSH and OpenClaw can only be installed once it is present.',
+    nodeRequired: 'Install the built-in Node first: DSH / OpenClaw depend on it to install and run.',
+    installedTag: 'Installed',
+    missingTag: 'Not installed',
+    installBtn: 'Install',
+    later: 'Install later',
+    enter: 'Enter app',
+    laterHint: 'DSH / OpenClaw can be installed or upgraded any time from Help ▸ About & Updates.'
   },
   terminal: {
     newTab: 'New terminal',

@@ -9,7 +9,7 @@ import { getDshStatus, repairPnpmCmd } from './dsh'
 import { openclawVersion } from './openclaw'
 import { resolveInstallDir } from './store'
 import { m } from './i18n'
-import { type PageMeta, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
+import { type BuiltinKind, type PageMeta, type UpdateCheckResult, type UpdateOutcome } from '../shared/types'
 
 const REGISTRY = process.env.npm_config_registry || 'https://registry.npmmirror.com/'
 const DSH_PKG = '@deepseek-ai/dsh'
@@ -327,6 +327,19 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
         ? m('upd.openclawUpgraded', { after })
         : m('upd.openclawUpToDate', { after: after || '?' })
   }
+}
+
+/**
+ * Install (or upgrade) a built-in agent runtime with the bundled npm.
+ *
+ * The same code path the 关于与更新 panel's reprovision row drives, surfaced as a
+ * first-class action so a *missing* dsh/openclaw can be installed straight from the
+ * first-run setup gate. Delegates to the private self-update helpers, which run
+ * `npm install -g` (up to ~15min) and therefore give no fine-grained progress — the
+ * renderer brackets the call with an indeterminate top-bar task instead.
+ */
+export async function provisionBuiltin(kind: BuiltinKind): Promise<UpdateOutcome> {
+  return kind === 'dsh' ? updateDshSelf() : reprovisionOpenclaw()
 }
 
 export async function performUpdate(

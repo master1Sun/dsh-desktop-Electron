@@ -74,6 +74,13 @@ export const useUpdatesStore = defineStore('updates', () => {
         ElMessage.warning(res.error || t('updates.incomplete', { name: target.name }))
       else if (res.updated) ElMessage.success(t('updates.updated', { name: target.name }))
       if (res.ok && res.updated && target.isContainer) {
+        // Staged on disk right now — flip the row locally so it reads 立即重启 even if
+        // the user defers and the confirm dialog is dismissed (a later re-check agrees).
+        const row = results.find((r) => r.isContainer)
+        if (row) {
+          row.pendingRestart = true
+          row.hasUpdate = false
+        }
         try {
           await ElMessageBox.confirm(t('updates.relaunchConfirm'), t('updates.relaunchTitle'), {
             type: 'warning',

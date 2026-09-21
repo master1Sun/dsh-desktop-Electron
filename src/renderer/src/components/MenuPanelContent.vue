@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import PageManager from './PageManager.vue'
 import DshManager from './DshManager.vue'
 import OpenclawManager from './OpenclawManager.vue'
@@ -9,7 +9,8 @@ import SettingsPanel from './SettingsPanel.vue'
 import AppManager from './AppManager.vue'
 import { usePagesStore } from '../stores/pages'
 import { useUpdatesStore } from '../stores/updates'
-import type { IpcResult, NodeVersionInfo, UpdateProgress } from '@shared/types'
+import { useTasksStore } from '../stores/tasks'
+import type { BuiltinKind, IpcResult, NodeVersionInfo, UpdateCheckResult, UpdateProgress } from '@shared/types'
 import { parseAppPanel } from '@shared/types'
 import { t } from '../i18n'
 
@@ -33,6 +34,42 @@ const emit = defineEmits<{
 
 const updates = useUpdatesStore()
 const pagesStore = usePagesStore()
+const tasks = useTasksStore()
+
+/* Built-in agent runtimes (DSH 本体 / OpenClaw) surface as reprovision rows. When one is
+   *missing* the row reads "检测失败 / 未检测到已安装版本"; here we turn it into an install
+   entry so the same 关于与更新 panel is the "随后安装" home the first-run gate points to. */
+const DSH_PKG = '@deepseek-ai/dsh'
+function builtinKind(row: UpdateCheckResult): BuiltinKind | null {
+  if (row.source !== 'builtin' || !row.packageName) return null
+  return row.packageName === DSH_PKG ? 'dsh' : 'openclaw'
+}
+function notInstalledBuiltin(row: UpdateCheckResult): boolean {
+  return builtinKind(row) !== null && !row.currentVersion
+}
+async function installBuiltinRow(row: UpdateCheckResult): Promise<void> {
+  const kind = builtinKind(row)
+  if (!kind) return
+  const out = await tasks.installBuiltin(kind)
+  if (out) emit('check-updates')
+}
+
+/**
+ * The container asar is already staged (updates/<commit>/app.asar + update-meta.json);
+ * boot.cjs swaps it in on the next launch, so the only action left is the restart.
+ */
+async function relaunchNow(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(t('updates.relaunchConfirm'), t('updates.relaunchTitle'), {
+      type: 'warning',
+      confirmButtonText: t('updates.relaunchNow'),
+      cancelButtonText: t('common.cancel')
+    })
+  } catch {
+    return // user deferred — the row keeps offering 立即重启 until they restart
+  }
+  await window.container.relaunchApp()
+}
 
 /* ---- bundled-Node runtime upgrade (关于与更新) ----
    Dropdown over the official dist index (main-process fetched); installing swaps
@@ -98,12 +135,16 @@ onMounted(() => {
 /** `app:<id>` → the page id for the generic AppManager, else null. */
 const appId = computed(() => parseAppPanel(props.panel))
 
-const statusLabel = (r: { ok: boolean; hasUpdate?: boolean; error?: string }): string =>
-  r.ok
-    ? r.hasUpdate
-      ? t('panel.statusHasUpdate')
-      : t('panel.statusUpToDate')
-    : r.error || t('panel.statusFailed')
+const statusLabel = (r: UpdateCheckResult): string =>
+  notInstalledBuiltin(r)
+    ? t('setup.missingTag')
+    : r.pendingRestart
+      ? t('panel.statusPendingRestart')
+      : r.ok
+        ? r.hasUpdate
+          ? t('panel.statusHasUpdate')
+          : t('panel.statusUpToDate')
+        : r.error || t('panel.statusFailed')
 
 const statusType = (r: { ok: boolean; hasUpdate?: boolean }): string =>
   !r.ok ? 'info' : r.hasUpdate ? 'warning' : 'success'
@@ -209,7 +250,7 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
             :loading="updates.nodeBusy"
             @click="doNodeUpdate"
           >
-            {{ t('panel.nodeUpdateBtn') }}
+            {{ props.runtime.ok ? t('panel.nodeUpdateBtn') : t('panel.installBtn') }}
           </el-button>
           <el-button
             v-if="props.runtime.override"
@@ -307,7 +348,26 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
         <el-table-column :label="t('panel.colAction')" width="90" align="right">
           <template #default="{ row }">
             <el-button
-              v-if="row.hasUpdate && row.canAutoUpdate"
+              v-if="row.pendingRestart"
+              size="small"
+              type="primary"
+              round
+              @click="relaunchNow"
+            >
+              {{ t('panel.restartNowBtn') }}
+            </el-button>
+            <el-button
+              v-else-if="notInstalledBuiltin(row)"
+              size="small"
+              type="primary"
+              round
+              :loading="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
+              @click="installBuiltinRow(row)"
+            >
+              {{ t('panel.installBtn') }}
+            </el-button>
+            <el-button
+              v-else-if="row.hasUpdate && row.canAutoUpdate"
               size="small"
               type="primary"
               round
@@ -322,11 +382,6 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
           </template>
         </el-table-column>
       </el-table>
-      <div class="tip">{{ t('panel.tipUpdates') }}</div>
-      <div class="line" />
-      <p>{{ t('panel.aboutDevMode') }}</p>
-      <p>{{ t('panel.aboutMinimizeTip') }}</p>
-      <p>{{ t('panel.aboutContent') }}</p>
     </section>
   </div>
 </template>

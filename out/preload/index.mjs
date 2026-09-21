@@ -24,6 +24,8 @@ const IPC = {
   UpdateNodeRuntime: "container:update-node-runtime",
   /** drop the updated runtime and fall back to the installer-shipped bundled one */
   RestoreBundledNode: "container:restore-bundled-node",
+  /** install/upgrade a built-in agent runtime (dsh / openclaw) with the bundled npm (BuiltinKind) */
+  ProvisionBuiltin: "container:provision-builtin",
   /** stream: live progress of an in-flight bundled-Node update (UpdateProgress) */
   OnNodeUpdateProgress: "container:node-update-progress",
   /** broadcast: live progress of an in-flight update download (UpdateProgress) */
@@ -77,6 +79,7 @@ const api = {
   nodeListVersions: () => ipcRenderer.invoke(IPC.ListNodeVersions),
   nodeUpdate: (version) => ipcRenderer.invoke(IPC.UpdateNodeRuntime, version),
   nodeRestoreBundled: () => ipcRenderer.invoke(IPC.RestoreBundledNode),
+  provisionBuiltin: (kind) => ipcRenderer.invoke(IPC.ProvisionBuiltin, kind),
   onNodeUpdateProgress: (cb) => {
     const listener = (_e, p) => cb(p);
     ipcRenderer.on(IPC.OnNodeUpdateProgress, listener);
