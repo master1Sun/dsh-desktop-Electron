@@ -497,6 +497,10 @@ const bestName = computed(() => {
     REGISTRY_CANDIDATES.find((c) => c.id === best.id)?.label ?? { zh: best.url, en: best.url }
   )
 })
+/** The 使用最快 mirror button only belongs on the row that actually won the probe. */
+function rowHasBest(url: string): boolean {
+  return !!bestRegistry.value && bestRegistry.value.url === url
+}
 async function probeAllRegistries(): Promise<void> {
   if (probing.value) return
   probing.value = true
@@ -621,7 +625,7 @@ onMounted(loadWebData)
             <template #label
               >{{ t('settings.defaultPage') }}<InfoTip :content="t('settings.defaultPageTip')"
             /></template>
-            <el-select v-model="viewValue" style="width: 340px">
+            <el-select v-model="viewValue" class="set-ctl">
               <el-option
                 v-for="opt in viewOptions.plain"
                 :key="opt.value"
@@ -682,7 +686,7 @@ onMounted(loadWebData)
                 :min="0"
                 :max="100"
                 :step="1"
-                style="width: 260px"
+                class="set-slider"
                 @input="previewFrost"
                 @change="commitFrost"
               />
@@ -758,7 +762,7 @@ onMounted(loadWebData)
                 :min="TERMINAL_MIN_H"
                 :max="TERMINAL_MAX_H"
                 :step="20"
-                style="width: 260px"
+                class="set-slider"
                 @change="patch({ terminalHeight: termHeightDraft }, '')"
               />
               <span class="blur-val">{{ termHeightDraft }} px</span>
@@ -829,7 +833,7 @@ onMounted(loadWebData)
                 :min="MEM_WARN_MIN_MB"
                 :max="MEM_WARN_MAX_MB"
                 :step="50"
-                style="width: 260px"
+                class="set-slider"
                 @change="patch({ memWarnMb: memWarnDraft }, '')"
               />
               <span class="blur-val">{{ memWarnDraft }} MB</span>
@@ -969,13 +973,23 @@ onMounted(loadWebData)
                     ? `${t('settings.downloadDirFollow')}（${downloadDirInfo.defaultDir}）`
                     : t('settings.downloadDirFollow')
                 "
-                style="width: 340px"
+                class="set-ctl"
                 clearable
                 @change="saveDownloadDir(String($event || ''))"
               />
               <el-button size="small" @click="browseDownloadDir">{{
                 t('common.browse')
               }}</el-button>
+              <div v-if="downloadDirInfo" class="row-status">
+                {{ t('settings.currentDownloadDir') }}：{{ downloadDirInfo.downloadDir }}
+                <span class="row-status-tag">
+                  {{
+                    downloadDirInfo.custom
+                      ? t('settings.sourcePinned')
+                      : t('settings.sourceFollowSystem')
+                  }}
+                </span>
+              </div>
             </div>
           </el-form-item>
         </el-form>
@@ -1003,6 +1017,16 @@ onMounted(loadWebData)
                 <span class="reg-name">{{ labelOf(c.label) }}</span>
                 <span class="reg-url">{{ c.url }}</span>
                 <span class="reg-ms" :class="probeClass(c.id)">{{ msText(c.id) }}</span>
+                <el-button
+                  v-if="rowHasBest(c.url) && !isCurrent(c.url)"
+                  class="reg-act"
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="useRegistry(c.url)"
+                >
+                  {{ t('settings.registryUse') }}
+                </el-button>
                 <el-button
                   class="reg-act"
                   size="small"
@@ -1068,6 +1092,12 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
+          <el-form-item class="section-item">
+            <template #label
+              ><span class="section-title">{{ t('settings.secGlobal') }}</span>
+            </template>
+          </el-form-item>
+
           <el-form-item>
             <template #label
               >{{ t('settings.envRoot')
@@ -1087,11 +1117,21 @@ onMounted(loadWebData)
                     ? `${t('settings.envRootFollow')}（${envRootInfo.installDir}/env）`
                     : t('settings.envRootFollow')
                 "
-                style="width: 340px"
+                class="set-ctl"
                 clearable
                 @change="saveEnvRoot(String($event || ''))"
               />
               <el-button size="small" @click="browseEnvRoot">{{ t('common.browse') }}</el-button>
+              <div v-if="envRootInfo" class="row-status">
+                {{ t('settings.currentEnvRoot') }}：{{ envRootInfo.envRoot }}
+                <span class="row-status-tag">
+                  {{
+                    envRootInfo.custom
+                      ? t('settings.sourcePinned')
+                      : t('settings.sourceFollowInstall')
+                  }}
+                </span>
+              </div>
             </div>
           </el-form-item>
         </el-form>
@@ -1113,7 +1153,7 @@ onMounted(loadWebData)
                           })
                       : t('settings.envInputPlaceholderEmpty')
                   "
-                  style="width: 340px"
+                  class="set-ctl"
                   clearable
                   @update:model-value="
                     envDrafts[draftKey(section.pageId, row.key)] = String($event)
@@ -1135,6 +1175,12 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
+          <el-form-item class="section-item">
+            <template #label
+              ><span class="section-title">{{ t('settings.secSession') }}</span>
+            </template>
+          </el-form-item>
+
           <el-form-item>
             <template #label
               >{{ t('settings.webDataTitle') }}<InfoTip :content="t('settings.webDataTip')"
@@ -1255,6 +1301,18 @@ onMounted(loadWebData)
   --settings-label-w: 166px;
   /* 内容列的固定高度上限：超过不再拉高面板，改为 tab 内部出滚动条。 */
   --settings-content-max-h: 520px;
+  /* 内容列的地板。各 tab 行数差很多（下载 1 行 / 隐私 6 行 + 站点列表），没有封顶的话
+     切换时面板一会儿高一会儿矮，看起来就像排版在跳。取一个低于大多数 tab 自然高度的值，
+     只吃掉最抖的那段，又不会给内容多的 tab 凭空留白。 */
+  --settings-content-min-h: 300px;
+  /* 每一行的可用内容宽：.el-form-item 是 7px 8px 内衬 + 12px 下边距，标签列固定 166px。 */
+  --settings-row-w: calc(100% - 16px);
+  --settings-content-w: calc(var(--settings-row-w) - var(--settings-label-w));
+  /* 独立控件（输入框 / 下拉）统一的轨宽：不再逐处写死 340px，装不下就随列收窄。 */
+  --settings-control-w: min(var(--settings-content-w), 340px);
+  /* 带尾随控件的行（滑条 + 读数 + 重置）：给尾部留出空间。下限只防窄窗口，
+     正常宽度下仍是 260px 主导。 */
+  --settings-slider-w: clamp(140px, calc(var(--settings-content-w) - 80px), 260px);
 }
 
 /* Vertical (left) tab rail: a compact icon+label column instead of a top strip. The active
@@ -1316,6 +1374,7 @@ onMounted(loadWebData)
   /* EP 会给这个盒子写行内 overflow/height（竖排时行内 height 为 auto），这里用 max-height
      给内容列封顶；`!important` 防御 animateHeight 未来写入行内高度把它覆盖。 */
   max-height: var(--settings-content-max-h) !important;
+  min-height: var(--settings-content-min-h);
   overflow-y: auto !important;
   /* The column used to sit flush with the rail and the panel's own padding, so the row hover
      wash ran straight into both. A little air on all four sides keeps it off the edges. */
@@ -1328,6 +1387,48 @@ onMounted(loadWebData)
 }
 .tab-label .el-icon {
   font-size: 15px;
+}
+
+/* ---- one control column, one rhythm ----
+   Every standalone field used to carry its own inline pixel width (340px for selects and path
+   inputs, 260px for sliders) while the list rows said 620px — a number wider than the column,
+   so `.el-form-item__content` (flex-wrap: wrap) dropped their buttons onto a second line. That
+   is the ragged right edge. Rows now derive their width from the column instead of fighting it. */
+.set-ctl {
+  width: var(--settings-control-w);
+}
+.set-slider {
+  width: var(--settings-slider-w);
+}
+/* One control height across the panel: `size="small"` drew 24px boxes with 12px text, which is
+   why the whole thing reads cramped. 28px is still compact but stops the 3-4 button rows from
+   touching each other. EP stacks the size classes, so `.el-input--small` / `.el-select--small`
+   need their own legs to lose to this one. */
+.settings-panel :deep(.el-button),
+.settings-panel :deep(.el-input--small .el-input__wrapper),
+.settings-panel :deep(.el-select--small .el-select__wrapper) {
+  min-height: 28px;
+}
+.settings-panel :deep(.el-radio-button--small .el-radio-button__inner) {
+  height: 28px;
+  padding: 0 12px;
+  line-height: 27px;
+}
+/* Where a value actually resolves to, printed in the row that sets it: it fills the wide-but-empty
+   single-row tabs (下载 / 环境目录) with the one fact the ⓘ tooltip hides. */
+.row-status {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.row-status-tag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 11px;
 }
 
 .settings-panel :deep(.el-form-item__label) {
@@ -1349,15 +1450,24 @@ onMounted(loadWebData)
 }
 
 .settings-panel h3 {
-  margin: 16px 0 10px;
-  font-size: 12.5px;
+  margin: 18px 0 10px;
+  font-size: 12px;
   font-weight: 650;
   color: var(--text-dim);
-  letter-spacing: 0.3px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
 }
 
 .settings-panel h3:first-child {
   margin-top: 0;
+}
+/* Section headers live in the label column of a `.section-item` row, so they align with every
+   other setting name instead of floating above the list. */
+.settings-panel .section-title {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
 }
 
 .ext-inline {
@@ -1399,32 +1509,49 @@ onMounted(loadWebData)
 }
 .env-root-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  width: var(--settings-row-w);
 }
 .env-page-name {
   font-size: 12.5px;
   font-weight: 650;
   color: var(--text);
-  margin: 4px 0 8px;
+  margin: 8px 0 10px;
 }
 /* Rows carry their own inner padding so the hover wash and its inset ring never hug the label
-   or the control; `margin-bottom` shrinks by the same amount the padding grows, so the list
-   doesn't get taller overall. The radius lives here (not just on :hover) because a bordered
-   box only reads as one box when the corner is already rounded before it lights up. */
+   or the control. The radius lives here (not just on :hover) because a bordered box only reads as
+   one box when the corner is already rounded before it lights up — so the hairline stays visible
+   at rest and only the tint/ring swap on hover, which is what makes the list read as stacked
+   bands instead of one undifferentiated block of controls. */
 .settings-panel :deep(.el-form-item) {
-  padding: 3px 8px;
-  margin-bottom: 7px;
+  padding: 7px 8px;
+  margin-bottom: 12px;
+  border: 1px solid transparent;
   border-radius: 8px;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 /* Every settings form row (incl. the 系统 page bottom / env-section lists) reads on
    hover with a glassy accent wash instead of an opaque block. */
 .settings-panel :deep(.el-form-item):hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: var(--border);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
-  transition:
-    background 0.15s ease,
-    box-shadow 0.15s ease;
+}
+/* A section heading is not a row: it owns no control, so it must neither light up on hover nor
+   sit a full gap above the rows it labels. Two adjacent `margin-bottom`s collapse, so taking this
+   one's away pulls the whole section together while the gap above stays. */
+.settings-panel :deep(.el-form-item.section-item) {
+  margin-bottom: 0;
+}
+.settings-panel :deep(.el-form-item.section-item):hover {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
 }
 .env-empty {
   font-size: 12.5px;
@@ -1439,19 +1566,20 @@ onMounted(loadWebData)
 }
 
 /* #26 网络镜像 / 隐私数据: one compact row list per tab, sharing the same hairline look as
-   the frosted surfaces. `.on` marks the row the current setting points at. */
+   the frosted surfaces. `.on` marks the row the current setting points at. The old 620px cap was
+   wider than the column, so every row wrapped its button onto a second line; the list now simply
+   fills the column and the URL truncates instead of pushing the action out of view. */
 .reg-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  width: 100%;
-  max-width: 620px;
+  width: var(--settings-row-w);
 }
 .reg-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 5px 8px;
+  padding: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 12.5px;
@@ -1467,8 +1595,11 @@ onMounted(loadWebData)
 }
 .reg-url {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-dim);
-  word-break: break-all;
 }
 .reg-ms {
   min-width: 64px;
@@ -1488,14 +1619,14 @@ onMounted(loadWebData)
 }
 
 /* Right-rail action rows (#26): the value keeps the left edge and every button lands on the same
-   right edge of one 620px column, so both tabs read as a table instead of a stack of controls of
+   right edge of one column, so both tabs read as a table instead of a stack of controls of
    differing width. `.act-end` is for rows with nothing to say on the left (a bare wipe button). */
 .act-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  max-width: 620px;
+  width: var(--settings-row-w);
 }
 .act-row .el-input {
   flex: 1;
@@ -1539,11 +1670,19 @@ onMounted(loadWebData)
   color: var(--text);
 }
 .settings-panel .key-row {
+  /* Fixed tracks for name / binding / clear; the status column (conflict text or the shipped
+     default) gets whatever is left, so the 清除 button lands on the same edge on every row
+     instead of drifting with the length of the status text. */
   display: grid;
-  grid-template-columns: var(--settings-label-w) 180px auto minmax(0, 1fr);
+  grid-template-columns: var(--settings-label-w) 180px 56px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
-  margin: 6px 0;
+  padding: 4px 8px;
+  margin: 0 0 12px;
+  border-radius: 8px;
+}
+.settings-panel .key-row:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .settings-panel .key-name {
   overflow: hidden;

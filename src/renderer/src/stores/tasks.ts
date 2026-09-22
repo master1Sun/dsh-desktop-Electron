@@ -94,7 +94,12 @@ export const useTasksStore = defineStore('tasks', () => {
       remove(id)
       return
     }
-    const opLabel = p.op === 'git' ? t('topbar.importGit') : t('topbar.importDir')
+    const opLabel =
+      p.op === 'git'
+        ? t('topbar.importGit')
+        : p.op === 'dir'
+          ? t('topbar.importDir')
+          : t('topbar.importNpm')
     const phaseText = t(`pageMgr.installPhase.${p.phase}`)
     upsert(id, {
       label: p.target ? `${opLabel} · ${p.target}` : opLabel,

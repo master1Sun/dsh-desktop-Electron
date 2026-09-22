@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, copyFileSync } from 'node:fs'
 
 // pages.ts -> node-runtime.ts imports electron (app), so stub it for vitest.
 // getPath('userData') is needed because spawning a plain page now reads persisted
@@ -79,12 +79,19 @@ describe('page meta parsing', () => {
   })
 
   it('scanInstalledPages lists the two builtin pages and no retired ones', () => {
-    const list = scanInstalledPages(pagesDir)
-    expect(list.some((p) => p.id === 'dsh-web')).toBe(true)
-    expect(list.some((p) => p.id === 'openclaw')).toBe(true)
-    // codex / dsh-plugin-market were retired: codex removed, market moved into the renderer.
-    expect(list.some((p) => p.id === 'codex')).toBe(false)
-    expect(list.some((p) => p.id === 'dsh-plugin-market')).toBe(false)
+    // Scan a temp copy of the builtins: a dev checkout's real pages/ also holds user-imported
+    // projects (e.g. an imported codex CLI page), which must not flip this assertion.
+    const root = mkdtempSync(join(tmpdir(), 'dsh-scan-'))
+    try {
+      for (const id of ['dsh-web', 'openclaw']) {
+        mkdirSync(join(root, id), { recursive: true })
+        copyFileSync(join(pagesDir, id, 'container.json'), join(root, id, 'container.json'))
+      }
+      const list = scanInstalledPages(root)
+      expect(list.map((p) => p.id).sort()).toEqual(['dsh-web', 'openclaw'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('user port override wins over container.json without rewriting it', () => {

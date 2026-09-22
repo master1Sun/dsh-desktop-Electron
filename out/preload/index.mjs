@@ -9,6 +9,10 @@ const IPC = {
   GetPageLogs: "container:get-page-logs",
   InstallPageFromGit: "container:install-page-git",
   InstallPageFromDir: "container:install-page-dir",
+  /** install a published npm CLI package (with a bin) as a terminal page */
+  InstallPageFromNpm: "container:install-page-npm",
+  /** judge an import source before downloading (ImportPreflight) to gate the import UI */
+  PreflightImport: "container:import-preflight",
   ChooseDirectory: "container:choose-directory",
   RemovePage: "container:remove-page",
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
@@ -148,8 +152,11 @@ const api = {
   stopPage: (id) => ipcRenderer.invoke(IPC.StopPage, id),
   restartPage: (id) => ipcRenderer.invoke(IPC.RestartPage, id),
   getPageLogs: (id) => ipcRenderer.invoke(IPC.GetPageLogs, id),
-  installPageFromGit: (repoUrl, name, port) => ipcRenderer.invoke(IPC.InstallPageFromGit, repoUrl, name, port),
-  installPageFromDir: (srcDir, name, port, originUrl) => ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port, originUrl),
+  installPageFromGit: (repoUrl, name, port, opts) => ipcRenderer.invoke(IPC.InstallPageFromGit, repoUrl, name, port, opts),
+  installPageFromDir: (srcDir, name, port, originUrl, opts) => ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port, originUrl, opts),
+  installPageFromNpm: (spec, name) => ipcRenderer.invoke(IPC.InstallPageFromNpm, spec, name),
+  // judge an import source before downloading: IpcResult<ImportPreflight> (tier null = unknown)
+  preflightImport: (source, isDir) => ipcRenderer.invoke(IPC.PreflightImport, source, isDir),
   chooseDirectory: (title) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id) => ipcRenderer.invoke(IPC.RemovePage, id),
   resetBuiltinPage: (id) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),

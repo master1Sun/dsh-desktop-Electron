@@ -1,11 +1,21 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { copyFile, readdir, stat } from 'node:fs/promises'
-import { join, sep } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { simpleGit } from 'simple-git'
 import { readPageMeta, BUILTIN_PAGE_IDS, type ContainerManifest } from './pages'
-import { getSettings, isValidPort, updateSettings } from '../shell/store'
+import {
+  classifyProject,
+  probeRemoteTier,
+  readPkgSafe,
+  runtimeDepCount,
+  type ProjectClass
+} from './project-classify'
+import { getSettings, isValidPort, updateSettings, applyNpmRegistryEnv } from '../shell/store'
+import { getNodeExePath, bundledEnv } from './node-runtime'
 import { normalizeRepoUrl, cloneWithAuthFallback, type CloneProgress } from '../update/git-updates'
-import type { InstallProgress } from '../../shared/types'
+import { logEvent } from '../shell/events'
+import type { ImportOptions, InstallProgress } from '../../shared/types'
 import { m, msgIn } from '../shell/i18n'
 
 /** A local folder path the user meant instead of a URL (e.g. D:\GitProject\dsh-desktop-Electron). */
@@ -47,113 +57,105 @@ function applyPortOverride(dirName: string, port?: number): void {
   updateSettings({ pagePorts: { ...getSettings().pagePorts, [dirName]: Number(port) } })
 }
 
-/** Frameworks whose presence means “this project serves HTTP” → embed it as a `page`.
-    A `bin`-only package without any of these is treated as a CLI (`terminal`). */
-const SERVER_DEP_MARKERS = [
-  'express',
-  'koa',
-  'fastify',
-  '@nestjs',
-  'hapi',
-  'restify',
-  'egg',
-  'midway',
-  'next',
-  'nuxt',
-  'astro',
-  'remix',
-  'hono',
-  'polka',
-  'socket.io',
-  'strapi',
-  'adonis',
-  'feathers',
-  'micro',
-  'http-server',
-  'graphql-yoga',
-  'body-parser'
-]
-
-interface NpmPackage {
-  bin?: string | Record<string, string>
-  scripts?: Record<string, string>
-  dependencies?: Record<string, string>
-  devDependencies?: Record<string, string>
-}
-
-function readPkgSafe(dir: string): NpmPackage | null {
-  try {
-    return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8')) as NpmPackage
-  } catch {
-    return null
-  }
-}
-
-/** Any server framework in dependencies/devDependencies marks the project as a web program. */
-function hasServerDependency(pkg: NpmPackage | null): boolean {
-  if (!pkg) return false
-  const all = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
-  return Object.keys(all).some((n) => {
-    const k = n.toLowerCase()
-    return SERVER_DEP_MARKERS.some((mk) => k === mk || k.startsWith(`${mk}/`) || k.includes(mk))
-  })
-}
-
-/** A runnable command for a CLI project in the embedded terminal: prefer a `start` script,
-    else invoke the declared `bin` entry directly. Returns null when neither is present. */
-function cliStartCommand(dir: string, pkg: NpmPackage | null): string | null {
-  if (pkg?.scripts?.start) return 'npm run start'
-  const bin = pkg?.bin
-  let rel: string | null = null
-  if (typeof bin === 'string') rel = bin
-  else if (bin && typeof bin === 'object') rel = Object.values(bin)[0] ?? null
-  if (rel) {
-    const clean = rel.replace(/^\.\//, '')
-    if (existsSync(join(dir, clean))) return `node ${clean}`
-  }
-  return null
-}
-
 /**
  * An imported project that ships no container.json gets a generated one, so the config lives
- * with the project and the Pages panel shows a concrete kind instead of a bare guess. We infer
- * CLI vs web program from package.json:
- *   - a `bin`-only package with no HTTP-framework dependency is a command-line tool → run it in
- *     the embedded terminal (kind 'terminal' + a start command; no port to wait for);
- *   - anything else is treated as an embeddable web program (kind 'page'), carrying the form port.
- * The manifest is written BEFORE readPageMeta validates the clone, so a CLI (which has no server
- * entry to infer) is not mistaken for a broken page and rolled back. Existing manifests are
- * never rewritten, and the description is seeded in *both* languages so the page is not pinned to
- * whichever language happened to be active at import time.
+ * with the project and the Pages panel shows a concrete kind instead of a bare guess. The kind
+ * and CLI start command come straight from {@link classifyProject} — the same verdict the import
+ * gate used — so seeding and validation can never disagree. Existing manifests are never
+ * rewritten, and the description is seeded in *both* languages so the page is not pinned to
+ * whichever language happened to be active at import time. Returns the class it acted on so the
+ * caller can decide whether a dependency install step is needed.
  */
-function seedContainerManifest(pagesDir: string, dirName: string, port?: number): void {
+function seedContainerManifest(
+  pagesDir: string,
+  dirName: string,
+  port: number | undefined,
+  cls: ProjectClass
+): ProjectClass {
   const dir = join(pagesDir, dirName)
   const metaFile = join(dir, 'container.json')
-  if (existsSync(metaFile)) return
-  const pkg = readPkgSafe(dir)
-  const manifest: ContainerManifest = {
-    name: dirName,
-    description: {
-      zh: msgIn('zh', 'install.importedDesc'),
-      en: msgIn('en', 'install.importedDesc')
+  if (!existsSync(metaFile)) {
+    const manifest: ContainerManifest = {
+      name: dirName,
+      description: {
+        zh: msgIn('zh', 'install.importedDesc'),
+        en: msgIn('en', 'install.importedDesc')
+      }
     }
-  }
-  if (pkg?.bin && !hasServerDependency(pkg)) {
-    const start = cliStartCommand(dir, pkg)
-    if (start) {
+    if (cls.kind === 'terminal') {
       manifest.kind = 'terminal'
-      manifest.startCommand = start
+      if (cls.startCommand) manifest.startCommand = cls.startCommand
     } else {
-      // A CLI we cannot derive a runnable command for: leave it a plain page so the usual
-      // entry inference (server.js / index.js / start script) still has its chance.
       manifest.kind = 'page'
       if (isValidPort(port)) manifest.port = Number(port)
     }
-  } else {
-    manifest.kind = 'page'
-    if (isValidPort(port)) manifest.port = Number(port)
+    writeFileSync(metaFile, JSON.stringify(manifest, null, 2) + '\n', 'utf-8')
   }
-  writeFileSync(metaFile, JSON.stringify(manifest, null, 2) + '\n', 'utf-8')
+  return cls
+}
+
+/** Absolute path of the bundled npm CLI, launched under the bundled node (mirrors update-service). */
+function bundledNpmCli(): string {
+  return join(dirname(getNodeExePath()), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+}
+
+/**
+ * Install an imported project's runtime dependencies with the bundled Node + npm, routed through
+ * the container's configured registry. `npm ci` when a lockfile is present (reproducible), else
+ * `npm install`. Streams npm's latest output line to `onMessage` so the import bar shows motion
+ * for a step that has no byte progress; throws with a log tail on a non-zero exit.
+ */
+export async function installDeps(dir: string, onMessage?: (line: string) => void): Promise<void> {
+  const pkg = readPkgSafe(dir)
+  const deps = runtimeDepCount(pkg)
+  if (!deps) return
+  const cli = bundledNpmCli()
+  if (!existsSync(cli)) throw new Error(m('install.npmMissing'))
+  applyNpmRegistryEnv()
+  const args = existsSync(join(dir, 'package-lock.json')) ? ['ci'] : ['install']
+  await runStream(
+    getNodeExePath(),
+    [cli, ...args, '--no-audit', '--no-fund'],
+    dir,
+    `npm ${args.join(' ')}`,
+    onMessage
+  )
+}
+
+/** Spawn a long-running helper (npm install), tailing output to `onMessage` and failing on a non-zero exit. */
+function runStream(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  caption: string,
+  onMessage?: (line: string) => void,
+  timeoutMs = 15 * 60_000
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd, env: bundledEnv(), windowsHide: true, shell: false })
+    let tail = ''
+    const onData = (d: unknown): void => {
+      tail += String(d)
+      if (tail.length > 8000) tail = tail.slice(-8000)
+      const lines = String(d).split(/\r?\n/).filter((l) => l.trim())
+      if (lines.length) onMessage?.(lines[lines.length - 1].trim())
+    }
+    child.stdout?.on('data', onData)
+    child.stderr?.on('data', onData)
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error(m('install.timeout', { cmd: caption })))
+    }, timeoutMs)
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(new Error(m('install.depsFail', { cmd: caption, tail: tail.slice(-500) })))
+    })
+  })
 }
 
 export function validateRepoUrl(url: string): string {
@@ -171,7 +173,8 @@ export async function installFromGit(
   name?: string,
   port?: number,
   originUrl?: string,
-  onProgress?: (p: InstallProgress) => void
+  onProgress?: (p: InstallProgress) => void,
+  opts?: ImportOptions
 ): Promise<string> {
   const url = validateRepoUrl(repoUrl)
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
@@ -187,8 +190,16 @@ export async function installFromGit(
   // top progress bar can name the project and show where it is downloading from.
   const emit = (p: Partial<InstallProgress>): void =>
     onProgress?.({ op: 'git', phase: 'preparing', source: repoUrl, target: dirName, ...p } as InstallProgress)
-  // Deep clone (not --depth 1): a later divergent history needs real merge bases to update.
   emit({ phase: 'preparing' })
+  // Best-effort pre-flight: a conclusively-red repo (Rust/Go monorepo with no node entry, e.g.
+  // openai/codex) is rejected from a few KB of raw-file probes *before* any clone, so a wrong
+  // import never downloads a large tree nor re-downloads on every retry. Inconclusive falls through.
+  const pre = await probeRemoteTier(url).catch(() => null)
+  if (pre?.tier === 'red') {
+    logEvent({ level: 'warn', kind: 'install.rejected', pageId: dirName, detail: pre.reason })
+    throw new Error(m(pre.reason!, pre.reasonParams))
+  }
+  // Deep clone (not --depth 1): a later divergent history needs real merge bases to update.
   await cloneWithAuthFallback(target, url, (g) =>
     emit({ phase: 'receiving', percent: g.percent, message: gitCaption(g) })
   )
@@ -200,27 +211,183 @@ export async function installFromGit(
     }
   }
   emit({ phase: 'validating' })
+  // Authoritative classify on the real tree: a repo the probe couldn't judge (non-GitHub host,
+  // private, offline) is caught here. Deleting is correct for a genuine red — the message names
+  // the unsupported stack, so the user won't retry expecting a different result.
+  const cls = classifyProject(target)
+  if (cls.tier === 'red') {
+    rmSync(target, { recursive: true, force: true })
+    logEvent({ level: 'warn', kind: 'install.rejected', pageId: dirName, detail: cls.reason })
+    throw new Error(m(cls.reason!, cls.reasonParams))
+  }
   applyPortOverride(dirName, port) // before validation: an entered port stands in for a missing declared one
-  // Generate the manifest BEFORE validation so a CLI (no inferable server entry) is recognised
-  // as `terminal` here instead of being rolled back below as an apparently unrunnable page.
-  seedContainerManifest(pagesDir, dirName, port)
+  seedContainerManifest(pagesDir, dirName, port, cls)
+  // A validate failure on a green/yellow tree is an anomaly, not a config problem worth a
+  // re-download: keep the files so the row still appears (and can be fixed in the config dialog)
+  // rather than rolling the clone back and forcing a full re-pull on retry.
   try {
     readPageMeta(pagesDir, dirName)
   } catch (err) {
-    rmSync(target, { recursive: true, force: true })
-    const { [dirName]: _dropped, ...pagePorts } = getSettings().pagePorts ?? {}
-    updateSettings({ pagePorts })
-    throw new Error(m('install.clonedNoEntry', { err: (err as Error).message }))
+    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err)
+    logEvent({
+      level: 'warn',
+      kind: 'install.needsConfig',
+      pageId: dirName,
+      detail: (err as Error).message
+    })
   }
-  emit({ phase: 'finalizing' })
+  await runInstallStep(target, cls, opts, emit)
   emit({ phase: 'done', percent: 100 })
   return dirName
+}
+
+/**
+ * Run the optional dependency-install step shared by both import paths: a yellow project the user
+ * opted into auto-installing gets `npm install` (streamed into the import bar's `install` phase);
+ * a failure is surfaced as a warning and left non-fatal, so the page still lands in the list with
+ * its files and a runnable manifest — the user can retry the install or start it later.
+ */
+async function runInstallStep(
+  target: string,
+  cls: ProjectClass,
+  opts: ImportOptions | undefined,
+  emit: (p: Partial<InstallProgress>) => void
+): Promise<void> {
+  if (!opts?.autoInstall || !cls.needsInstall) return
+  emit({ phase: 'installing', message: 'npm install' })
+  try {
+    await installDeps(target, (line) => emit({ phase: 'installing', message: line }))
+  } catch (err) {
+    console.warn('[installer] dependency install failed (import kept):', (err as Error).message)
+    logEvent({
+      level: 'warn',
+      kind: 'install.depsFailed',
+      detail: (err as Error).message
+    })
+  }
 }
 
 /** A compact one-line caption from a git progress tick ("receiving (560/1234) 45%"). */
 function gitCaption(g: CloneProgress): string {
   const cnt = g.total ? ` (${g.processed ?? 0}/${g.total})` : ''
   return `${g.stage}${cnt} ${g.percent}%`
+}
+
+/**
+ * Split an npm package spec into name + version, handling `@scope/name@version` (the leading
+ * `@` of a scoped name is not a version separator). Missing version means "latest". Throws on
+ * anything that is not a plausible package name — the spec goes straight into an `npm install`
+ * argument, so characters outside the npm name grammar are refused here, not by the shell.
+ */
+export function parseNpmSpec(spec: string): { pkg: string; version?: string } {
+  const s = (spec || '').trim()
+  if (!s) throw new Error(m('install.npmSpecNeeded'))
+  const at = s.startsWith('@') ? s.indexOf('@', 1) : s.indexOf('@')
+  const pkg = at === -1 ? s : s.slice(0, at)
+  const version = at === -1 ? undefined : s.slice(at + 1)
+  const validName = /^(?:@[a-z0-9-*~][a-z0-9-*._~]*\/[a-z0-9-._~]+|[a-z0-9-._~]+)$/i.test(pkg)
+  const validVersion = version === undefined || /^[\w.+-]+$/.test(version)
+  if (!pkg || !validName || !validVersion) {
+    throw new Error(m('install.npmSpecInvalid', { spec: s }))
+  }
+  return { pkg, version }
+}
+
+/**
+ * Import a published npm package as a terminal (CLI) page — the cleanest way to host agent
+ * CLIs (`@openai/codex`, `@anthropic-ai/claude-code`, …): the package's `bin` launcher runs
+ * under the embedded terminal even when the tool itself is a native binary. A private wrapper
+ * project is created under pages/ whose only dependency is the requested package, installed
+ * with the bundled Node/npm through the container's configured registry; a package that
+ * declares no runnable `bin` is rolled back — a library has nothing the container can start.
+ */
+export async function installFromNpm(
+  pagesDir: string,
+  spec: string,
+  name?: string,
+  onProgress?: (p: InstallProgress) => void
+): Promise<string> {
+  const { pkg, version } = parseNpmSpec(spec)
+  let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
+  if (!dirName) dirName = pkg.replace(/^@/, '').replace(/\//g, '-')
+  if (!dirName || dirName === '.' || dirName === '..') throw new Error(m('install.dirNameNeeded'))
+  const target = join(pagesDir, dirName)
+  if (existsSync(target)) throw new Error(m('dsh.pageExists', { id: dirName }))
+  const specLabel = `${pkg}@${version || 'latest'}`
+  // See installFromGit: expose the source spec + target folder to the top progress bar.
+  const emit = (p: Partial<InstallProgress>): void =>
+    onProgress?.({ op: 'npm', phase: 'preparing', source: specLabel, target: dirName, ...p } as InstallProgress)
+  emit({ phase: 'preparing' })
+  mkdirSync(target, { recursive: true })
+  writeFileSync(
+    join(target, 'package.json'),
+    JSON.stringify({ name: dirName.toLowerCase(), version: '0.0.0', private: true }, null, 2) + '\n',
+    'utf-8'
+  )
+  applyNpmRegistryEnv()
+  const cli = bundledNpmCli()
+  if (!existsSync(cli)) {
+    rmSync(target, { recursive: true, force: true })
+    throw new Error(m('install.npmMissing'))
+  }
+  // Indeterminate phase: npm has no byte progress, so stream its last output line as the caption.
+  emit({ phase: 'installing', message: `npm install ${specLabel}` })
+  try {
+    await runStream(
+      getNodeExePath(),
+      [cli, 'install', specLabel, '--no-audit', '--no-fund'],
+      target,
+      `npm install ${specLabel}`,
+      (line) => emit({ phase: 'installing', message: line })
+    )
+  } catch (err) {
+    // Nothing usable landed (bad name, unpublished version, registry offline) — remove the empty
+    // wrapper so a retry starts clean; the message already names the npm failure.
+    rmSync(target, { recursive: true, force: true })
+    throw err
+  }
+  emit({ phase: 'validating' })
+  // Resolve the package's own runnable bin inside node_modules (scoped names nest one deeper).
+  const pkgDir = join(target, 'node_modules', ...pkg.split('/'))
+  const meta = readPkgSafe(pkgDir)
+  let binRel: string | null = null
+  const bin = meta?.bin
+  if (typeof bin === 'string') binRel = bin
+  else if (bin && typeof bin === 'object') {
+    const short = pkg.split('/').pop() as string
+    binRel = bin[short] ?? Object.values(bin)[0] ?? null
+  }
+  const entry = binRel ? binRel.replace(/^\.\//, '') : null
+  if (!entry || !existsSync(join(pkgDir, entry))) {
+    rmSync(target, { recursive: true, force: true })
+    logEvent({ level: 'warn', kind: 'install.rejected', pageId: dirName, detail: 'install.npmNoBin' })
+    throw new Error(m('install.npmNoBin', { pkg }))
+  }
+  // Terminal-kind manifest: no port, and the pty launches `node <entry>` from the page folder.
+  const manifest: ContainerManifest = {
+    name: dirName,
+    description: {
+      zh: msgIn('zh', 'install.importedNpmDesc'),
+      en: msgIn('en', 'install.importedNpmDesc')
+    },
+    kind: 'terminal',
+    startCommand: `node node_modules/${pkg}/${entry}`
+  }
+  writeFileSync(join(target, 'container.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf-8')
+  // Same non-fatal validation contract as the git/dir paths.
+  try {
+    readPageMeta(pagesDir, dirName)
+  } catch (err) {
+    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err)
+    logEvent({
+      level: 'warn',
+      kind: 'install.needsConfig',
+      pageId: dirName,
+      detail: (err as Error).message
+    })
+  }
+  emit({ phase: 'done', percent: 100 })
+  return dirName
 }
 
 interface CopyEntry {
@@ -300,7 +467,8 @@ export async function installFromLocalDir(
   name?: string,
   port?: number,
   originUrl?: string,
-  onProgress?: (p: InstallProgress) => void
+  onProgress?: (p: InstallProgress) => void,
+  opts?: ImportOptions
 ): Promise<string> {
   if (!existsSync(srcDir) || !existsSync(join(srcDir, '.')))
     throw new Error(m('install.srcMissing', { dir: srcDir }))
@@ -313,21 +481,35 @@ export async function installFromLocalDir(
   const emit = (p: Partial<InstallProgress>): void =>
     onProgress?.({ op: 'dir', phase: 'preparing', source: srcDir, target: dirName, ...p } as InstallProgress)
   emit({ phase: 'preparing' })
+  // Gate *before* copying: a red project (Rust/Go/monorepo root, e.g. someone points the importer
+  // at a local codex checkout) is rejected where the source lives, without duplicating a tree the
+  // container can't run and then rolling it back.
+  const cls = classifyProject(srcDir)
+  if (cls.tier === 'red') {
+    logEvent({ level: 'warn', kind: 'install.rejected', pageId: dirName, detail: cls.reason })
+    throw new Error(m(cls.reason!, cls.reasonParams))
+  }
   await copyDirWithProgress(srcDir, target, emit)
   emit({ phase: 'validating' })
   applyPortOverride(dirName, port) // before validation: an entered port stands in for a missing declared one
   // Generate the manifest BEFORE validation so a CLI is detected as `terminal` and survives
-  // the entry check below (a rolled-back import removes the whole dir, seeded manifest included).
-  seedContainerManifest(pagesDir, dirName, port)
+  // the entry check below (kind/startCommand come from the same classify verdict as the gate).
+  seedContainerManifest(pagesDir, dirName, port, cls)
+  // Like installFromGit: a validate failure on a green/yellow copy stays non-fatal and keeps the
+  // files — the row appears in the list and can be fixed via the config dialog.
   try {
     readPageMeta(pagesDir, dirName)
   } catch (err) {
-    rmSync(target, { recursive: true, force: true })
-    const { [dirName]: _dropped, ...pagePorts } = getSettings().pagePorts ?? {}
-    updateSettings({ pagePorts })
-    throw err
+    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err)
+    logEvent({
+      level: 'warn',
+      kind: 'install.needsConfig',
+      pageId: dirName,
+      detail: (err as Error).message
+    })
   }
   emit({ phase: 'finalizing' })
+  await runInstallStep(target, cls, opts, emit)
   const origin = (originUrl || '').trim()
   if (origin) {
     try {

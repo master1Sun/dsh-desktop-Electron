@@ -625,12 +625,14 @@ export interface PageProgress {
  * - preparing:  git connecting / local dir being scanned to size the copy
  * - receiving:  bytes moving (clone percentage, or copied-vs-total for the local copy)
  * - validating: readPageMeta runs — the imported tree is checked for a runnable entry
+ * - installing: an opted-in `npm install` of the imported project's dependencies is running
+ *                (no byte progress, so the bar streams as an indeterminate `message` line)
  * - finalizing: seeding container.json / adopting a git origin
  * - done:       the import finished (the renderer still clears on the resolving promise)
  */
 export interface InstallProgress {
-  op: 'git' | 'dir'
-  phase: 'preparing' | 'receiving' | 'validating' | 'finalizing' | 'done'
+  op: 'git' | 'dir' | 'npm'
+  phase: 'preparing' | 'receiving' | 'validating' | 'installing' | 'finalizing' | 'done'
   /** 0..100 when computable; undefined = indeterminate */
   percent?: number
   /** copied bytes so far (dir op) */
@@ -643,6 +645,32 @@ export interface InstallProgress {
   source?: string
   /** target folder name under pages/ once known — lets the top-bar row name the imported project */
   target?: string
+}
+
+/**
+ * Options a caller passes to the git/dir import entry points. `autoInstall` triggers an
+ * `npm install` of a yellow (has-unsatisfied-dependencies) project right after it lands, so the
+ * page can be started without a manual step; it is a no-op for green projects (nothing to install)
+ * and never fails the import (a failed install leaves the page installed and re-runnable).
+ */
+export interface ImportOptions {
+  autoInstall?: boolean
+}
+
+/**
+ * Result of `IPC.PreflightImport`: what {@link classifyProject}/{@link probeRemoteTier} concluded
+ * about a not-yet-imported source, so the import dialog can restrict the 项目类型 choice and warn
+ * (or block) before any download. `tier` is 'red' when the container cannot run it at all; a
+ * git source that can't be judged remotely reports `tier: null` (unknown) rather than a false verdict.
+ */
+export interface ImportPreflight {
+  tier: 'green' | 'yellow' | 'red' | null
+  kind?: PageKind
+  needsInstall?: boolean
+  /** set only for a red verdict: a localized reason the project can't be hosted. */
+  reason?: string
+  /** red verdict for a well-known repo with a published npm CLI: the package to install instead. */
+  suggestNpm?: string
 }
 
 /**
@@ -781,6 +809,10 @@ export const IPC = {
   GetPageLogs: 'container:get-page-logs',
   InstallPageFromGit: 'container:install-page-git',
   InstallPageFromDir: 'container:install-page-dir',
+  /** install a published npm CLI package (with a bin) as a terminal page */
+  InstallPageFromNpm: 'container:install-page-npm',
+  /** judge an import source before downloading (ImportPreflight) to gate the import UI */
+  PreflightImport: 'container:import-preflight',
   ChooseDirectory: 'container:choose-directory',
   RemovePage: 'container:remove-page',
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */

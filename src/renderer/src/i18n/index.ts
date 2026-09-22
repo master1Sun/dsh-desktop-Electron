@@ -67,8 +67,8 @@ const zh: Dict = {
     help: '帮助',
     pagesManage: '管理页面…',
     appSettings: '设置…',
-    appDsh: 'DSH 管理',
-    appOpenclaw: 'OpenClaw 管理',
+    appDsh: 'DSH 管理器',
+    appOpenclaw: 'OpenClaw 管理器',
     helpAboutUpdates: '关于与更新',
     tagExternal: '外部',
     openLogsDir: '打开日志',
@@ -136,10 +136,14 @@ const zh: Dict = {
     openLogsHint: '主进程与各页面的运行日志会落盘到该目录，便于打包后排查问题。',
     envDir: '环境目录',
     envRoot: '环境根目录',
+    secGlobal: '全局',
     envRootFollow: '跟随安装目录',
     envRootTip:
       '留空时环境目录跟随安装目录（当前 {root}）；填写后 container.json 里声明 {envRoot} 默认路径的运行时目录会改到该根目录下。dsh / openclaw 默认使用各自的 ~/.dsh、~/.openclaw，不受此项影响。改动后重启相关页面生效。',
     envRootLoaded: '加载中…',
+    currentEnvRoot: '当前环境根目录',
+    sourceFollowInstall: '跟随安装目录',
+    sourcePinned: '已固定',
     envSectionEmpty:
       '当前没有可配置的环境目录。导入一个 node 项目后，它的安装目录会自动出现在这里成为可配置项；也可在 container.json 里声明更多 envVars（如 {"key": "MYAPP_HOME", "label": "数据目录", "defaultPath": "~/.myapp"}）追加自定义目录。',
     saved: '已保存',
@@ -154,6 +158,8 @@ const zh: Dict = {
       '内嵌网页 / 外部地址里下载的文件会保存到此目录；留空即使用系统「下载」文件夹（当前 {dir}）。',
     chooseDownloadDir: '选择下载目录',
     downloadSaved: '下载目录已保存',
+    currentDownloadDir: '当前下载目录',
+    sourceFollowSystem: '跟随系统下载文件夹',
     tagExternal: '（外部）',
     tagDsh: '（DSH）',
     tagTerminal: '（终端）',
@@ -213,6 +219,7 @@ const zh: Dict = {
     /* ---- #26: 隐私数据 ---- */
     tabPrivacy: '隐私',
     webDataTitle: '当前占用',
+    secSession: '会话数据',
     webDataTotal: '合计 {size}',
     webDataTip:
       '所有内嵌页面与外部地址共用同一份浏览数据，所以清除会影响全部站点（不只是当前页）。下面是本应用用户数据目录里的实际占用。',
@@ -478,7 +485,28 @@ const zh: Dict = {
     never: '从未'
   },
   pageMgr: {
+    tabImport: '导入项目',
+    placeholderSmart: '粘贴仓库地址 / 选择本地目录 / 输入 npm 包名，自动识别',
+    hintSmart:
+      '一个输入框搞定三种来源：Git 仓库、本地项目目录、npm CLI 包。容器会自动识别类型，并在下载前完成能力预检。',
+    seg: { auto: '自动', git: 'Git', dir: '目录', npm: 'npm' },
+    kindTag: { none: '待识别', git: 'Git 仓库', dir: '本地目录', npm: 'npm 包' },
+    btnBrowseDir: '浏览文件夹…',
+    advanced: '高级选项（目录名 / 端口）',
+    btnImport: '导入并安装',
+    installViaNpm: '一键改从 npm 安装：{pkg}',
+    msgEnterSource: '请先输入或选择导入来源',
+    msgUnknownKind: '无法识别来源类型，请在「自动」处手动指定',
     tabGit: '从 Git 安装',
+    tabNpm: '从 npm 安装',
+    hintNpm:
+      '安装发布到 npm 的 CLI 工具（package.json 声明了 bin 的包，如 @openai/codex、@qwen-code/qwen-code），作为终端页运行；未声明 bin 的纯库包会被拒绝。支持 name@version / dist-tag，安装走「网络镜像」面板配置的 registry。',
+    labelPkg: '包名',
+    placeholderPkg: '如 @openai/codex@latest',
+    placeholderPkgDir: '默认取包名（scope 用 - 拼接）',
+    btnNpmInstall: '安装',
+    msgEnterPkg: '请输入 npm 包名',
+    msgInstalledNpm: '已安装 npm 包：{id}',
     tabDir: '从目录安装',
     tabInstalled: '已安装页面',
     hintGit:
@@ -499,8 +527,16 @@ const zh: Dict = {
       preparing: '准备中…',
       receiving: '下载 / 复制中…',
       validating: '校验项目配置…',
+      installing: '安装依赖中（npm install）…',
       finalizing: '完成导入…',
       done: '完成'
+    },
+    autoInstall: '导入后自动安装依赖（当 package.json 声明了 dependencies）',
+    pre: {
+      checking: '正在预检项目类型…',
+      green: '可直接运行（识别为 {kind}）',
+      yellow: '可运行但需先安装依赖（识别为 {kind}），将自动 npm install',
+      red: '容器无法托管该项目'
     },
     installed: '已安装（{n}）',
     colName: '名称',
@@ -746,6 +782,7 @@ const zh: Dict = {
     hoverDetail: '悬停查看每个任务',
     importGit: '导入项目 (Git)',
     importDir: '导入项目 (目录)',
+    importNpm: '导入项目 (npm)',
     dsh: 'DSH 本体',
     openclaw: 'OpenClaw',
     dshPlugin: 'DSH 插件',
@@ -798,7 +835,7 @@ const zh: Dict = {
     cmdOpenPage: '打开：{name}',
     cmdStartPage: '启动：{name}',
     cmdStopPage: '停止：{name}',
-    cmdTerminalPage: '终端打开：{name}',
+    cmdTerminalPage: '在终端打开：{name}',
     cmdExternalSite: '打开外部站点：{name}',
     actReload: '刷新当前页',
     actTheme: '切换主题（深/浅）',
@@ -815,12 +852,12 @@ const zh: Dict = {
     panelHelp: '帮助',
     hintPort: ':{port}',
     hintRunning: '运行中',
-    cmdPopoutPage: '弹出窗口：{name}',
+    cmdPopoutPage: '独立窗口打开：{name}',
     cmdRestartPage: '重启：{name}',
-    cmdEvents: '事件动态',
-    cmdAskOpenclaw: '问 OpenClaw',
+    cmdEvents: '查看事件动态',
+    cmdAskOpenclaw: '问 OpenClaw（打开页面）',
     cmdAskContext: '带上下文问 OpenClaw',
-    cmdOpenDshWeb: 'DSH (web)',
+    cmdOpenDshWeb: '打开 DSH (web)',
     hintKey: '{key}'
   },
   /**
@@ -1072,10 +1109,14 @@ const en: Dict = {
     openLogsHint: 'Main-process and per-page output is written here, to debug a packaged build.',
     envDir: 'Environment directory',
     envRoot: 'Environment root',
+    secGlobal: 'Global',
     envRootFollow: 'Follow install directory',
     envRootTip:
       'Empty follows the install directory (currently {root}); filling it relocates the runtime dirs whose container.json defaultPath declares {envRoot}. dsh / openclaw use their own ~/.dsh and ~/.openclaw by default and are unaffected. Restart the relevant pages to apply.',
     envRootLoaded: 'Loading…',
+    currentEnvRoot: 'Active environment root',
+    sourceFollowInstall: 'Follows the install directory',
+    sourcePinned: 'Pinned',
     envSectionEmpty:
       'No configurable env dirs yet. After importing a node project, its directory auto-appears here; you can also add more envVars in container.json (e.g. {"key": "MYAPP_HOME", "label": "Data dir", "defaultPath": "~/.myapp"}).',
     saved: 'Saved',
@@ -1090,6 +1131,8 @@ const en: Dict = {
       'Files downloaded inside an embedded page / external site save here; empty uses the OS Downloads folder (currently {dir}).',
     chooseDownloadDir: 'Choose download folder',
     downloadSaved: 'Download folder saved',
+    currentDownloadDir: 'Active download folder',
+    sourceFollowSystem: 'Follows the OS Downloads folder',
     tagExternal: ' (external)',
     tagDsh: ' (DSH)',
     tagTerminal: ' (terminal)',
@@ -1150,6 +1193,7 @@ const en: Dict = {
     /* ---- #26: 隐私数据 ---- */
     tabPrivacy: 'Privacy',
     webDataTitle: 'Current usage',
+    secSession: 'Session data',
     webDataTotal: 'Total {size}',
     webDataTip:
       'All embedded pages and external addresses share one browsing profile, so clearing affects every site — not just the one you are looking at. These are the real sizes inside this app’s user-data folder.',
@@ -1423,7 +1467,28 @@ const en: Dict = {
     never: 'Never'
   },
   pageMgr: {
+    tabImport: 'Import project',
+    placeholderSmart: 'Paste a repo URL / pick a local folder / type an npm package — auto-detected',
+    hintSmart:
+      'One field for all three sources: Git repo, local folder, or npm CLI package. The container detects the kind and pre-flights capability before any download.',
+    seg: { auto: 'Auto', git: 'Git', dir: 'Folder', npm: 'npm' },
+    kindTag: { none: 'Not detected', git: 'Git repo', dir: 'Local folder', npm: 'npm package' },
+    btnBrowseDir: 'Browse folder…',
+    advanced: 'Advanced (folder name / port)',
+    btnImport: 'Import & install',
+    installViaNpm: 'Install the published npm CLI instead: {pkg}',
+    msgEnterSource: 'Enter or pick an import source first',
+    msgUnknownKind: 'Cannot detect the source kind — pick one under Auto',
     tabGit: 'Install from Git',
+    tabNpm: 'Install from npm',
+    hintNpm:
+      'Installs a published npm CLI (a package declaring a bin, e.g. @openai/codex) and runs it as a terminal page; packages without a bin (libraries) are refused. Accepts name@version / dist-tags and uses the registry configured in the mirror settings panel.',
+    labelPkg: 'Package',
+    placeholderPkg: 'e.g. @openai/codex@latest',
+    placeholderPkgDir: 'Defaults to the package name (scope joined with -)',
+    btnNpmInstall: 'Install',
+    msgEnterPkg: 'Enter an npm package name',
+    msgInstalledNpm: 'Installed npm package: {id}',
     tabDir: 'Install from folder',
     tabInstalled: 'Installed pages',
     hintGit:
@@ -1445,8 +1510,16 @@ const en: Dict = {
       preparing: 'Preparing…',
       receiving: 'Downloading / copying…',
       validating: 'Validating project…',
+      installing: 'Installing dependencies (npm install)…',
       finalizing: 'Finalizing…',
       done: 'Done'
+    },
+    autoInstall: 'Auto-install dependencies after import (when package.json lists dependencies)',
+    pre: {
+      checking: 'Checking project type…',
+      green: 'Runs as-is (detected as {kind})',
+      yellow: 'Runnable but needs a dependency install first (detected as {kind}); will run npm install',
+      red: 'The container cannot host this project'
     },
     installed: 'Installed ({n})',
     colName: 'Name',
@@ -1697,6 +1770,7 @@ const en: Dict = {
     hoverDetail: 'Hover for per-task details',
     importGit: 'Importing project (Git)',
     importDir: 'Importing project (folder)',
+    importNpm: 'Importing project (npm)',
     dsh: 'DSH core',
     openclaw: 'OpenClaw',
     dshPlugin: 'DSH plugin',

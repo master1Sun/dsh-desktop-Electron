@@ -5,6 +5,8 @@ import {
   Delete,
   FolderOpened,
   Download,
+  Box,
+  Promotion,
   Menu,
   VideoPlay,
   VideoPause,
@@ -23,23 +25,17 @@ import { usePagesStore, type PageState } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import { useRuntimesStore } from '../stores/runtimes'
 import { CONTAINER_REPO_URL, DISPLAY_TIME_ZONE, DISPLAY_TIME_ZONE_LABEL } from '@shared/types'
+import { detectSourceKind, expandGitSource, type SourceKind } from '@shared/smartSource'
 import type { PageMetrics, PortCheckResult } from '@shared/types'
 import { t } from '../i18n'
-
-/** Mirror of the main-process check: a filesystem path typed where a URL was expected. */
-function looksLikeLocalPath(s: string): boolean {
-  return (
-    /^[a-z]:[\\/]/i.test(s) || s.startsWith('\\\\') || /^\.\.?[/\\]/.test(s) || s.startsWith('/')
-  )
-}
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
 const runtimes = useRuntimesStore()
 const emit = defineEmits<{ close: [] }>()
 
-/** 页面面板竖排分类 tab：git 导入 / 目录导入 / 已安装列表。 */
-const activeTab = ref('git')
+/** 页面面板竖排分类 tab：智能导入 / 已安装列表。 */
+const activeTab = ref('install')
 
 /**
  * A hosted dsh/openclaw row can't start without its CLI runtime (both are provisioned on demand
@@ -95,8 +91,94 @@ async function killHolderAndRetry(row: PageState): Promise<void> {
   }
 }
 
-const gitForm = reactive({ url: '', name: '', port: '' })
-const dirForm = reactive({ path: '', name: '', port: '' })
+/* ── 智能导入：一个来源框，自动识别 Git / 本地目录 / npm 包（shared/smartSource 语法嗅探）。
+   三个表单合并成一个：粘贴地址、选择目录或输入包名，表单自适应类型；预检（main:
+   project-classify）在任何下载之前给出档位结论，红档的知名仓库（codex 等）附一键改走
+   npm CLI。目录名 / 端口等少用旋钮折进「高级选项」，默认无需触碰。 */
+const source = ref('')
+const adv = reactive({ name: '', port: '' })
+const kindOverride = ref<'auto' | SourceKind>('auto')
+const advancedOpen = ref<string[]>([])
+const kind = computed<SourceKind | null>(() =>
+  kindOverride.value === 'auto' ? detectSourceKind(source.value) : kindOverride.value
+)
+const kindLabel = computed(() => (kind.value ? t(`pageMgr.kindTag.${kind.value}`) : t('pageMgr.kindTag.none')))
+const kindTagType = computed(() =>
+  kind.value === 'git'
+    ? 'primary'
+    : kind.value === 'dir'
+      ? 'warning'
+      : kind.value === 'npm'
+        ? 'success'
+        : 'info'
+)
+const kindHint = computed(() =>
+  kind.value === 'git'
+    ? t('pageMgr.hintGit')
+    : kind.value === 'dir'
+      ? t('pageMgr.hintDir')
+      : kind.value === 'npm'
+        ? t('pageMgr.hintNpm')
+        : t('pageMgr.hintSmart')
+)
+const kindIcon = computed(() =>
+  kind.value === 'git'
+    ? Download
+    : kind.value === 'dir'
+      ? FolderOpened
+      : kind.value === 'npm'
+        ? Box
+        : Promotion
+)
+/** `autoInstall` rides along as ImportOptions so a yellow project gets its `npm install`. */
+const autoInstall = ref(true)
+interface PreflightView {
+  checking: boolean
+  tier: 'green' | 'yellow' | 'red' | null
+  kind?: string
+  reason?: string
+  suggestNpm?: string
+}
+const pre = reactive<PreflightView>({ checking: false, tier: null })
+let preflightSeq = 0
+
+async function runPreflight(): Promise<void> {
+  const s = source.value.trim()
+  const k = kind.value
+  preflightSeq++
+  const seq = preflightSeq
+  pre.checking = false
+  pre.tier = null
+  pre.kind = undefined
+  pre.reason = undefined
+  pre.suggestNpm = undefined
+  // Only Git/folder sources get classified (remote probe / local stat); an npm spec is gated
+  // by the bin check inside the install itself, so there is nothing to pre-flight.
+  if (!s || !k || k === 'npm') return
+  pre.checking = true
+  try {
+    const res = await window.container.preflightImport(k === 'git' ? expandGitSource(s) : s, k === 'dir')
+    if (seq !== preflightSeq) return
+    if (res?.ok && res.data) {
+      pre.tier = res.data.tier
+      pre.kind = res.data.kind
+      pre.reason = res.data.reason
+      pre.suggestNpm = res.data.suggestNpm
+    }
+  } catch {
+    /* best-effort: the authoritative gate still runs inside the import itself */
+  } finally {
+    if (seq === preflightSeq) pre.checking = false
+  }
+}
+
+// Re-judge shortly after typing (a paste lands here too); blur is the explicit fallback.
+let preflightTimer: number | undefined
+watch([source, kindOverride], () => {
+  window.clearTimeout(preflightTimer)
+  preflightTimer = window.setTimeout(runPreflight, 450)
+})
+onBeforeUnmount(() => window.clearTimeout(preflightTimer))
 // The in-flight import lives in the store, not here, so closing/reopening the Pages panel
 // while a clone or copy runs still shows the progress bar (component state would reset).
 const installing = computed(() => pagesStore.installing)
@@ -122,66 +204,83 @@ function parsePort(raw: string): number | undefined {
   return n
 }
 
-async function installGit(): Promise<void> {
-  const url = gitForm.url.trim()
-  if (!url) {
-    ElMessage.warning(t('pageMgr.msgEnterRepo'))
+async function install(): Promise<void> {
+  const s = source.value.trim()
+  if (!s) {
+    ElMessage.warning(t('pageMgr.msgEnterSource'))
+    return
+  }
+  const k = kind.value
+  if (!k) {
+    ElMessage.warning(t('pageMgr.msgUnknownKind'))
     return
   }
   try {
-    // A local folder pasted into the URL field: import it as a copy. Only the container
-    // repo itself gets adopted for git updates — a blind origin would mislead the pull.
-    if (looksLikeLocalPath(url)) {
-      const isContainerRepo = /[/\\]DesktopContainer(\/|$)/i.test(url)
+    if (k === 'npm') {
+      await npmInstall(s)
+    } else if (k === 'dir') {
+      // Only the container repo itself gets adopted for git updates — a blind origin would mislead the pull.
+      const isContainerRepo = /[/\\]DesktopContainer(\/|$)/i.test(s)
       const id = await pagesStore.installDir(
-        url,
-        gitForm.name.trim() || undefined,
-        parsePort(gitForm.port),
-        isContainerRepo ? CONTAINER_REPO_URL : undefined
+        s,
+        adv.name.trim() || undefined,
+        parsePort(adv.port),
+        isContainerRepo ? CONTAINER_REPO_URL : undefined,
+        { autoInstall: autoInstall.value }
       )
       ElMessage.success(t('pageMgr.msgCopiedDir', { id }))
     } else {
       const id = await pagesStore.installGit(
-        url,
-        gitForm.name.trim() || undefined,
-        parsePort(gitForm.port)
+        expandGitSource(s),
+        adv.name.trim() || undefined,
+        parsePort(adv.port),
+        { autoInstall: autoInstall.value }
       )
       ElMessage.success(t('pageMgr.msgInstalledGit', { id }))
     }
-    gitForm.url = ''
-    gitForm.name = ''
-    gitForm.port = ''
+    resetImportForm()
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
 }
 
-async function installDir(): Promise<void> {
-  if (!dirForm.path.trim()) {
-    ElMessage.warning(t('pageMgr.msgEnterLocalPath'))
-    return
-  }
+/** Install a published npm CLI package as a terminal page (main resolves/validates its bin). */
+async function npmInstall(spec: string): Promise<string> {
+  const id = await pagesStore.installNpm(spec, adv.name.trim() || undefined)
+  ElMessage.success(t('pageMgr.msgInstalledNpm', { id }))
+  return id
+}
+
+/** Red-tier one-click rescue: a rejected well-known repo ships an npm CLI — install that. */
+async function installSuggestedNpm(): Promise<void> {
+  const pkg = pre.suggestNpm
+  if (!pkg) return
   try {
-    const id = await pagesStore.installDir(
-      dirForm.path.trim(),
-      dirForm.name.trim() || undefined,
-      parsePort(dirForm.port)
-    )
-    ElMessage.success(t('pageMgr.msgCopiedDir', { id }))
-    dirForm.path = ''
-    dirForm.name = ''
-    dirForm.port = ''
+    await npmInstall(pkg)
+    resetImportForm()
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
 }
 
-/** Open the OS folder picker and drop the chosen absolute path into the install field. */
+function resetImportForm(): void {
+  source.value = ''
+  adv.name = ''
+  adv.port = ''
+  kindOverride.value = 'auto'
+  pre.checking = false
+  pre.tier = null
+  pre.kind = undefined
+  pre.reason = undefined
+  pre.suggestNpm = undefined
+}
+
+/** Open the OS folder picker; the chosen absolute path auto-detects as a dir source. */
 async function chooseDir(): Promise<void> {
   try {
     const res = await window.container.chooseDirectory()
     if (!res.ok) throw new Error(res.error || t('pageMgr.msgChooseDirFail'))
-    if (res.data) dirForm.path = String(res.data)
+    if (res.data) source.value = String(res.data) // the source watch re-runs the pre-flight
   } catch (err) {
     ElMessage.error((err as Error).message)
   }
@@ -573,92 +672,113 @@ function hasDownDep(row: PageState): boolean {
 <template>
   <div class="page-manager">
     <el-tabs v-model="activeTab" class="v-tabs" tab-position="left">
-      <el-tab-pane name="git">
+      <el-tab-pane name="install">
         <template #label>
           <span class="tab-label"
-            ><el-icon><Download /></el-icon>{{ t('pageMgr.tabGit') }}</span
+            ><el-icon><Promotion /></el-icon>{{ t('pageMgr.tabImport') }}</span
           >
         </template>
-        <p class="hint">{{ t('pageMgr.hintGit') }}</p>
-        <el-form label-position="top" @submit.prevent="installGit">
-          <el-form-item :label="t('pageMgr.labelRepo')">
+        <div class="import-wrap">
+          <p class="hint">{{ kindHint }}</p>
+          <div class="src-row">
             <el-input
-              v-model="gitForm.url"
-              placeholder="https://github.com/owner/deepseek-harness.git"
+              v-model="source"
+              size="large"
               clearable
-            />
-          </el-form-item>
-          <el-form-item :label="t('pageMgr.labelCustomDir')">
-            <el-input
-              v-model="gitForm.name"
-              :placeholder="t('pageMgr.placeholderDirName')"
-              clearable
-            />
-          </el-form-item>
-          <el-form-item :label="t('pageMgr.labelPort')">
-            <el-input
-              v-model="gitForm.port"
-              :placeholder="t('pageMgr.placeholderPort')"
-              clearable
-            />
-          </el-form-item>
-          <el-button type="primary" :loading="installing === 'git'" @click="installGit">
-            {{ t('pageMgr.btnClone') }}
-          </el-button>
-          <div v-if="installing" class="install-progress">
-            <el-progress
-              :percentage="installPct"
-              :indeterminate="installIndeterminate"
-              :duration="1.4"
-              striped
-              :show-text="!installIndeterminate"
-              :stroke-width="12"
-            />
-            <div class="ip-line">
-              <span>{{ installPhaseText }}</span>
-              <span v-if="installDetail" class="ip-raw">{{ installDetail }}</span>
-            </div>
-          </div>
-        </el-form>
-      </el-tab-pane>
-
-      <el-tab-pane name="dir">
-        <template #label>
-          <span class="tab-label"
-            ><el-icon><FolderOpened /></el-icon>{{ t('pageMgr.tabDir') }}</span
-          >
-        </template>
-        <p class="hint">{{ t('pageMgr.hintDir') }}</p>
-        <el-form label-position="top" @submit.prevent="installDir">
-          <el-form-item :label="t('pageMgr.labelLocalPath')">
-            <el-input
-              v-model="dirForm.path"
-              :placeholder="t('pageMgr.placeholderLocalPath')"
-              clearable
+              :placeholder="t('pageMgr.placeholderSmart')"
+              @blur="runPreflight"
+              @keyup.enter="install"
             >
               <template #prefix>
-                <el-icon class="pick-dir" :title="t('common.browse')" @click="chooseDir"
-                  ><FolderOpened
-                /></el-icon>
+                <el-icon class="src-icon"><component :is="kindIcon" /></el-icon>
               </template>
             </el-input>
-          </el-form-item>
-          <el-form-item :label="t('pageMgr.labelTargetDir')">
-            <el-input
-              v-model="dirForm.name"
-              :placeholder="t('pageMgr.placeholderTargetDir')"
-              clearable
+            <el-button
+              size="large"
+              :icon="FolderOpened"
+              :title="t('pageMgr.btnBrowseDir')"
+              @click="chooseDir"
             />
-          </el-form-item>
-          <el-form-item :label="t('pageMgr.labelPort')">
-            <el-input
-              v-model="dirForm.port"
-              :placeholder="t('pageMgr.placeholderPort')"
-              clearable
-            />
-          </el-form-item>
-          <el-button type="primary" :loading="installing === 'dir'" @click="installDir">
-            {{ t('pageMgr.btnCopy') }}
+          </div>
+          <div class="kind-row">
+            <el-radio-group v-model="kindOverride" size="small">
+              <el-radio-button value="auto">{{ t('pageMgr.seg.auto') }}</el-radio-button>
+              <el-radio-button value="git">{{ t('pageMgr.seg.git') }}</el-radio-button>
+              <el-radio-button value="dir">{{ t('pageMgr.seg.dir') }}</el-radio-button>
+              <el-radio-button value="npm">{{ t('pageMgr.seg.npm') }}</el-radio-button>
+            </el-radio-group>
+            <el-tag size="small" effect="plain" :type="kindTagType">{{ kindLabel }}</el-tag>
+            <span v-if="pre.checking" class="preflight-line">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              <span>{{ t('pageMgr.pre.checking') }}</span>
+            </span>
+          </div>
+          <el-alert
+            v-if="pre.tier === 'red'"
+            class="preflight-alert"
+            type="error"
+            show-icon
+            :closable="false"
+            :title="t('pageMgr.pre.red')"
+          >
+            <div class="pre-reason">{{ pre.reason }}</div>
+            <el-button
+              v-if="pre.suggestNpm"
+              type="primary"
+              size="small"
+              class="via-npm"
+              :loading="installing === 'npm'"
+              @click="installSuggestedNpm"
+            >
+              {{ t('pageMgr.installViaNpm', { pkg: pre.suggestNpm }) }}
+            </el-button>
+          </el-alert>
+          <el-alert
+            v-else-if="pre.tier === 'yellow' || pre.tier === 'green'"
+            class="preflight-alert"
+            :type="pre.tier === 'yellow' ? 'warning' : 'success'"
+            show-icon
+            :closable="false"
+            :title="
+              t(pre.tier === 'yellow' ? 'pageMgr.pre.yellow' : 'pageMgr.pre.green', {
+                kind: pre.kind || ''
+              })
+            "
+          />
+          <el-collapse v-model="advancedOpen" class="adv-collapse">
+            <el-collapse-item name="adv" :title="t('pageMgr.advanced')">
+              <div class="adv-grid">
+                <div class="adv-item">
+                  <div class="adv-label">{{ t('pageMgr.labelCustomDir') }}</div>
+                  <el-input
+                    v-model="adv.name"
+                    :placeholder="t('pageMgr.placeholderDirName')"
+                    clearable
+                  />
+                </div>
+                <div v-if="kind !== 'npm'" class="adv-item">
+                  <div class="adv-label">{{ t('pageMgr.labelPort') }}</div>
+                  <el-input
+                    v-model="adv.port"
+                    :placeholder="t('pageMgr.placeholderPort')"
+                    clearable
+                  />
+                </div>
+                <el-checkbox v-if="kind !== 'npm'" v-model="autoInstall">{{
+                  t('pageMgr.autoInstall')
+                }}</el-checkbox>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
+          <el-button
+            type="primary"
+            size="large"
+            class="install-btn"
+            :loading="!!installing"
+            :disabled="!kind || pre.tier === 'red'"
+            @click="install"
+          >
+            {{ t('pageMgr.btnImport') }}
           </el-button>
           <div v-if="installing" class="install-progress">
             <el-progress
@@ -674,7 +794,7 @@ function hasDownDep(row: PageState): boolean {
               <span v-if="installDetail" class="ip-raw">{{ installDetail }}</span>
             </div>
           </div>
-        </el-form>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane name="installed">
@@ -1135,13 +1255,6 @@ function hasDownDep(row: PageState): boolean {
   border-radius: 6px;
   font-size: 12px;
 }
-.pick-dir {
-  cursor: pointer;
-  color: var(--text-dim);
-}
-.pick-dir:hover {
-  color: var(--accent-strong);
-}
 .install-progress {
   margin-top: 12px;
   max-width: 480px;
@@ -1160,6 +1273,71 @@ function hasDownDep(row: PageState): boolean {
   white-space: nowrap;
   max-width: 60%;
   font-family: var(--mono, ui-monospace, monospace);
+}
+/* Pre-flight verdict under the source field: a slim banner naming the tier + reason. */
+.preflight-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.preflight-alert {
+  margin-top: 8px;
+  max-width: 480px;
+}
+/* Smart import: one source row + browse button, kind chips under it, action at the bottom. */
+.import-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 620px;
+}
+.import-wrap .hint {
+  margin: 0;
+}
+.src-row {
+  display: flex;
+  gap: 8px;
+}
+.src-row .el-input {
+  flex: 1;
+}
+.src-icon {
+  color: var(--text-dim);
+}
+.kind-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: -6px;
+}
+.pre-reason {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.via-npm {
+  margin-top: 8px;
+}
+.adv-collapse {
+  max-width: 480px;
+  margin-top: -2px;
+}
+.adv-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.adv-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.install-btn {
+  align-self: flex-start;
+  min-width: 180px;
 }
 /* The panel card is ~860px wide and `label-position="top"` lets the fields stretch the whole
    way across, which reads as a broken layout. Cap the install fields to a normal form width.

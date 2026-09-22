@@ -7,6 +7,7 @@ import {
   type DownloadProgress,
   type DshPluginOpEvent,
   type HotkeySignal,
+  type ImportOptions,
   type InstallProgress,
   type ListEventsArgs,
   type PageProgress,
@@ -36,10 +37,20 @@ const api = {
   stopPage: (id: string) => ipcRenderer.invoke(IPC.StopPage, id),
   restartPage: (id: string) => ipcRenderer.invoke(IPC.RestartPage, id),
   getPageLogs: (id: string) => ipcRenderer.invoke(IPC.GetPageLogs, id),
-  installPageFromGit: (repoUrl: string, name?: string, port?: number) =>
-    ipcRenderer.invoke(IPC.InstallPageFromGit, repoUrl, name, port),
-  installPageFromDir: (srcDir: string, name?: string, port?: number, originUrl?: string) =>
-    ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port, originUrl),
+  installPageFromGit: (repoUrl: string, name?: string, port?: number, opts?: ImportOptions) =>
+    ipcRenderer.invoke(IPC.InstallPageFromGit, repoUrl, name, port, opts),
+  installPageFromDir: (
+    srcDir: string,
+    name?: string,
+    port?: number,
+    originUrl?: string,
+    opts?: ImportOptions
+  ) => ipcRenderer.invoke(IPC.InstallPageFromDir, srcDir, name, port, originUrl, opts),
+  installPageFromNpm: (spec: string, name?: string) =>
+    ipcRenderer.invoke(IPC.InstallPageFromNpm, spec, name),
+  // judge an import source before downloading: IpcResult<ImportPreflight> (tier null = unknown)
+  preflightImport: (source: string, isDir: boolean) =>
+    ipcRenderer.invoke(IPC.PreflightImport, source, isDir),
   chooseDirectory: (title?: string) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id: string) => ipcRenderer.invoke(IPC.RemovePage, id),
   resetBuiltinPage: (id: string) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),

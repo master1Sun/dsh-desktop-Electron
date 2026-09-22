@@ -1,7 +1,7 @@
 import { reactive, ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { useTerminalStore } from './terminal'
-import type { InstallProgress, PageProgress, PageState } from '../../../shared/types'
+import type { ImportOptions, InstallProgress, PageProgress, PageState } from '../../../shared/types'
 import { t } from '../i18n'
 
 /**
@@ -33,7 +33,7 @@ export const usePagesStore = defineStore('pages', () => {
   /** Live progress of the current page import (git clone / local copy); null when idle. */
   const installProgress = ref<InstallProgress | null>(null)
   /** Which import is in flight (survives the Pages panel closing/reopening, unlike component-local state). */
-  const installing = ref<'git' | 'dir' | null>(null)
+  const installing = ref<'git' | 'dir' | 'npm' | null>(null)
 
   const runningPages = computed(() => pages.filter((p) => p.status === 'running'))
   const installablePages = computed(() => pages.filter((p) => !p.external))
@@ -102,11 +102,18 @@ export const usePagesStore = defineStore('pages', () => {
     return unwrap<string[]>(window.container.getPageLogs(id))
   }
 
-  async function installGit(url: string, name?: string, port?: number): Promise<string> {
+  async function installGit(
+    url: string,
+    name?: string,
+    port?: number,
+    opts?: ImportOptions
+  ): Promise<string> {
     installing.value = 'git'
     installProgress.value = { op: 'git', phase: 'preparing' }
     try {
-      const dirName = await unwrap<string>(window.container.installPageFromGit(url, name, port))
+      const dirName = await unwrap<string>(
+        window.container.installPageFromGit(url, name, port, opts)
+      )
       await refresh()
       return dirName
     } finally {
@@ -119,14 +126,29 @@ export const usePagesStore = defineStore('pages', () => {
     dir: string,
     name?: string,
     port?: number,
-    originUrl?: string
+    originUrl?: string,
+    opts?: ImportOptions
   ): Promise<string> {
     installing.value = 'dir'
     installProgress.value = { op: 'dir', phase: 'preparing' }
     try {
       const dirName = await unwrap<string>(
-        window.container.installPageFromDir(dir, name, port, originUrl)
+        window.container.installPageFromDir(dir, name, port, originUrl, opts)
       )
+      await refresh()
+      return dirName
+    } finally {
+      installing.value = null
+      installProgress.value = null
+    }
+  }
+
+  /** Install a published npm CLI package (needs a bin) as a terminal page. */
+  async function installNpm(spec: string, name?: string): Promise<string> {
+    installing.value = 'npm'
+    installProgress.value = { op: 'npm', phase: 'preparing' }
+    try {
+      const dirName = await unwrap<string>(window.container.installPageFromNpm(spec, name))
       await refresh()
       return dirName
     } finally {
@@ -189,6 +211,7 @@ export const usePagesStore = defineStore('pages', () => {
     logs,
     installGit,
     installDir,
+    installNpm,
     setPort,
     remove,
     openTerminal

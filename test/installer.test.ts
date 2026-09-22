@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs'
 
 vi.mock('electron', () => {
   const stub = {
@@ -37,7 +37,12 @@ vi.mock('electron-store', () => {
   }
 })
 
-import { installFromLocalDir, removePage } from '../src/main/runtime/installer'
+import {
+  installFromLocalDir,
+  installFromNpm,
+  parseNpmSpec,
+  removePage
+} from '../src/main/runtime/installer'
 import type { InstallProgress } from '../src/shared/types'
 
 describe('installFromLocalDir container.json seeding', () => {
@@ -226,6 +231,46 @@ describe('installFromLocalDir container.json seeding', () => {
   })
 })
 
+describe('installFromLocalDir capability gate', () => {
+  it('rejects a non-node (Rust) project before copying anything', async () => {
+    const srcBase = mkdtempSync(join(tmpdir(), 'dsh-gate-src-'))
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-gate-pages-'))
+    try {
+      mkdirSync(join(srcBase, 'rusty'))
+      writeFileSync(join(srcBase, 'rusty', 'Cargo.toml'), '[package]\nname = "rusty"\n')
+      writeFileSync(
+        join(srcBase, 'rusty', 'package.json'),
+        JSON.stringify({ name: 'rusty', private: true })
+      )
+      await expect(installFromLocalDir(pagesDir, join(srcBase, 'rusty'), 'rusty')).rejects.toThrow(
+        /Rust/
+      )
+      // The gate runs first: no half-copied tree is left behind to re-trigger a copy.
+      expect(existsSync(join(pagesDir, 'rusty'))).toBe(false)
+    } finally {
+      rmSync(srcBase, { recursive: true, force: true })
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a zero-dependency page even with autoInstall on (no install step fires)', async () => {
+    const srcBase = mkdtempSync(join(tmpdir(), 'dsh-gate-src-'))
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-gate-pages-'))
+    try {
+      mkdirSync(join(srcBase, 'plain'))
+      writeFileSync(join(srcBase, 'plain', 'server.js'), '// entry\n')
+      const events: InstallProgress[] = []
+      const id = await installFromLocalDir(pagesDir, join(srcBase, 'plain'), 'plain', 4321, undefined, (p) => events.push(p), { autoInstall: true })
+      expect(existsSync(join(pagesDir, id, 'container.json'))).toBe(true)
+      // A green project never enters the installing phase.
+      expect(events.map((e) => e.phase)).not.toContain('installing')
+    } finally {
+      rmSync(srcBase, { recursive: true, force: true })
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('removePage built-in protection', () => {
   it('refuses to delete container-shipped pages and keeps their dirs', () => {
     const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-builtin-'))
@@ -246,6 +291,51 @@ describe('removePage built-in protection', () => {
       mkdirSync(join(pagesDir, 'my-app'), { recursive: true })
       removePage(pagesDir, 'my-app')
       expect(existsSync(join(pagesDir, 'my-app'))).toBe(false)
+    } finally {
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('parseNpmSpec', () => {
+  it('splits name and version, scoped or plain', () => {
+    expect(parseNpmSpec('@openai/codex@latest')).toEqual({
+      pkg: '@openai/codex',
+      version: 'latest'
+    })
+    expect(parseNpmSpec('express')).toEqual({ pkg: 'express', version: undefined })
+    expect(parseNpmSpec('express@4.19.2')).toEqual({ pkg: 'express', version: '4.19.2' })
+    expect(parseNpmSpec('  @scope/name  ')).toEqual({ pkg: '@scope/name', version: undefined })
+  })
+
+  it('refuses empty or malformed specs before touching the network', () => {
+    expect(() => parseNpmSpec('')).toThrow(/请输入要安装的 npm 包名/)
+    expect(() => parseNpmSpec('@openai/codex@')).toThrow(/无效的 npm 包名/)
+    expect(() => parseNpmSpec('bad name!')).toThrow(/无效的 npm 包名/)
+    expect(() => parseNpmSpec('@noSlash')).toThrow(/无效的 npm 包名/)
+    expect(() => parseNpmSpec('foo@bar@baz')).toThrow(/无效的 npm 包名/)
+  })
+})
+
+describe('installFromNpm local guards', () => {
+  it('refuses a bad spec without creating anything', async () => {
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-npm-pages-'))
+    try {
+      await expect(installFromNpm(pagesDir, ' ')).rejects.toThrow(/请输入要安装的 npm 包名/)
+      await expect(installFromNpm(pagesDir, 'not a pkg!')).rejects.toThrow(/无效的 npm 包名/)
+      expect(readdirSync(pagesDir)).toEqual([])
+    } finally {
+      rmSync(pagesDir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to shadow an existing page folder', async () => {
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-npm-pages-'))
+    try {
+      mkdirSync(join(pagesDir, 'openai-codex'), { recursive: true })
+      await expect(installFromNpm(pagesDir, '@openai/codex@latest')).rejects.toThrow(/已存在/)
+      // The existing folder stays untouched (no wrapper package.json written into it).
+      expect(readdirSync(join(pagesDir, 'openai-codex'))).toEqual([])
     } finally {
       rmSync(pagesDir, { recursive: true, force: true })
     }

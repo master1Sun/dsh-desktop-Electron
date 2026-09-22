@@ -126,10 +126,19 @@ describe('event timeline queries', () => {
   beforeEach(() => {
     rmSync(join(scratch, 'logs'), { recursive: true, force: true })
     resetEventState()
-    logEvent({ level: 'info', kind: 'page.start', pageId: 'a' })
-    logEvent({ level: 'warn', kind: 'page.crash', pageId: 'a', meta: { n: 1 } })
-    logEvent({ level: 'error', kind: 'page.giveUp', pageId: 'b' })
-    logEvent({ level: 'info', kind: 'download.done', pageId: 'b' })
+    // Give every seeded row its own millisecond: the "lower time bound" case below slices by
+    // ts, and two rows written in the same ms make the boundary include one extra row (flake).
+    const logSpaced = (ev: Parameters<typeof logEvent>[0]): void => {
+      const t = Date.now()
+      logEvent(ev)
+      while (Date.now() <= t) {
+        /* spin until the clock moves so the next row gets a strictly newer ts */
+      }
+    }
+    logSpaced({ level: 'info', kind: 'page.start', pageId: 'a' })
+    logSpaced({ level: 'warn', kind: 'page.crash', pageId: 'a', meta: { n: 1 } })
+    logSpaced({ level: 'error', kind: 'page.giveUp', pageId: 'b' })
+    logSpaced({ level: 'info', kind: 'download.done', pageId: 'b' })
   })
 
   it('returns the newest first', () => {

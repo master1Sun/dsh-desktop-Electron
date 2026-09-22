@@ -12,6 +12,8 @@ import {
   type DshTokenResult,
   type DshUpdateChannel,
   type HotkeySignal,
+  type ImportOptions,
+  type ImportPreflight,
   type InstallProgress,
   type KeybindingAction,
   type ListEventsArgs,
@@ -51,7 +53,17 @@ import {
   applyLaunchAtStartup,
   applyNpmRegistryEnv
 } from './store'
-import { installFromGit, installFromLocalDir, removePage } from '../runtime/installer'
+import {
+  installFromGit,
+  installFromLocalDir,
+  installFromNpm,
+  removePage
+} from '../runtime/installer'
+import {
+  classifyProject,
+  probeRemoteTier,
+  npmSuggestionFor
+} from '../runtime/project-classify'
 import {
   checkUpdates,
   performUpdate,
@@ -505,7 +517,13 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(
     IPC.InstallPageFromGit,
-    async (_e, repoUrl: string, name?: string, port?: number): Promise<IpcResult> => {
+    async (
+      _e,
+      repoUrl: string,
+      name?: string,
+      port?: number,
+      opts?: ImportOptions
+    ): Promise<IpcResult> => {
       // Stream import progress back to the requesting window (see InstallProgress).
       const sender = _e.sender
       const onProgress = (p: InstallProgress): void => {
@@ -518,7 +536,8 @@ export function registerIpc(registry: PageRegistry): void {
           name,
           port,
           undefined,
-          onProgress
+          onProgress,
+          opts
         )
         registry.reconcile()
         clearUpdateCache()
@@ -539,7 +558,8 @@ export function registerIpc(registry: PageRegistry): void {
       srcDir: string,
       name?: string,
       port?: number,
-      originUrl?: string
+      originUrl?: string,
+      opts?: ImportOptions
     ): Promise<IpcResult> => {
       const sender = _e.sender
       const onProgress = (p: InstallProgress): void => {
@@ -552,7 +572,8 @@ export function registerIpc(registry: PageRegistry): void {
           name,
           port,
           originUrl,
-          onProgress
+          onProgress,
+          opts
         )
         registry.reconcile()
         clearUpdateCache()
@@ -562,6 +583,52 @@ export function registerIpc(registry: PageRegistry): void {
       } finally {
         // See UpdateNodeRuntime: guarantee a terminal event so the top bar never sticks on error.
         onProgress({ op: 'dir', phase: 'done', percent: 100 })
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.InstallPageFromNpm,
+    async (_e, spec: string, name?: string): Promise<IpcResult> => {
+      const sender = _e.sender
+      const onProgress = (p: InstallProgress): void => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p)
+      }
+      try {
+        const dirName = await installFromNpm(resolvePagesDir(), spec, name, onProgress)
+        registry.reconcile()
+        clearUpdateCache()
+        return ok(dirName)
+      } catch (err) {
+        return fail(err)
+      } finally {
+        // See UpdateNodeRuntime: guarantee a terminal event so the top bar never sticks on error.
+        onProgress({ op: 'npm', phase: 'done', percent: 100 })
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.PreflightImport,
+    async (_e, source: string, isDir: boolean): Promise<IpcResult> => {
+      // Same verdict the import gate uses, exposed early so the dialog can restrict the
+      // project type / warn before any bytes move. Failures are "unknown", never a false block.
+      try {
+        const cls = isDir
+          ? classifyProject(String(source || '').trim())
+          : await probeRemoteTier(String(source || '').trim())
+        if (!cls) return ok({ tier: null } as ImportPreflight)
+        return ok({
+          tier: cls.tier,
+          kind: cls.kind,
+          needsInstall: cls.needsInstall,
+          reason: cls.reason ? m(cls.reason, cls.reasonParams) : undefined,
+          // a rejected well-known repo (codex & friends) has a runnable npm CLI: offer it.
+          suggestNpm:
+            cls.tier === 'red' ? (npmSuggestionFor(String(source || '')) ?? undefined) : undefined
+        } as ImportPreflight)
+      } catch (err) {
+        return fail(err)
       }
     }
   )
@@ -1065,6 +1132,18 @@ export function registerIpc(registry: PageRegistry): void {
   // The container updated its own source: relaunch so the new code runs. before-quit
   // still gets to shut the pages down; --dsh-relaunched bypasses the single-instance lock.
   ipcMain.handle(IPC.RelaunchApp, (): IpcResult => {
+    // Dev landmine (black window): a bare app.relaunch spawns `electron .` as the PID exits, but
+    // that exit also tears down the electron-vite parent — the renderer dev server dies with it,
+    // and the orphaned relaunch loads a dead http://localhost URL into a black window (it also
+    // carries --dsh-relaunched, so it sidesteps the single-instance lock and can coexist with the
+    // next `npm run dev`). electron-vite already rebuilds/restarts main-process edits in dev, so
+    // a self-relaunch buys nothing here — explain and stay alive instead.
+    if (!app.isPackaged) {
+      dialog
+        .showMessageBox({ type: 'info', title: m('dialog.title'), message: m('update.relaunchDev') })
+        .catch(() => undefined)
+      return ok(false)
+    }
     // A container asar update is staged under resources/updates/<commit>/: hand the swap to a
     // detached helper that replaces app.asar the moment this PID exits and then relaunches, so the
     // update is applied IN PLACE (the old boot.cjs next-launch hook is not on the launch path).
