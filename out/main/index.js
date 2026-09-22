@@ -1,11 +1,11 @@
 import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, BrowserWindow, nativeImage, Tray, Menu, dialog, session, screen, ipcMain as ipcMain$1, webContents } from "electron";
 import * as fs from "node:fs";
-import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync, promises, copyFileSync } from "node:fs";
+import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, unlinkSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, cpSync, promises, copyFileSync } from "node:fs";
 import path, { join, delimiter, extname, basename, dirname, sep } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import { EventEmitter } from "node:events";
 import { spawn, execFile, execFileSync, spawnSync } from "node:child_process";
-import { createConnection, createServer } from "node:net";
+import { createServer, createConnection } from "node:net";
 import { get as get$2 } from "node:http";
 import { get as get$1 } from "node:https";
 import * as os from "node:os";
@@ -25,6 +25,7 @@ const __filename = import.meta.filename;
 const __dirname = import.meta.dirname;
 const require2 = __cjs_mod__.createRequire(import.meta.url);
 const CONTAINER_REPO_URL = "https://github.com/master1Sun/dsh-desktop-Electron.git";
+const DISPLAY_TIME_ZONE = "Asia/Shanghai";
 const REGISTRY_CANDIDATES = [
   {
     id: "npmmirror",
@@ -46,6 +47,14 @@ const REGISTRY_CANDIDATES = [
 ];
 const NPM_REGISTRY_DEFAULT = REGISTRY_CANDIDATES[0].url;
 const OPENCLAW_DEFAULT_PORT = 18789;
+const DEFAULT_KEYBINDINGS = {
+  palette: "Ctrl+K",
+  devtools: "F12",
+  terminal: "Ctrl+`",
+  closePanel: "Esc",
+  popoutCurrent: "Ctrl+Shift+Enter",
+  eventsTimeline: ""
+};
 const IPC = {
   GetNodeInfo: "container:get-node-info",
   ListPages: "container:list-pages",
@@ -164,7 +173,20 @@ const IPC = {
   /** #26: what the embedded webviews hold (cookies per domain, cache + storage bytes) → WebDataReport */
   GetWebData: "container:get-web-data",
   /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
-  ClearWebData: "container:clear-web-data"
+  ClearWebData: "container:clear-web-data",
+  /** activity timeline: read filtered events from logs/events.jsonl (ListEventsArgs → ContainerEvent[]) */
+  ListEvents: "container:list-events",
+  /** broadcast: one new activity-timeline event (ContainerEvent) */
+  OnEvent: "container:event",
+  /** #20 follow-up: retained CPU/RAM history per running page → Record<pageId, PageMetrics[]> */
+  GetMetricsHistory: "container:get-metrics-history",
+  /** open a hosted page in its own top-level window (pageId) — shares the embedded-page session */
+  OpenPageWindow: "container:open-page-window",
+  /** is a TCP port free on 127.0.0.1? → { free, holder? } so the config dialog can warn up front */
+  CheckPortFree: "container:check-port-free",
+  /** broadcast: a rebindable shortcut was pressed *inside* a hosted webview, so the shell window
+   *  that owns the action runs it (HotkeySignal). The guest consumed nothing back. */
+  OnHotkey: "container:hotkey"
 };
 let cached = null;
 function invalidateNodeRuntimeCache() {
@@ -11464,6 +11486,16 @@ const DEFAULTS = {
   downloadDir: "",
   pageEnvs: {},
   pagePorts: {},
+  // free-form per-page KEY=VALUE overrides, kept apart from the directory-typed pageEnvs
+  pageCustomEnvs: {},
+  // DSH tracks the `alpha` dist-tag (where its prereleases are published); switchable in Settings.
+  dshChannel: "alpha",
+  // container OTA follows the stable `release` branch unless the user opts into beta
+  containerChannel: "stable",
+  // an over-budget page is only flagged; 'restart' opts it into a leak guard
+  memLimitAction: "notify",
+  // only user-chosen shortcuts live here — every action has a built-in default
+  keybindings: {},
   // a page that crashes after having run is relaunched automatically; off surfaces the error only
   crashAutoRestart: true,
   // rare user-action-needed events (guard gave up, staged update) go to the OS notification center
@@ -11624,6 +11656,30 @@ function resolvePageEnv(pageId, key, defaultPath, legacyPath) {
   }
   return "";
 }
+function resolvePageTextEnv(pageId, key, defaultValue) {
+  return (process.env[key] || "").trim() || (getSettings().pageEnvs?.[pageId]?.[key] || "").trim() || (defaultValue || "").trim();
+}
+const CUSTOM_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+function resolvePageCustomEnvs(pageId) {
+  const map = getSettings().pageCustomEnvs?.[pageId];
+  if (!map) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(map)) {
+    if (!CUSTOM_ENV_KEY_RE.test(key)) continue;
+    if (RESERVED_PAGE_ENV_KEYS.has(key)) continue;
+    if (value === void 0 || value === null) continue;
+    out[key] = String(value);
+  }
+  return out;
+}
+const RESERVED_PAGE_ENV_KEYS = /* @__PURE__ */ new Set([
+  "PATH",
+  "Path",
+  "NODE_OPTIONS",
+  "ELECTRON_RUN_AS_NODE",
+  "npm_config_registry",
+  "npm_config_prefix"
+]);
 function isValidPort(port) {
   return Number.isInteger(Number(port)) && Number(port) >= 1 && Number(port) <= 65535;
 }
@@ -11721,6 +11777,13 @@ const zh = {
   "page.dirEnvLabel": "页面目录",
   "page.dirEnvDesc": "自动生成的应用安装目录，以环境变量注入该页面子进程。留空即用导入时的目录。",
   "page.metaInvalid": "{entry} (配置无效)",
+  // container.json 轻校验：不致命，只作为「manifest 提示」展示
+  "page.warnUnknownKey": "未知的 container.json 字段「{key}」，已忽略",
+  "page.warnBadType": "字段「{key}」类型应为 {want}",
+  "page.warnUnknownPermission": "未支持的权限声明「{key}」，容器当前只识别 notify/downloads/externalShell",
+  "page.warnIconBig": "图标过大（{size}KB，上限 64KB），已忽略",
+  "page.warnIconPath": "图标路径无法使用（需为页面目录内的 png/jpg/svg/ico）：{path}",
+  "page.warnIconMissing": "未找到图标文件：{path}",
   "page.portNotReady": "端口 {port} 在 {sec}s 内未就绪",
   "page.containerDesc": "容器主程序（git 更新检测对象）",
   "page.unknown": "未知 page: {id}",
@@ -11885,6 +11948,13 @@ const en = {
   "page.dirEnvLabel": "Page directory",
   "page.dirEnvDesc": "Auto-generated app install directory, injected into this page’s subprocess as an env var. Empty uses the imported directory.",
   "page.metaInvalid": "{entry} (invalid config)",
+  // container.json light validation: never fatal, surfaced as "manifest hints"
+  "page.warnUnknownKey": 'Unknown container.json field "{key}" (ignored)',
+  "page.warnBadType": 'Field "{key}" should be of type {want}',
+  "page.warnUnknownPermission": 'Unsupported permission declaration "{key}" — the container only knows notify/downloads/externalShell',
+  "page.warnIconBig": "Icon too large ({size}KB, 64KB cap); ignored",
+  "page.warnIconPath": "Icon path is not usable (must be a png/jpg/svg/ico inside the page directory): {path}",
+  "page.warnIconMissing": "Icon file not found: {path}",
   "page.portNotReady": "Port {port} was not ready within {sec}s",
   "page.containerDesc": "Container main program (git update-check target)",
   "page.unknown": "Unknown page: {id}",
@@ -12057,7 +12127,33 @@ function resolveText(value, fallback = "") {
   const pick = (v) => typeof v === "string" && v.trim() ? v : "";
   return pick(value[loc]) || pick(value[other]) || fallback;
 }
-const MAX_BYTES = 5 * 1024 * 1024;
+function zoneOffsetMs(d) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: DISPLAY_TIME_ZONE,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  const p = {};
+  for (const part of dtf.formatToParts(d)) p[part.type] = part.value;
+  const hour = p.hour === "24" ? 0 : Number(p.hour);
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, hour, +p.minute, +p.second);
+  return asUTC - Math.floor(d.getTime() / 1e3) * 1e3;
+}
+function isoShanghai(d = /* @__PURE__ */ new Date()) {
+  const offset = zoneOffsetMs(d);
+  const shifted = new Date(d.getTime() + offset);
+  const sign = offset >= 0 ? "+" : "-";
+  const abs = Math.abs(offset);
+  const hh = String(Math.floor(abs / 36e5)).padStart(2, "0");
+  const mm = String(Math.floor(abs % 36e5 / 6e4)).padStart(2, "0");
+  return `${shifted.toISOString().replace("Z", "")}${sign}${hh}:${mm}`;
+}
+const MAX_BYTES$1 = 5 * 1024 * 1024;
 const ROTATED_KEEP = 1;
 let logsRoot = null;
 let installed = false;
@@ -12078,7 +12174,7 @@ function logsDir() {
 }
 function rotateIfNeeded(file) {
   try {
-    if (!existsSync(file) || statSync(file).size < MAX_BYTES) return;
+    if (!existsSync(file) || statSync(file).size < MAX_BYTES$1) return;
     for (let i = ROTATED_KEEP; i >= 1; i--) {
       const from = i === 1 ? file : `${file}.${i - 1}`;
       const to = `${file}.${i}`;
@@ -12097,7 +12193,7 @@ function append(file, line) {
   } catch {
   }
 }
-const stamp = () => (/* @__PURE__ */ new Date()).toISOString();
+const stamp = () => isoShanghai();
 function writeLine(level, args) {
   const parts = args.map((a) => a instanceof Error ? a.stack ?? a.message : safeStr(a));
   append(join(logsDir(), "main.log"), `[${stamp()}] [${level}] ${parts.join(" ")}
@@ -12268,6 +12364,142 @@ function stopLogStream() {
   streamWatchers = [];
   streamOffsets.clear();
 }
+const RETENTION_DAYS = 7;
+const MEMORY_CAP = 500;
+const MAX_BYTES = 1024 * 1024;
+let activeDay = null;
+const memory = [];
+let broadcaster = null;
+function displayDay(ts = Date.now()) {
+  return isoShanghai(new Date(ts)).slice(0, 10);
+}
+function activeFile() {
+  return join(eventsDir(), "events.jsonl");
+}
+function archiveDir() {
+  return join(eventsDir(), "events");
+}
+function eventsDir() {
+  const dir = logsDir();
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+  }
+  return dir;
+}
+function archiveDay(day) {
+  const from = activeFile();
+  if (!existsSync(from)) return;
+  try {
+    mkdirSync(archiveDir(), { recursive: true });
+    let to = join(archiveDir(), `events-${day}.jsonl`);
+    for (let i = 1; existsSync(to); i++) to = join(archiveDir(), `events-${day}.${i}.jsonl`);
+    renameSync(from, to);
+  } catch {
+  }
+}
+function pruneArchives(today) {
+  const cutoff = (/* @__PURE__ */ new Date(`${today}T00:00:00Z`)).getTime() - RETENTION_DAYS * 864e5;
+  let names2 = [];
+  try {
+    names2 = readdirSync(archiveDir());
+  } catch {
+    return;
+  }
+  for (const name of names2) {
+    const mm = name.match(/^events-(\d{4}-\d{2}-\d{2})(\.\d+)?\.jsonl$/);
+    if (!mm) continue;
+    if ((/* @__PURE__ */ new Date(`${mm[1]}T00:00:00Z`)).getTime() < cutoff) {
+      try {
+        unlinkSync(join(archiveDir(), name));
+      } catch {
+      }
+    }
+  }
+}
+function readJsonl(file) {
+  let raw;
+  try {
+    if (!existsSync(file)) return [];
+    raw = readFileSync(file, "utf-8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed.kind === "string" && typeof parsed.ts === "number") out.push(parsed);
+    } catch {
+    }
+  }
+  return out;
+}
+function eventFiles() {
+  const files = [activeFile()];
+  let names2 = [];
+  try {
+    names2 = readdirSync(archiveDir());
+  } catch {
+  }
+  for (const name of names2.filter((n) => /^events-\d{4}-\d{2}-\d{2}(\.\d+)?\.jsonl$/.test(n)).sort().reverse()) {
+    files.push(join(archiveDir(), name));
+  }
+  return files;
+}
+function setEventBroadcaster(fn) {
+  broadcaster = fn;
+}
+function logEvent(input) {
+  const meta = input.meta ? Object.fromEntries(
+    Object.entries(input.meta).filter(([, v]) => v !== void 0)
+  ) : void 0;
+  const ev = {
+    ts: Date.now(),
+    level: input.level,
+    kind: input.kind,
+    ...input.pageId ? { pageId: input.pageId } : {},
+    ...input.detail ? { detail: input.detail } : {},
+    ...meta ? { meta } : {}
+  };
+  const today = displayDay(ev.ts);
+  if (activeDay && activeDay !== today) {
+    archiveDay(activeDay);
+    pruneArchives(today);
+  }
+  activeDay = today;
+  try {
+    const file = activeFile();
+    if (existsSync(file) && statSync(file).size > MAX_BYTES) archiveDay(today);
+    appendFileSync(file, JSON.stringify({ ...ev, iso: isoShanghai(new Date(ev.ts)) }) + "\n", "utf8");
+  } catch {
+  }
+  memory.push(ev);
+  if (memory.length > MEMORY_CAP) memory.splice(0, memory.length - MEMORY_CAP);
+  try {
+    broadcaster?.(ev);
+  } catch {
+  }
+  return ev;
+}
+function listEvents(args = {}) {
+  const limit2 = Math.max(1, Math.min(2e3, args.limit ?? 200));
+  let rows = [];
+  for (const file of eventFiles()) {
+    rows = rows.concat(readJsonl(file));
+    if (rows.length >= limit2 * 2) break;
+  }
+  if (!rows.length) rows = memory.slice();
+  const order = /* @__PURE__ */ new Map();
+  rows.forEach((r, i) => order.set(r, i));
+  const filtered = rows.filter(
+    (r) => (!args.level || r.level === args.level) && (!args.pageId || r.pageId === args.pageId) && (!args.kind || r.kind === args.kind) && (!args.since || r.ts >= args.since)
+  );
+  filtered.sort((a, b) => b.ts - a.ts || (order.get(b) ?? 0) - (order.get(a) ?? 0));
+  return filtered.slice(0, limit2);
+}
 function capture$1(cmd, args, timeoutMs = 8e3) {
   return new Promise((resolve2) => {
     const child = spawn(cmd, args, { windowsHide: true, timeout: timeoutMs });
@@ -12312,6 +12544,33 @@ async function findPortHolder(port) {
     console.warn("[port] holder probe failed (ignored):", err.message);
     return null;
   }
+}
+function probePortBind(port) {
+  return new Promise((resolve2) => {
+    let settled = false;
+    const settle = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve2(v);
+    };
+    const srv = createServer();
+    srv.unref();
+    const timer = setTimeout(() => {
+      srv.close();
+      settle("error");
+    }, 2500);
+    timer.unref?.();
+    srv.once("error", () => {
+      clearTimeout(timer);
+      settle("busy");
+    });
+    srv.listen({ port, host: "127.0.0.1", exclusive: true }, () => {
+      srv.close(() => {
+        clearTimeout(timer);
+        settle("free");
+      });
+    });
+  });
 }
 async function killPortHolder(port) {
   const pids = process.platform === "win32" ? await windowsHolders(port) : await posixHolders(port);
@@ -12418,6 +12677,94 @@ function defaultStartCommand(dir) {
 function startCommandInferable(dir) {
   return existsSync(join(dir, "server.js")) || existsSync(join(dir, "index.js")) || existsSync(join(dir, "package.json"));
 }
+const MANIFEST_KEYS = /* @__PURE__ */ new Set([
+  "$schema",
+  "name",
+  "description",
+  "port",
+  "startCommand",
+  "external",
+  "externalUrl",
+  "kind",
+  "dsh",
+  "openclaw",
+  "manageAsApp",
+  "dependsOn",
+  "healthUrl",
+  "envVars",
+  "schemaVersion",
+  "author",
+  "version",
+  "icon",
+  "permissions"
+]);
+const MANIFEST_PERMISSIONS = /* @__PURE__ */ new Set(["notify", "downloads", "externalShell"]);
+function manifestWarnings(raw) {
+  const out = [];
+  for (const key of Object.keys(raw ?? {})) {
+    if (!MANIFEST_KEYS.has(key)) out.push(m("page.warnUnknownKey", { key }));
+  }
+  if (raw.port !== void 0 && typeof raw.port !== "number") {
+    out.push(m("page.warnBadType", { key: "port", want: "number" }));
+  }
+  if (raw.icon !== void 0 && typeof raw.icon !== "string") {
+    out.push(m("page.warnBadType", { key: "icon", want: "string" }));
+  }
+  if (raw.permissions !== void 0 && !Array.isArray(raw.permissions)) {
+    out.push(m("page.warnBadType", { key: "permissions", want: "string[]" }));
+  } else {
+    for (const p of raw.permissions ?? []) {
+      if (typeof p !== "string" || !MANIFEST_PERMISSIONS.has(p)) {
+        out.push(m("page.warnUnknownPermission", { key: String(p) }));
+      }
+    }
+  }
+  if (Array.isArray(raw.envVars)) {
+    for (const v of raw.envVars) {
+      if (v?.type && v.type !== "dir" && v.type !== "text") {
+        out.push(m("page.warnBadType", { key: `envVars[${v.key}].type`, want: "dir | text" }));
+      }
+    }
+  }
+  return out;
+}
+const ICON_MIME = {
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon"
+};
+const ICON_MAX_BYTES = 64 * 1024;
+function resolveIconUrl(dir, icon2, warnings) {
+  const value = typeof icon2 === "string" ? icon2.trim() : "";
+  if (!value) return void 0;
+  if (value.startsWith("data:")) {
+    if (value.length > ICON_MAX_BYTES * 2) {
+      warnings.push(m("page.warnIconBig", { size: Math.round(value.length / 1024) }));
+      return void 0;
+    }
+    return value;
+  }
+  const ext = value.toLowerCase().match(/\.[a-z]+$/)?.[0] || "";
+  const mime = ICON_MIME[ext];
+  if (!mime || value.includes("..") || /^[a-zA-Z]:[\\/]|^[\\/]/.test(value)) {
+    warnings.push(m("page.warnIconPath", { path: value }));
+    return void 0;
+  }
+  try {
+    const buf = readFileSync(join(dir, value));
+    if (buf.byteLength > ICON_MAX_BYTES) {
+      warnings.push(m("page.warnIconBig", { size: Math.round(buf.byteLength / 1024) }));
+      return void 0;
+    }
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch {
+    warnings.push(m("page.warnIconMissing", { path: value }));
+    return void 0;
+  }
+}
 const PAGE_DIR_ENV_KEY = "APP_DIR";
 function readPageMeta(pagesDir, id2) {
   const dir = join(pagesDir, id2);
@@ -12449,12 +12796,16 @@ function readPageMeta(pagesDir, id2) {
   }
   if (kind === "page" && !external && !startCommand) startCommand = defaultStartCommand(dir);
   const declared = Array.isArray(raw.envVars) ? raw.envVars : [];
+  const warnings = manifestWarnings(raw);
   const declaredSpecs = declared.filter((v) => Boolean(v?.key)).map((v) => {
-    const { label, description: description2, ...rest } = v;
+    const { label, description: description2, type: type2, ...rest } = v;
     return {
       ...rest,
       label: resolveText(label) || void 0,
-      description: resolveText(description2) || void 0
+      description: resolveText(description2) || void 0,
+      // Only the two known editor kinds survive (anything else was already warned about),
+      // so the panel never renders an input for a type it doesn't implement.
+      ...type2 === "text" ? { type: "text" } : type2 === "dir" ? { type: "dir" } : {}
     };
   });
   let envVars = declaredSpecs.length ? declaredSpecs : void 0;
@@ -12489,9 +12840,16 @@ function readPageMeta(pagesDir, id2) {
     // deadlock ensureDeps behind an ancestry check that legitimately allows siblings.
     dependsOn: Array.isArray(raw.dependsOn) ? raw.dependsOn.filter((d) => typeof d === "string" && Boolean(d.trim()) && d.trim() !== id2).map((d) => d.trim()) : void 0,
     healthUrl: !external && typeof raw.healthUrl === "string" && raw.healthUrl.trim() ? raw.healthUrl.trim() : void 0,
+    schemaVersion: Number.isFinite(Number(raw.schemaVersion)) ? Number(raw.schemaVersion) : void 0,
+    author: typeof raw.author === "string" ? raw.author.trim() || void 0 : void 0,
+    version: typeof raw.version === "string" ? raw.version.trim() || void 0 : void 0,
+    iconUrl: resolveIconUrl(dir, raw.icon, warnings),
+    permissions: Array.isArray(raw.permissions) ? raw.permissions.filter((p) => typeof p === "string") : void 0,
+    manifestWarnings: warnings.length ? warnings : void 0,
     envVars
   };
 }
+const reportedManifestWarnings = /* @__PURE__ */ new Map();
 function scanInstalledPages(pagesDir) {
   if (!existsSync(pagesDir)) return [];
   const out = [];
@@ -12500,7 +12858,24 @@ function scanInstalledPages(pagesDir) {
     const full = join(pagesDir, entry);
     try {
       if (!statSync(full).isDirectory()) continue;
-      out.push(readPageMeta(pagesDir, entry));
+      const meta = readPageMeta(pagesDir, entry);
+      const warnings = meta.manifestWarnings ?? [];
+      const signature = warnings.join("\n");
+      if (reportedManifestWarnings.get(entry) !== signature) {
+        if (warnings.length) {
+          reportedManifestWarnings.set(entry, signature);
+          logEvent({
+            level: "warn",
+            kind: "manifest.invalid",
+            pageId: entry,
+            detail: signature,
+            meta: { count: warnings.length }
+          });
+        } else {
+          reportedManifestWarnings.delete(entry);
+        }
+      }
+      out.push(meta);
     } catch (err) {
       out.push({
         id: entry,
@@ -12591,12 +12966,17 @@ function buildPageEnv(meta) {
   const out = {};
   for (const spec of meta.envVars ?? []) {
     if (!spec?.key) continue;
+    if (spec.type === "text") {
+      const v2 = resolvePageTextEnv(meta.id, spec.key, spec.defaultValue);
+      if (v2) out[spec.key] = v2;
+      continue;
+    }
     const v = resolvePageEnv(meta.id, spec.key, spec.defaultPath, spec.legacyPath);
     if (!v) continue;
     if (spec.defaultPath) ensureEnvDir(v);
     out[spec.key] = v;
   }
-  return out;
+  return { ...out, ...resolvePageCustomEnvs(meta.id) };
 }
 function expandStartCommand(cmd) {
   return cmd.replace(/(^|\s)~(?=[/\\]|$)/g, (_m, pre) => pre + expandHome("~"));
@@ -12744,7 +13124,7 @@ class PageRegistry extends EventEmitter {
       try {
         proc = spawn(spec.cmd, spec.args, {
           cwd: spec.cwd,
-          env: spec.env,
+          env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) },
           windowsHide: true,
           shell: false
         });
@@ -12758,7 +13138,7 @@ class PageRegistry extends EventEmitter {
       try {
         proc = spawn(spec.cmd, spec.args, {
           cwd: spec.cwd,
-          env: spec.env,
+          env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) },
           windowsHide: true,
           shell: false
         });
@@ -12807,12 +13187,25 @@ class PageRegistry extends EventEmitter {
           e.lastError = m("page.logEngineMismatch");
           e.logs.push(`[container] ${e.lastError}`);
           console.warn(`[pages] ${e.meta.id}: EBADENGINE — not restarting (engine mismatch)`);
+          logEvent({ level: "error", kind: "page.engineMismatch", pageId: e.meta.id });
         } else if (code2 === 78 && (e.reclaimRetries ?? 0) < MAX_RECLAIM_RETRIES) {
           e.reclaimRetries = (e.reclaimRetries ?? 0) + 1;
           e.logs.push(`[container] ${m("page.logReclaimRetry")}`);
+          logEvent({
+            level: "warn",
+            kind: "page.reclaim",
+            pageId: e.meta.id,
+            meta: { attempt: e.reclaimRetries }
+          });
           this.scheduleReclaimRestart(e);
         } else {
           e.crashes++;
+          logEvent({
+            level: "warn",
+            kind: "page.crash",
+            pageId: e.meta.id,
+            meta: { code: code2 ?? "n/a", attempt: e.crashes }
+          });
           this.scheduleCrashRestart(e, code2);
         }
       }
@@ -12841,6 +13234,12 @@ class PageRegistry extends EventEmitter {
       e.launchUrl = launchUrl;
       e.logs.push(m("page.logReady", { port: port2 }));
       this.setStatus(e, "running");
+      logEvent({
+        level: "info",
+        kind: "page.running",
+        pageId: e.meta.id,
+        meta: { port: port2, ms: e.startedAt ? Date.now() - e.startedAt : 0 }
+      });
       clearTimeout(e.stableTimer);
       e.stableTimer = setTimeout(() => {
         e.stableTimer = void 0;
@@ -12859,6 +13258,13 @@ class PageRegistry extends EventEmitter {
         const holder = await findPortHolder(failure.port);
         if (holder && holder.pid !== e.pid) {
           e.portHolder = holder;
+          logEvent({
+            level: "warn",
+            kind: "page.portBusy",
+            pageId: e.meta.id,
+            detail: `${holder.name} (${holder.pid})`,
+            meta: { port: failure.port }
+          });
           failure = new Error(
             m("page.portOwner", { port: failure.port, pid: holder.pid, name: holder.name })
           );
@@ -13249,6 +13655,12 @@ class PageRegistry extends EventEmitter {
         e.healthFails = 0;
         e.logs.push(`[container] ${m("page.logHealthKill", { n: HEALTH_FAIL_LIMIT })}`);
         console.warn(`[pages] ${e.meta.id}: ${HEALTH_FAIL_LIMIT} failed health probes — restarting`);
+        logEvent({
+          level: "warn",
+          kind: "page.hung",
+          pageId: e.meta.id,
+          meta: { n: HEALTH_FAIL_LIMIT, url: target }
+        });
         if (process.platform === "win32") {
           spawn("taskkill", ["/pid", String(e.proc.pid), "/T", "/F"], { windowsHide: true });
         } else {
@@ -13288,6 +13700,7 @@ class PageRegistry extends EventEmitter {
       e.lastError = m("page.crashGiveUp", { max });
       e.logs.push(`[container] ${e.lastError}`);
       console.warn(`[pages] ${e.meta.id}: crash budget spent (${max}), auto-restart stopped`);
+      logEvent({ level: "error", kind: "page.giveUp", pageId: e.meta.id, meta: { max } });
       notifyEvent("notify.giveUpTitle", "notify.giveUpBody", {
         name: e.meta.name,
         max
@@ -13342,6 +13755,7 @@ class PageRegistry extends EventEmitter {
   fail(e, message) {
     e.lastError = message;
     e.logs.push(`[container] ${message}`);
+    logEvent({ level: "error", kind: "page.failed", pageId: e.meta.id, detail: message });
     this.setStatus(e, "error");
   }
   appendLog(e, chunk) {
@@ -13363,6 +13777,77 @@ class PageRegistry extends EventEmitter {
     this.emit("changed");
   }
 }
+const MODIFIERS = {
+  ctrl: "ctrl",
+  control: "ctrl",
+  cmd: "meta",
+  command: "meta",
+  meta: "meta",
+  super: "meta",
+  win: "meta",
+  winkeys: "meta",
+  alt: "alt",
+  option: "alt",
+  shift: "shift"
+};
+const KEY_ALIASES = {
+  escape: "esc",
+  " ": "space",
+  spacebar: "space",
+  delete: "del",
+  insert: "ins",
+  pageup: "pgup",
+  pagedown: "pgdn",
+  arrowup: "up",
+  arrowdown: "down",
+  arrowleft: "left",
+  arrowright: "right",
+  backquote: "`",
+  graveaccent: "`",
+  plus: "+",
+  numpadadd: "+"
+};
+function normalizeKey(raw) {
+  const lowered = (raw || "").toLowerCase();
+  return KEY_ALIASES[lowered] ?? lowered.trim();
+}
+function normalizeCode(code2) {
+  const c = (code2 || "").trim();
+  if (!c) return "";
+  const mm = c.match(/^Key([A-Z])$/);
+  if (mm) return mm[1].toLowerCase();
+  const num = c.match(/^Digit(\d)$/);
+  if (num) return num[1];
+  return normalizeKey(c);
+}
+function parseAccelerator(accel) {
+  const text = (accel || "").trim();
+  if (!text) return null;
+  const parts = text.split(/\+(?=\S)/);
+  const key = normalizeKey(parts.pop());
+  if (!key) return null;
+  const out = { key, ctrl: false, shift: false, alt: false, meta: false };
+  for (const raw of parts) {
+    const name = raw.trim().toLowerCase();
+    if (name === "cmdorctrl" || name === "commandorcontrol" || name === "ctrlorcommand") {
+      out.ctrl = true;
+      continue;
+    }
+    const slot = MODIFIERS[name];
+    if (slot === "ctrl" || slot === "shift" || slot === "alt" || slot === "meta") out[slot] = true;
+    else return null;
+  }
+  const dedicated = /^f\d{1,2}$/.test(key) || ["esc", "space", "tab", "enter", "up", "down", "left", "right"].includes(key);
+  if (!out.ctrl && !out.alt && !out.meta && !dedicated) return null;
+  return out;
+}
+function matchesAccelerator(accel, e) {
+  const parts = parseAccelerator(accel);
+  if (!parts) return false;
+  const key = normalizeKey(e.key) || normalizeCode(e.code);
+  if (!key || key !== parts.key) return false;
+  return Boolean(e.ctrl) === parts.ctrl && Boolean(e.shift) === parts.shift && Boolean(e.alt) === parts.alt && Boolean(e.meta) === parts.meta;
+}
 const INDEX_URLS = [
   "https://npmmirror.com/mirrors/node/index.json",
   "https://nodejs.org/dist/index.json"
@@ -13377,7 +13862,7 @@ function preferUpstream() {
 }
 const indexUrls = () => preferUpstream() ? [...INDEX_URLS].reverse() : INDEX_URLS;
 const distBases = () => preferUpstream() ? [...DIST_BASES].reverse() : DIST_BASES;
-const MAX_VERSIONS = 50;
+const MAX_VERSIONS = 200;
 function isValidTag(v) {
   return /^v\d+\.\d+\.\d+$/.test(v);
 }
@@ -13420,7 +13905,7 @@ function get(url, timeoutMs = 2e4) {
     req.end();
   });
 }
-async function listNodeVersions() {
+async function listNodeVersions(includeIncompatible = false) {
   if (process.platform !== "win32") throw new Error(m("node.notWin"));
   let lastErr = "";
   for (const url of indexUrls()) {
@@ -13431,8 +13916,9 @@ async function listNodeVersions() {
       for (const e of entries) {
         if (!isValidTag(e.version)) continue;
         if (e.files && !e.files.includes("win-x64-zip") && !e.files.includes("win-x64")) continue;
-        if (!nodeVersionUsable(e.version)) continue;
-        out.push({ version: e.version, date: e.date, lts: e.lts });
+        const usable = nodeVersionUsable(e.version);
+        if (!usable && !includeIncompatible) continue;
+        out.push({ version: e.version, date: e.date, lts: e.lts, usable });
         if (out.length >= MAX_VERSIONS) break;
       }
       if (!out.length) throw new Error("no usable versions in index");
@@ -13921,6 +14407,15 @@ const ofs = (() => {
   return fs;
 })();
 const RELEASE_BRANCH = "release";
+const RELEASE_BRANCH_BETA = "release-beta";
+let betaBranchMissing = false;
+function effectiveReleaseBranch() {
+  const wantsBeta = getSettings().containerChannel === "beta";
+  return wantsBeta && !betaBranchMissing ? RELEASE_BRANCH_BETA : RELEASE_BRANCH;
+}
+function resetBranchProbe() {
+  betaBranchMissing = false;
+}
 const PROGRESS_INTERVAL_MS = 150;
 const MIN_ASAR_BYTES = 1024 * 1024;
 function readStagedUpdate() {
@@ -13998,8 +14493,30 @@ function parseGitPercent(chunk) {
 }
 async function fetchTip(name, onProgress) {
   ensureRepo();
-  await runGitAsync(
-    ["--git-dir", gitDir(), "fetch", "--progress", "--depth", "1", "origin", RELEASE_BRANCH],
+  const branch = effectiveReleaseBranch();
+  try {
+    await fetchBranch(branch, name, onProgress);
+  } catch (err) {
+    if (branch !== RELEASE_BRANCH) {
+      betaBranchMissing = true;
+      logEvent({
+        level: "warn",
+        kind: "ota.channelFallback",
+        detail: `${branch}: ${err.message}`,
+        meta: { from: branch, to: RELEASE_BRANCH }
+      });
+      await fetchBranch(RELEASE_BRANCH, name, onProgress);
+    } else {
+      throw err;
+    }
+  }
+  const commit = runGit(["--git-dir", gitDir(), "rev-parse", "FETCH_HEAD"]).trim();
+  const version = runGit(["--git-dir", gitDir(), "show", `${commit}:version.txt`]).split(/\r?\n/)[0].trim();
+  return { version, commit };
+}
+function fetchBranch(branch, name, onProgress) {
+  return runGitAsync(
+    ["--git-dir", gitDir(), "fetch", "--progress", "--depth", "1", "origin", branch],
     (chunk) => {
       if (!onProgress) return;
       const percent = parseGitPercent(chunk) ?? void 0;
@@ -14011,9 +14528,6 @@ async function fetchTip(name, onProgress) {
       });
     }
   );
-  const commit = runGit(["--git-dir", gitDir(), "rev-parse", "FETCH_HEAD"]).trim();
-  const version = runGit(["--git-dir", gitDir(), "show", `${commit}:version.txt`]).split(/\r?\n/)[0].trim();
-  return { version, commit };
 }
 async function streamBlob(rev, partPath, resumeFrom, total, name, resumed, onProgress) {
   const child = spawn("git", ["--git-dir", gitDir(), "cat-file", "blob", rev], {
@@ -14150,6 +14664,11 @@ async function downloadAsar(tip, name, onProgress) {
   if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0]);
   pruneOldReleases(root, keep);
   notifyEvent("notify.updateReadyTitle", "notify.updateReadyBody", { version: tip.version });
+  logEvent({
+    level: "info",
+    kind: "ota.staged",
+    meta: { version: tip.version, commit: tip.commit.slice(0, 8), branch: effectiveReleaseBranch() }
+  });
   onProgress?.({ name, phase: "done", received: total, total, percent: 100 });
 }
 async function checkAsarUpdate(name, dir) {
@@ -14174,7 +14693,7 @@ async function checkAsarUpdate(name, dir) {
       return {
         ...base,
         ok: true,
-        branch: RELEASE_BRANCH,
+        branch: effectiveReleaseBranch(),
         localHead: current,
         remoteHead: staged.commit.slice(0, 8),
         currentVersion: current,
@@ -14190,7 +14709,7 @@ async function checkAsarUpdate(name, dir) {
     return {
       ...base,
       ok: true,
-      branch: RELEASE_BRANCH,
+      branch: effectiveReleaseBranch(),
       localHead: current,
       remoteHead: tip.commit.slice(0, 8),
       currentVersion: current,
@@ -14257,6 +14776,11 @@ function relaunchToApplyStaged() {
     meta = withOrigin;
   } catch {
   }
+  logEvent({
+    level: "info",
+    kind: "ota.applying",
+    meta: { from: app$1.getVersion(), to: meta?.version || "unknown" }
+  });
   const noise = /* @__PURE__ */ new Set([
     "--autostart",
     "--dsh-relaunched",
@@ -14358,7 +14882,8 @@ function canRollbackAsar() {
   return from ? { available: true, fromVersion: from } : { available: false };
 }
 function rollbackToPreviousAsar() {
-  if (!canRollbackAsar().available) return false;
+  const rb = canRollbackAsar();
+  if (!rb.available) return false;
   const resourcesDir = dirname(updatesRoot());
   const targetAsar = join(resourcesDir, "app.asar");
   const bakAsar = `${targetAsar}.bak`;
@@ -14415,6 +14940,11 @@ function rollbackToPreviousAsar() {
     helper.on("error", (err) => console.error("[update] rollback helper spawn failed:", err));
     helper.unref();
     console.log("[update] scheduled asar rollback swap");
+    logEvent({
+      level: "warn",
+      kind: "ota.rollback",
+      meta: { from: app$1.getVersion(), to: rb.fromVersion || "unknown" }
+    });
     return true;
   } catch (err) {
     console.error("[update] failed to schedule asar rollback:", err);
@@ -15332,12 +15862,15 @@ function registryUrl() {
 }
 const DSH_PKG = "@deepseek-ai/dsh";
 const OPENCLAW_PKG = "openclaw";
+function dshChannel() {
+  return getSettings().dshChannel === "latest" ? "latest" : "alpha";
+}
 const containerName = () => m("app.title");
 const CACHE_TTL_MS = 5 * 601e3;
 let cache = null;
-async function fetchNpmLatest(name) {
+async function fetchNpmLatest(name, tag = "latest") {
   const url = new URL(
-    encodeURIComponent(name).replace(/^%40/, "@") + "/latest",
+    encodeURIComponent(name).replace(/^%40/, "@") + `/${encodeURIComponent(tag)}`,
     registryUrl()
   ).toString();
   try {
@@ -15414,7 +15947,7 @@ async function checkPage(p) {
     action: "manual"
   };
 }
-async function checkBuiltin(name, dir, packageName, currentVersion) {
+async function checkBuiltin(name, dir, packageName, currentVersion, tag = "latest") {
   const base = {
     name,
     dir,
@@ -15426,7 +15959,7 @@ async function checkBuiltin(name, dir, packageName, currentVersion) {
     canAutoUpdate: true
   };
   if (!currentVersion) return { ...base, error: m("upd.versionNotDetected") };
-  const latest = await fetchNpmLatest(packageName);
+  const latest = await fetchNpmLatest(packageName, tag);
   if (!latest) return { ...base, currentVersion, error: m("upd.registryUnreachable") };
   return {
     ...base,
@@ -15449,7 +15982,8 @@ async function computeAll(pages) {
       m("upd.dshName"),
       join(app$1.getPath("userData"), "dsh"),
       DSH_PKG,
-      (await getDshStatus()).version
+      (await getDshStatus()).version,
+      dshChannel()
     ),
     checkBuiltin("OpenClaw", openclawRoot() || "", OPENCLAW_PKG, openclawVersion())
   ]);
@@ -15477,17 +16011,25 @@ function openclawRoot() {
 function bundledNpmCli() {
   return join(dirname(getNodeExePath()), "node_modules", "npm", "bin", "npm-cli.js");
 }
-async function runNpm(cmd, args, env2, timeoutMs) {
+async function runNpm(cmd, args, env2, timeoutMs, onLine) {
   const res = await new Promise((resolve2) => {
-    const child = spawn(cmd, args, {
+    const argv = onLine ? [...args, "--loglevel=info"] : args;
+    const child = spawn(cmd, argv, {
       env: env2,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
       shell: process.platform === "win32" && cmd !== getNodeExePath(),
       timeout: timeoutMs
     });
     let stderr = "";
-    child.stderr?.on("data", (d) => stderr += String(d));
+    child.stderr?.on("data", (d) => {
+      const chunk = String(d);
+      stderr += chunk;
+      if (onLine) {
+        const line = chunk.split(/\r\n|\r|\n/).map((s) => s.trim()).filter(Boolean).pop();
+        if (line) onLine(line);
+      }
+    });
     child.on("error", (err) => resolve2({ code: -1, stderr: err.message }));
     child.on("close", (code2) => resolve2({ code: code2 ?? -1, stderr }));
   });
@@ -15496,8 +16038,23 @@ async function runNpm(cmd, args, env2, timeoutMs) {
       `${res.stderr.slice(-500) || m("upd.npmExitCode", { code: res.code })}（${args.join(" ")}）`
     );
 }
-async function updateDshSelf() {
+function npmWatcher(name, builtin, onProgress) {
+  if (!onProgress) return void 0;
+  onProgress({ name, phase: "fetch", builtin });
+  let last = 0;
+  let lastLine = "";
+  return (line) => {
+    if (line === lastLine) return;
+    const now = Date.now();
+    if (now - last < 400) return;
+    last = now;
+    lastLine = line;
+    onProgress({ name, phase: "fetch", builtin, message: line.slice(0, 160) });
+  };
+}
+async function updateDshSelf(pinned, onProgress, rowName) {
   const name = m("upd.dshName");
+  const watch2 = npmWatcher(rowName || name, "dsh", onProgress);
   const root = join(app$1.getPath("userData"), "dsh");
   const before = (await getDshStatus()).version;
   try {
@@ -15513,14 +16070,17 @@ async function updateDshSelf() {
         npmCli,
         "install",
         "-g",
-        `${DSH_PKG}@alpha`,
+        // An explicit version wins over the channel: "重装指定版本" is the escape hatch when a
+        // channel's newest prerelease is the thing that broke.
+        `${DSH_PKG}@${pinned || dshChannel()}`,
         "--config.minimumReleaseAge=0",
         "--ignore-scripts",
         "--no-audit",
         "--no-fund"
       ],
       { ...process.env, npm_config_prefix: root },
-      15 * 6e4
+      15 * 6e4,
+      watch2
     );
     if (!existsSync(join(root, "pnpm.cmd")))
       await runNpm(
@@ -15536,7 +16096,8 @@ async function updateDshSelf() {
           "--no-fund"
         ],
         { ...process.env, npm_config_prefix: root },
-        15 * 6e4
+        15 * 6e4,
+        watch2
       );
     repairPnpmCmd(root);
   } catch (err) {
@@ -15552,8 +16113,9 @@ async function updateDshSelf() {
     message: after && after !== before ? m("upd.dshUpgraded", { after }) : m("upd.dshUpToDate", { after: after || "?" })
   };
 }
-async function reprovisionOpenclaw() {
+async function reprovisionOpenclaw(pinned, onProgress, rowName) {
   const name = "OpenClaw";
+  const watch2 = npmWatcher(rowName || name, "openclaw", onProgress);
   const root = openclawRoot();
   if (!root) return { name, ok: false, updated: false, error: m("upd.openclawDirMissing") };
   const before = openclawVersion();
@@ -15570,13 +16132,14 @@ async function reprovisionOpenclaw() {
         npmCli,
         "install",
         "-g",
-        `${OPENCLAW_PKG}@latest`,
+        `${OPENCLAW_PKG}@${pinned || "latest"}`,
         "--ignore-scripts",
         "--no-audit",
         "--no-fund"
       ],
       { ...process.env, npm_config_prefix: root },
-      15 * 6e4
+      15 * 6e4,
+      watch2
     );
   } catch (err) {
     const msg = err.message || String(err);
@@ -15591,8 +16154,18 @@ async function reprovisionOpenclaw() {
     message: after && after !== before ? m("upd.openclawUpgraded", { after }) : m("upd.openclawUpToDate", { after: after || "?" })
   };
 }
-async function provisionBuiltin(kind) {
-  return kind === "dsh" ? updateDshSelf() : reprovisionOpenclaw();
+async function provisionBuiltin(kind, pinned) {
+  const version = (pinned || "").trim();
+  const result = kind === "dsh" ? await updateDshSelf(version) : await reprovisionOpenclaw(version);
+  logEvent(
+    result.ok ? {
+      level: "info",
+      kind: "runtime.provision",
+      detail: result.message,
+      meta: { name: kind, version: version || (kind === "dsh" ? dshChannel() : "latest") }
+    } : { level: "error", kind: "runtime.provisionFail", detail: result.error, meta: { name: kind } }
+  );
+  return result;
 }
 const inFlightUpdates = /* @__PURE__ */ new Map();
 function performUpdate(target, onProgress) {
@@ -15614,7 +16187,7 @@ async function runUpdate(target, onProgress) {
     case "apply-asar":
       return applyAsarUpdate(target.name, onProgress);
     case "reprovision":
-      return target.packageName === DSH_PKG ? updateDshSelf() : reprovisionOpenclaw();
+      return target.packageName === DSH_PKG ? updateDshSelf(void 0, onProgress, target.name) : reprovisionOpenclaw(void 0, onProgress, target.name);
     case "manual":
       return {
         name: target.name,
@@ -15653,19 +16226,18 @@ function capture(cmd, args, cwd, timeoutMs = 8e3) {
   });
 }
 const SECRET_KEY_RE = /token|key|secret|password|pwd|auth|cookie/i;
+const ENV_MAP_KEYS = ["pageEnvs", "pageCustomEnvs"];
 function maskSettings() {
   const s = getSettings();
   const out = { ...s };
-  const envs = s.pageEnvs;
-  if (envs) {
-    out.pageEnvs = Object.fromEntries(
+  for (const mapKey of ENV_MAP_KEYS) {
+    const envs = s[mapKey];
+    if (!envs) continue;
+    out[mapKey] = Object.fromEntries(
       Object.entries(envs).map(([page, vars]) => [
         page,
         Object.fromEntries(
-          Object.entries(vars ?? {}).map(([k, v]) => [
-            k,
-            SECRET_KEY_RE.test(k) && v ? "***" : v
-          ])
+          Object.entries(vars ?? {}).map(([k, v]) => [k, SECRET_KEY_RE.test(k) && v ? "***" : v])
         )
       ])
     );
@@ -15673,7 +16245,7 @@ function maskSettings() {
   return out;
 }
 async function exportDiagnostics(registry2) {
-  const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const ts = isoShanghai().replace(/[:.]/g, "-").slice(0, 19);
   const stage = join(app$1.getPath("temp"), `dsh-diag-${ts}`);
   mkdirSync(stage, { recursive: true });
   try {
@@ -15695,7 +16267,7 @@ async function exportDiagnostics(registry2) {
       join(stage, "versions.json"),
       JSON.stringify(
         {
-          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          generatedAt: isoShanghai(),
           appVersion: app$1.getVersion(),
           packaged: app$1.isPackaged,
           exePath: app$1.getPath("exe"),
@@ -15752,6 +16324,11 @@ async function exportDiagnostics(registry2) {
     );
     mkdirSync(join(stage, "logs"), { recursive: true });
     writeFileSync$1(join(stage, "logs", "main.log"), readTailText(join(logsDir(), "main.log"), 1024 * 1024), "utf8");
+    writeFileSync$1(
+      join(stage, "logs", "events.jsonl"),
+      readTailText(join(logsDir(), "events.jsonl"), 512 * 1024),
+      "utf8"
+    );
     for (const f of safePageLogFiles()) {
       writeFileSync$1(
         join(stage, "logs", f.name),
@@ -15774,6 +16351,7 @@ async function exportDiagnostics(registry2) {
     await zipFolder$1(stage, zipPath);
     const dest = resolveExportPath(`dsh-diag-${ts}.zip`);
     await promises.copyFile(zipPath, dest);
+    logEvent({ level: "info", kind: "diagnostics.export", detail: dest });
     return dest;
   } finally {
     rmSync(stage, { recursive: true, force: true });
@@ -15949,6 +16527,7 @@ function captureSettings() {
     openclawHome: s.openclawHome,
     downloadDir: s.downloadDir,
     pageEnvs: s.pageEnvs,
+    pageCustomEnvs: s.pageCustomEnvs,
     pagePorts: s.pagePorts,
     crashAutoRestart: s.crashAutoRestart,
     systemNotifications: s.systemNotifications,
@@ -15956,13 +16535,18 @@ function captureSettings() {
     glassBlur: s.glassBlur,
     glassAlpha: s.glassAlpha,
     memWarnMb: s.memWarnMb,
+    memLimitAction: s.memLimitAction,
     terminalHeight: s.terminalHeight,
     // #26: preferences (the remembered `windowBounds` stays out on purpose — it is machine-local).
     rememberWindowBounds: s.rememberWindowBounds,
     reduceMotion: s.reduceMotion,
     npmRegistry: s.npmRegistry,
     trayPageEntries: s.trayPageEntries,
-    trayBadge: s.trayBadge
+    trayBadge: s.trayBadge,
+    // Update channels and rebound shortcuts are intent, not machine state, so they migrate too.
+    dshChannel: s.dshChannel,
+    containerChannel: s.containerChannel,
+    keybindings: s.keybindings
   };
 }
 function zipFolder(src, dest) {
@@ -16002,7 +16586,7 @@ async function exportSnapshot(registry2) {
   }).filter((p) => p.containerJson !== null);
   if (pages.length === 0) throw new Error(m("snapshot.noPages"));
   const createdAt = Date.now();
-  const ts = new Date(createdAt).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const ts = isoShanghai(new Date(createdAt)).replace(/[:.]/g, "-").slice(0, 19);
   const manifest = {
     appVersion: app$1.getVersion(),
     createdAt,
@@ -16039,7 +16623,7 @@ async function importSnapshot(registry2) {
   });
   if (canceled || !filePaths[0]) throw new Error(m("snapshot.badArchive"));
   const zip = filePaths[0];
-  const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const ts = isoShanghai().replace(/[:.]/g, "-").slice(0, 19);
   const extractTo = join(app$1.getPath("temp"), `dsh-snapshot-in-${ts}`);
   mkdirSync(extractTo, { recursive: true });
   try {
@@ -16382,6 +16966,8 @@ function getSystemInfo() {
   };
 }
 const lastCpu = /* @__PURE__ */ new Map();
+const HISTORY_CAP = 120;
+const history = /* @__PURE__ */ new Map();
 function sampleWindows(roots) {
   return new Promise((resolve2, reject) => {
     const list = roots.join(",");
@@ -16492,7 +17078,10 @@ function descendantsOf(procs, root) {
 }
 async function collectPageMetrics(registry2, memWarnMb) {
   const running = registry2.running().filter((p) => p.pid);
-  if (running.length === 0) return [];
+  if (running.length === 0) {
+    history.clear();
+    return [];
+  }
   const byPid = /* @__PURE__ */ new Map();
   for (const p of running) byPid.set(p.pid, p.id);
   const roots = [...byPid.keys()];
@@ -16516,9 +17105,31 @@ async function collectPageMetrics(registry2, memWarnMb) {
     }
     lastCpu.set(root, { cpu: s.cpu, at: now });
     const memMb = Math.round(s.ws / 1024 / 1024);
-    out.push({ pageId, pid: root, cpu, memMb, overLimit: memWarnMb > 0 && memMb > memWarnMb });
+    out.push({
+      pageId,
+      pid: root,
+      cpu,
+      memMb,
+      ts: now,
+      overLimit: memWarnMb > 0 && memMb > memWarnMb
+    });
   }
+  recordHistory(out);
   return out;
+}
+function recordHistory(out) {
+  const live = /* @__PURE__ */ new Set();
+  for (const m2 of out) {
+    live.add(m2.pageId);
+    const arr = history.get(m2.pageId) ?? [];
+    arr.push(m2);
+    if (arr.length > HISTORY_CAP) arr.splice(0, arr.length - HISTORY_CAP);
+    history.set(m2.pageId, arr);
+  }
+  for (const id2 of [...history.keys()]) if (!live.has(id2)) history.delete(id2);
+}
+function getMetricsHistory() {
+  return Object.fromEntries([...history.entries()].map(([id2, rows]) => [id2, rows.slice()]));
 }
 function pruneMetricsBaseline(livePids) {
   const keep = new Set(livePids);
@@ -16628,6 +17239,32 @@ function watchWindowBounds(win) {
 function unwatchWindowBounds() {
   flushWindowBounds();
   watched = null;
+}
+function popoutSlot(pageId) {
+  const b = getSettings().popoutBounds?.[pageId];
+  return isValid(b) ? b : null;
+}
+function resolvePopoutBounds(pageId, minWidth, minHeight) {
+  if (!boundsEnabled()) return null;
+  const stored = popoutSlot(pageId);
+  if (!stored) return null;
+  const rect = {
+    x: stored.x,
+    y: stored.y,
+    width: Math.max(stored.width, minWidth),
+    height: Math.max(stored.height, minHeight)
+  };
+  if (!isOnSomeDisplay(rect)) return null;
+  return { ...rect, maximized: Boolean(stored.maximized) };
+}
+function rememberPopoutBounds(win, pageId) {
+  if (!boundsEnabled()) return;
+  if (win.isMinimized()) return;
+  const n = win.getNormalBounds();
+  const prev = popoutSlot(pageId);
+  if (prev && prev.x === n.x && prev.y === n.y && prev.width === n.width && prev.height === n.height && prev.maximized === win.isMaximized())
+    return;
+  updateSettings({ popoutBounds: { ...getSettings().popoutBounds, [pageId]: { ...n, maximized: win.isMaximized() } } });
 }
 class PtySession {
   constructor(id2, title2, cwd, shell2, args, env2) {
@@ -16761,6 +17398,141 @@ let surveyTimer = null;
 const UPDATE_SURVEY_MS = 30 * 6e4;
 let metricsTimer = null;
 const METRICS_POLL_MS = 5e3;
+const memRestarted = /* @__PURE__ */ new Set();
+const MEM_RESTART_MIN_UPTIME_MS = 10 * 6e4;
+const popoutWindows = /* @__PURE__ */ new Map();
+let popoutSaveTimer = null;
+let guestKeysWired = false;
+function shellPreload() {
+  const dir = join(__dirname, "../preload");
+  for (const name of ["index.mjs", "index.js"]) {
+    if (existsSync(join(dir, name))) return join(dir, name);
+  }
+  return join(dir, "index.mjs");
+}
+function schedulePopoutSave() {
+  if (popoutSaveTimer) clearTimeout(popoutSaveTimer);
+  popoutSaveTimer = setTimeout(() => {
+    popoutSaveTimer = null;
+    flushPopoutBounds();
+  }, 800);
+  popoutSaveTimer.unref?.();
+}
+function flushPopoutBounds() {
+  if (popoutSaveTimer) {
+    clearTimeout(popoutSaveTimer);
+    popoutSaveTimer = null;
+  }
+  for (const [id2, win] of popoutWindows) {
+    if (!win.isDestroyed()) rememberPopoutBounds(win, id2);
+  }
+}
+function openPageWindow(registry2, pageId) {
+  const existing = popoutWindows.get(pageId);
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+    return existing;
+  }
+  const state = registry2.get(pageId);
+  const restored = resolvePopoutBounds(pageId, 720, 480);
+  const win = new BrowserWindow({
+    width: restored?.width ?? 1e3,
+    height: restored?.height ?? 700,
+    x: restored?.x,
+    y: restored?.y,
+    minWidth: 720,
+    minHeight: 480,
+    show: false,
+    autoHideMenuBar: true,
+    title: state?.name || pageId,
+    backgroundColor: "#000000",
+    // same frameless contract as the main shell: the renderer draws its own title strip
+    frame: false,
+    icon: appIconPath(),
+    webPreferences: {
+      preload: shellPreload(),
+      // mirrors the main window: the popout hosts the page in a <webview> of its own
+      sandbox: false,
+      webviewTag: true
+    }
+  });
+  popoutWindows.set(pageId, win);
+  win.on("ready-to-show", () => {
+    if (!win.isDestroyed()) win.show();
+  });
+  win.on("page-title-updated", (e) => {
+    e.preventDefault();
+  });
+  win.on("resize", schedulePopoutSave);
+  win.on("move", schedulePopoutSave);
+  const pushMaximized = () => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.OnMaximizedChanged, win.isMaximized());
+  };
+  win.on("maximize", () => {
+    schedulePopoutSave();
+    pushMaximized();
+  });
+  win.on("unmaximize", () => {
+    schedulePopoutSave();
+    pushMaximized();
+  });
+  win.on("closed", () => {
+    popoutWindows.delete(pageId);
+  });
+  const devUrl = process.env["ELECTRON_RENDERER_URL"];
+  if (devUrl) win.loadURL(`${devUrl}?popout=${encodeURIComponent(pageId)}`);
+  else win.loadFile(join(__dirname, "../renderer/index.html"), { query: { popout: pageId } });
+  return win;
+}
+function activeKeybindings() {
+  const stored = getSettings().keybindings || {};
+  const out = { ...DEFAULT_KEYBINDINGS };
+  for (const action of Object.keys(out)) {
+    const v = stored[action];
+    if (typeof v === "string") out[action] = v;
+  }
+  return out;
+}
+const GUEST_ACTIONS = ["palette", "terminal", "popoutCurrent"];
+function wireGuestShortcuts(registry2) {
+  if (guestKeysWired) return;
+  guestKeysWired = true;
+  app$1.on("web-contents-created", (_e, contents) => {
+    if (contents.getType() !== "webview") return;
+    contents.on("before-input-event", (event, input) => {
+      if (input.type !== "keyDown") return;
+      const bindings = activeKeybindings();
+      let fired = null;
+      for (const action of GUEST_ACTIONS) {
+        if (matchesAccelerator(bindings[action], {
+          key: input.key,
+          code: input.code,
+          ctrl: input.control,
+          shift: input.shift,
+          alt: input.alt,
+          meta: input.meta
+        })) {
+          fired = action;
+          break;
+        }
+      }
+      if (!fired) return;
+      event.preventDefault();
+      const url = contents.getURL();
+      const pageId = url ? registry2.running().find((p) => p.url && url.startsWith(p.url))?.id : void 0;
+      const signal = { action: fired, ...pageId ? { pageId } : {} };
+      const hostId = contents.hostWebContents?.id;
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed() && win.webContents.id === hostId) {
+          win.webContents.send(IPC.OnHotkey, signal);
+          break;
+        }
+      }
+    });
+  });
+}
 function registerIpc(registry2) {
   const ok = (data) => ({ ok: true, data });
   const fail = (err) => ({
@@ -16790,6 +17562,12 @@ function registerIpc(registry2) {
       if (!win.isDestroyed()) win.webContents.send(IPC.OnPageProgress, p);
     }
   });
+  setEventBroadcaster((ev) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnEvent, ev);
+    }
+  });
+  wireGuestShortcuts(registry2);
   nativeTheme.on("updated", () => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(IPC.OnNativeTheme, nativeTheme.shouldUseDarkColors);
@@ -16832,9 +17610,9 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
-  ipcMain$1.handle(IPC.ListNodeVersions, async () => {
+  ipcMain$1.handle(IPC.ListNodeVersions, async (_e, includeIncompatible) => {
     try {
-      return ok(await listNodeVersions());
+      return ok(await listNodeVersions(!!includeIncompatible));
     } catch (err) {
       return fail(err);
     }
@@ -16859,16 +17637,19 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
-  ipcMain$1.handle(IPC.ProvisionBuiltin, async (_e, kind) => {
-    try {
-      const res = await provisionBuiltin(kind);
-      clearUpdateCache();
-      registry2.emitChanged();
-      return ok(res);
-    } catch (err) {
-      return fail(err);
+  ipcMain$1.handle(
+    IPC.ProvisionBuiltin,
+    async (_e, kind, version) => {
+      try {
+        const res = await provisionBuiltin(kind, version);
+        clearUpdateCache();
+        registry2.emitChanged();
+        return ok(res);
+      } catch (err) {
+        return fail(err);
+      }
     }
-  });
+  );
   ipcMain$1.handle(IPC.ListPages, async () => {
     registry2.reconcile();
     await registry2.refreshRuntimePresence().catch(() => void 0);
@@ -16893,6 +17674,20 @@ function registerIpc(registry2) {
     }
   });
   ipcMain$1.handle(IPC.GetPageLogs, (_e, id2) => ok(registry2.logs(id2)));
+  ipcMain$1.handle(IPC.ListEvents, (_e, args) => {
+    try {
+      return ok(listEvents(args || {}));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetMetricsHistory, () => {
+    try {
+      return ok(getMetricsHistory());
+    } catch (err) {
+      return fail(err);
+    }
+  });
   ipcMain$1.handle(
     IPC.InstallPageFromGit,
     async (_e, repoUrl, name, port) => {
@@ -17013,6 +17808,19 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
+  ipcMain$1.handle(IPC.OpenPageWindow, (_e, pageId) => {
+    try {
+      const state = registry2.get(pageId);
+      if (!state) return fail(new Error(m("page.unknown", { id: pageId })));
+      if (state.kind === "terminal") {
+        return fail(new Error(m("page.cliNeedsTerminal", { name: state.name })));
+      }
+      openPageWindow(registry2, pageId);
+      return ok(true);
+    } catch (err) {
+      return fail(err);
+    }
+  });
   ipcMain$1.handle(IPC.GetSettings, () => ok(getSettings()));
   ipcMain$1.handle(IPC.OpenLogsDir, async () => {
     try {
@@ -17052,6 +17860,25 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
+  ipcMain$1.handle(
+    IPC.CheckPortFree,
+    async (_e, port, pageId) => {
+      try {
+        const n = Number(port);
+        if (!isValidPort(n)) return fail(new Error(m("ipc.portRange")));
+        const bind = await probePortBind(n);
+        if (bind === "free") return ok({ port: n, free: true });
+        const holder = await findPortHolder(n);
+        if (bind === "error" && !holder) return ok({ port: n, free: false, probeError: true });
+        if (holder && pageId && registry2.get(pageId)?.pid === holder.pid) {
+          return ok({ port: n, free: true });
+        }
+        return ok({ port: n, free: false, ...holder ? { holder } : {}, ...bind === "error" ? { probeError: true } : {} });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
   ipcMain$1.handle(IPC.RollbackAsar, () => {
     try {
       if (!canRollbackAsar().available) return fail(new Error(m("update.noRollback")));
@@ -17140,11 +17967,32 @@ function registerIpc(registry2) {
   if (metricsTimer) clearInterval(metricsTimer);
   metricsTimer = setInterval(async () => {
     try {
-      const metrics = await collectPageMetrics(registry2, getSettings().memWarnMb ?? 0);
+      const settings = getSettings();
+      const metrics = await collectPageMetrics(registry2, settings.memWarnMb ?? 0);
       pruneMetricsBaseline(
         registry2.running().map((p) => p.pid).filter(Boolean)
       );
       setTrayResourceWarn(metrics.some((mm) => mm.overLimit));
+      if (settings.memLimitAction === "restart") {
+        for (const mm of metrics) {
+          if (!mm.overLimit || memRestarted.has(mm.pageId)) continue;
+          const st = registry2.get(mm.pageId);
+          if (!st?.startedAt || Date.now() - st.startedAt < MEM_RESTART_MIN_UPTIME_MS) continue;
+          memRestarted.add(mm.pageId);
+          logEvent({
+            level: "warn",
+            kind: "mem.restart",
+            pageId: mm.pageId,
+            meta: { memMb: mm.memMb, limitMb: settings.memWarnMb ?? 0 }
+          });
+          registry2.restart(mm.pageId).catch(
+            (err) => console.warn("[metrics] memory restart failed:", err.message)
+          );
+        }
+      }
+      for (const id2 of [...memRestarted]) {
+        if (!registry2.running().some((p) => p.id === id2)) memRestarted.delete(id2);
+      }
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) win.webContents.send(IPC.OnPageMetrics, metrics);
       }
@@ -17171,6 +18019,12 @@ function registerIpc(registry2) {
           applyLaunchAtStartup(partial.launchAtStartup);
         }
         if ("npmRegistry" in partial) applyNpmRegistryEnv();
+        if ("containerChannel" in partial || "dshChannel" in partial) {
+          resetBranchProbe();
+          clearUpdateCache();
+          void runSurvey();
+        }
+        if ("memLimitAction" in partial) memRestarted.clear();
         if (partial.rememberWindowBounds === false) forgetWindowBounds();
         if (partial.trayPageEntries || partial.trayBadge) rebuildTrayMenu();
         if (partial.locale) {
@@ -17544,9 +18398,18 @@ function wireItem(item, host) {
     if (state === "completed") {
       broadcast({ ...snapshot("completed"), received: item.getReceivedBytes(), percent: 100 });
       const savePath = item.getSavePath();
-      if (savePath) notifyDone(basename(savePath), savePath);
+      if (savePath) {
+        notifyDone(basename(savePath), savePath);
+        logEvent({
+          level: "info",
+          kind: "download.done",
+          detail: savePath,
+          meta: { file: basename(savePath), bytes: item.getReceivedBytes(), ...host ? { host } : {} }
+        });
+      }
     } else {
       broadcast({ ...snapshot("cancelled"), state: "cancelled" });
+      logEvent({ level: "warn", kind: "download.cancelled", meta: { file: label() } });
     }
   });
 }
@@ -17608,7 +18471,7 @@ function ensureAsciiUserData() {
       renameSync(current, target);
       app$1.setPath("userData", target);
       try {
-        writeFileSync$1(join(target, MIGRATION_MARKER), `migrated from ${current} at ${(/* @__PURE__ */ new Date()).toISOString()}`);
+        writeFileSync$1(join(target, MIGRATION_MARKER), `migrated from ${current} at ${isoShanghai()}`);
       } catch {
       }
     } catch (err) {
@@ -17633,6 +18496,7 @@ const FATAL_ERROR_CODES = /* @__PURE__ */ new Set(["MODULE_NOT_FOUND", "ERR_UNKN
 let fatalEscalated = false;
 process.on("uncaughtException", (err) => {
   console.error("[container] uncaught exception:", err);
+  logEvent({ level: "error", kind: "app.crash", detail: err?.stack || err?.message || String(err) });
   const code2 = err.code;
   if (app$1.isPackaged && code2 && FATAL_ERROR_CODES.has(code2) && !fatalEscalated) {
     fatalEscalated = true;
@@ -17799,6 +18663,11 @@ if (!gotLock) {
     electronApp.setAppUserModelId("com.dsh.desktop-container");
     ensureUnpackedForUpdate();
     markBootOk();
+    logEvent({
+      level: "info",
+      kind: "app.boot",
+      meta: { version: app$1.getVersion(), packaged: app$1.isPackaged }
+    });
     startHidden = process.argv.includes("--autostart") || app$1.getLoginItemSettings().wasOpenedAtLogin;
     applyLaunchAtStartup(getSettings().launchAtStartup);
     applyNpmRegistryEnv();
@@ -17848,6 +18717,7 @@ if (!gotLock) {
   app$1.on("before-quit", (e) => {
     isQuitting = true;
     flushWindowBounds();
+    flushPopoutBounds();
     if (registry && !shutdownDone) {
       shutdownDone = true;
       e.preventDefault();

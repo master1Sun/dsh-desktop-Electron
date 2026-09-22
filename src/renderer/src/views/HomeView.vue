@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import MarketView from '../views/MarketView.vue'
 import { t, locale } from '../i18n'
+import { useDualStore, type DualPane } from '../stores/dual'
 import whaleIcon from '../assets/whale.png'
 
 const props = defineProps<{
@@ -26,6 +27,8 @@ const props = defineProps<{
   /** The webview currently shows a loaded external address: keep its popups / new-window
       navigations in-place (browser-like) instead of bouncing to the system browser. */
   externalView?: boolean
+  /** Pages the secondary pane can show (running web pages + external sites). */
+  secondaryChoices?: { id: string; label: string; url: string }[]
 }>()
 
 const emit = defineEmits<{
@@ -111,22 +114,49 @@ const guest = (id: string | null = props.activeId): WebviewNav | null =>
 
 /** Last pushed nav state, so syncNav only emits when it actually changes. */
 const nav = ref({ back: false, forward: false })
+/** The secondary pane's own history state — kept beside `nav` so the top-bar buttons can
+    flip between panes (mouse-activated) without re-probing the webviews. */
+const secNav = ref({ back: false, forward: false })
+/** Emit whichever pane the dual store says is active (main outside dual mode). */
+function emitActiveNav(): void {
+  const next = dualStore.activePane === 'secondary' ? { ...secNav.value } : { ...nav.value }
+  emit('nav-state', next)
+}
 function syncNav(id: string): void {
   if (id !== props.activeId) return
   const el = guest(id)
   const next = { back: Boolean(el?.canGoBack), forward: Boolean(el?.canGoForward) }
   if (next.back !== nav.value.back || next.forward !== nav.value.forward) {
     nav.value = next
-    emit('nav-state', next)
   }
+  if (dualStore.activePane === 'main') emit('nav-state', nav.value)
+}
+function syncSecNav(): void {
+  const el = secWebviewEl.value as unknown as WebviewNav | null
+  const next = { back: Boolean(el?.canGoBack), forward: Boolean(el?.canGoForward) }
+  if (next.back !== secNav.value.back || next.forward !== secNav.value.forward) {
+    secNav.value = next
+  }
+  if (dualStore.activePane === 'secondary') emit('nav-state', secNav.value)
 }
 
-/** Back / forward for the embedded webview, driven by the top-bar nav buttons. */
+// Moving the mouse into a pane re-aims the top-bar buttons — the watcher that pushes the
+// newly-active pane's nav state lives in the dual section below (after `dualStore`).
+
+/** Back / forward for the embedded webview, driven by the top-bar nav buttons.
+ *  Only a MOUNTED secondary webview can hold the aim — when the pane is collapsed or has
+ *  no url, fall back to the main guest instead of firing into null. */
+function navTarget(): WebviewNav | null {
+  if (dualStore.activePane === 'secondary' && secWebviewEl.value) {
+    return secWebviewEl.value as unknown as WebviewNav
+  }
+  return guest()
+}
 function goBack(): void {
-  guest()?.goBack?.()
+  navTarget()?.goBack?.()
 }
 function goForward(): void {
-  guest()?.goForward?.()
+  navTarget()?.goForward?.()
 }
 
 /**
@@ -144,7 +174,7 @@ function reload(): boolean {
 // A fresh src (page / external switch) starts a new history stack — reflect it at once.
 watch(activeUrl, () => {
   nav.value = { back: false, forward: false }
-  emit('nav-state', nav.value)
+  if (dualStore.activePane === 'main') emit('nav-state', nav.value)
 })
 
 function onStopLoading(id: string): void {
@@ -167,6 +197,85 @@ function onNewWindow(ev: Event): void {
   if (url) void guest()?.loadURL?.(url)?.catch(() => undefined)
 }
 
+/* ---- 双屏模式 (split view) ----
+   State lives in the shared `dual` store so the menu-bar controls and these panes stay in
+   sync. The main pane keeps the active page mounted (a booted guest is never reloaded); the
+   secondary pane is one independent <webview> pointed at any running page / external site.
+   A draggable divider resizes the split; either pane can collapse to a lone full-width screen. */
+const dualStore = useDualStore()
+const dragging = ref(false)
+/** The secondary pane's lone <webview>; the nav helpers above aim at it when it holds focus. */
+const secWebviewEl = ref<HTMLElement | null>(null)
+
+// Push the runtime inputs the store's picker needs: candidate pages + the URL on the main pane.
+watch(
+  () => props.secondaryChoices,
+  (v) => {
+    dualStore.choices = v || []
+  },
+  { immediate: true, deep: true }
+)
+watch(activeUrl, (v) => (dualStore.mainUrl = v), { immediate: true })
+
+// A new secondary URL is a fresh history stack — drop the stale buttons before the guest
+// reloads, then re-sync once the webview fires its own navigation events.
+watch(
+  () => dualStore.secondaryUrl,
+  () => {
+    secNav.value = { back: false, forward: false }
+    if (dualStore.activePane === 'secondary') emit('nav-state', secNav.value)
+  }
+)
+
+// Mouse moved into another pane: push that pane's nav state to the top-bar buttons at once.
+watch(() => dualStore.activePane, emitActiveNav)
+
+/* ---- 鼠标激活分页 (pane aim) ----
+   The top-bar nav buttons act on the pane the mouse last visited. Template `mouseenter`
+   alone proved unreliable (fast sweeps between panes can skip it), so each pane ALSO gets
+   a capture-phase `pointerenter`/`pointermove` pair: those fire no matter which child (incl.
+   overlay layers) the pointer actually hits, and re-assert on every move. The webview
+   `activate` event (guest regains focus without a host-side pointer event) re-aims too —
+   that is the authoritative Electron event for "the mouse clicked INTO the guest". */
+function setPaneAim(el: HTMLElement | null, pane: DualPane): void {
+  if (!el) return
+  const aim = (): void => dualStore.setFocusPane(pane)
+  el.addEventListener('pointerenter', aim, true)
+  el.addEventListener('pointermove', aim, true)
+}
+const mainPaneEl = ref<HTMLElement | null>(null)
+const secPaneEl = ref<HTMLElement | null>(null)
+watch(mainPaneEl, (el) => setPaneAim(el, 'main'))
+watch(secPaneEl, (el) => setPaneAim(el, 'secondary'))
+
+const mainStyle = computed(() =>
+  dualStore.bothVisible ? { flex: `0 0 ${dualStore.split}%` } : { flex: '1 1 auto' }
+)
+
+const workbenchEl = ref<HTMLElement | null>(null)
+function onDragStart(ev: PointerEvent): void {
+  if (!dualStore.bothVisible) return
+  const handle = ev.currentTarget as HTMLElement
+  const host = workbenchEl.value
+  if (!host) return
+  dragging.value = true
+  handle.setPointerCapture?.(ev.pointerId)
+  const move = (e: PointerEvent): void => {
+    const rect = host.getBoundingClientRect()
+    if (rect.width <= 0) return
+    const pct = ((e.clientX - rect.left) / rect.width) * 100
+    dualStore.split = Math.min(85, Math.max(15, pct))
+  }
+  const up = (e: PointerEvent): void => {
+    dragging.value = false
+    handle.releasePointerCapture?.(e.pointerId)
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+  }
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+}
+
 defineExpose({
   /** The on-screen guest element, for App's DevTools / history toolbar. */
   webviewEl: computed(() => (guest(props.activeId) as unknown as HTMLElement | null) || null),
@@ -177,96 +286,184 @@ defineExpose({
 </script>
 
 <template>
-  <div class="workbench card">
-    <!-- A page configured as the default view but not up yet: full-surface boot animation
-         with live phase + elapsed, a first-boot expectation-setter, and a cancel escape hatch. -->
-    <div v-if="props.startingText" class="boot-screen">
-      <!-- Animated whale + bubbles -->
-      <div class="boot-scene">
-        <img :src="whaleIcon" class="boot-whale" alt="" />
-        <span class="bubble b1" />
-        <span class="bubble b2" />
-        <span class="bubble b3" />
-        <span class="bubble b4" />
+  <div ref="workbenchEl" class="workbench card" :class="{ 'is-dragging': dragging }">
+    <!-- MAIN pane: the active page, mounted exactly as before (webviews stay mounted so a
+         booted guest is never reloaded by entering/leaving split view). -->
+    <div
+      v-show="dualStore.showMain"
+      ref="mainPaneEl"
+      class="pane pane-main"
+      :style="mainStyle"
+      @mouseenter="dualStore.setFocusPane('main')"
+    >
+      <!-- A page configured as the default view but not up yet: full-surface boot animation
+           with live phase + elapsed, a first-boot expectation-setter, and a cancel escape hatch. -->
+      <div v-if="props.startingText" class="boot-screen">
+        <!-- Animated whale + bubbles -->
+        <div class="boot-scene">
+          <img :src="whaleIcon" class="boot-whale" alt="" />
+          <span class="bubble b1" />
+          <span class="bubble b2" />
+          <span class="bubble b3" />
+          <span class="bubble b4" />
+        </div>
+
+        <!-- Rotating fun tip -->
+        <Transition name="tip-fade" mode="out-in">
+          <p class="boot-tip" :key="tipIdx">{{ currentTip }}</p>
+        </Transition>
+
+        <!-- Status line -->
+        <div class="boot-status">
+          <span class="boot-text">{{ props.startingText }}</span>
+          <span v-if="props.phaseText || props.elapsedText" class="boot-phase">
+            <span v-if="props.phaseText">{{ props.phaseText }}</span>
+            <span v-if="props.phaseText && props.elapsedText" class="boot-dot">·</span>
+            <span v-if="props.elapsedText">{{ props.elapsedText }}</span>
+          </span>
+        </div>
+
+        <p v-if="props.slow" class="boot-slow">{{ t('boot.firstBootHint') }}</p>
+
+        <div class="boot-actions">
+          <button
+            v-if="props.logs && props.logs.length"
+            class="boot-btn"
+            type="button"
+            @click="showLogs = !showLogs"
+          >
+            {{ showLogs ? t('boot.hideLogs') : t('boot.viewLogs') }}
+          </button>
+          <button class="boot-btn boot-btn-cancel" type="button" @click="emit('cancel-start')">
+            {{ t('boot.cancelStart') }}
+          </button>
+        </div>
+
+        <pre v-if="showLogs && props.logs && props.logs.length" class="boot-logs">{{
+          props.logs.join('\n')
+        }}</pre>
       </div>
 
-      <!-- Rotating fun tip -->
-      <Transition name="tip-fade" mode="out-in">
-        <p class="boot-tip" :key="tipIdx">{{ currentTip }}</p>
-      </Transition>
-
-      <!-- Status line -->
-      <div class="boot-status">
-        <span class="boot-text">{{ props.startingText }}</span>
-        <span v-if="props.phaseText || props.elapsedText" class="boot-phase">
-          <span v-if="props.phaseText">{{ props.phaseText }}</span>
-          <span v-if="props.phaseText && props.elapsedText" class="boot-dot">·</span>
-          <span v-if="props.elapsedText">{{ props.elapsedText }}</span>
-        </span>
+      <div v-show="activeUrl" class="webview-wrap">
+        <div v-if="props.loading" class="webview-loading">
+          <span class="status-dot starting" /> {{ t('common.loading') }}
+        </div>
+        <!-- One <webview> per opened page: switching only flips v-show, so a guest that is
+             already up (openclaw token, dsh terminal sessions) is never reloaded. -->
+        <!-- eslint-disable-next-line vue/html-self-closing -->
+        <webview
+          v-for="s in props.sessions"
+          :key="s.id"
+          :ref="(el) => setWebviewRef(s.id, el)"
+          v-show="s.id === props.activeId"
+          :src="s.url"
+          class="wv"
+          allowpopups
+          @activate="dualStore.setFocusPane('main')"
+          @did-stop-loading="onStopLoading(s.id)"
+          @dom-ready="onDomReady(s.id)"
+          @did-navigate="syncNav(s.id)"
+          @did-navigate-in-page="syncNav(s.id)"
+          @did-start-loading="syncNav(s.id)"
+          @new-window="onNewWindow"
+        />
       </div>
 
-      <p v-if="props.slow" class="boot-slow">{{ t('boot.firstBootHint') }}</p>
-
-      <div class="boot-actions">
-        <button
-          v-if="props.logs && props.logs.length"
-          class="boot-btn"
-          type="button"
-          @click="showLogs = !showLogs"
-        >
-          {{ showLogs ? t('boot.hideLogs') : t('boot.viewLogs') }}
-        </button>
-        <button class="boot-btn boot-btn-cancel" type="button" @click="emit('cancel-start')">
-          {{ t('boot.cancelStart') }}
-        </button>
-      </div>
-
-      <pre v-if="showLogs && props.logs && props.logs.length" class="boot-logs">{{
-        props.logs.join('\n')
-      }}</pre>
-    </div>
-
-    <div v-show="activeUrl" class="webview-wrap">
-      <div v-if="props.loading" class="webview-loading">
-        <span class="status-dot starting" /> {{ t('common.loading') }}
-      </div>
-      <!-- One <webview> per opened page: switching only flips v-show, so a guest that is
-           already up (openclaw token, dsh terminal sessions) is never reloaded. -->
-      <!-- eslint-disable-next-line vue/html-self-closing -->
-      <webview
-        v-for="s in props.sessions"
-        :key="s.id"
-        :ref="(el) => setWebviewRef(s.id, el)"
-        v-show="s.id === props.activeId"
-        :src="s.url"
-        class="wv"
-        allowpopups
-        @did-stop-loading="onStopLoading(s.id)"
-        @dom-ready="onDomReady(s.id)"
-        @did-navigate="syncNav(s.id)"
-        @did-navigate-in-page="syncNav(s.id)"
-        @did-start-loading="syncNav(s.id)"
-        @new-window="onNewWindow"
+      <!-- Default workbench: the built-in plugin market static view, overlaid so the
+           webview below it never unmounts when the user switches to it. -->
+      <MarketView
+        v-if="!props.startingText && (props.marketActive || !activeUrl)"
+        class="market-layer"
+        @install-pages="emit('install-pages')"
+        @open-panel="(k: string) => emit('open-panel', k)"
       />
     </div>
 
-    <!-- Default workbench: the built-in plugin market static view, overlaid so the
-         webview below it never unmounts when the user switches to it. -->
-    <MarketView
-      v-if="!props.startingText && (props.marketActive || !activeUrl)"
-      class="market-layer"
-      @install-pages="emit('install-pages')"
-      @open-panel="(k: string) => emit('open-panel', k)"
-    />
+    <!-- Draggable divider: resizes the split while both panes are visible. -->
+    <div v-if="dualStore.bothVisible" class="split-divider" @pointerdown="onDragStart" />
+
+    <!-- SECONDARY pane: one independent webview, pointed via the picker in the menu bar.
+         Hover AND guest focus both hand it the nav-button aim (same rule as the main pane). -->
+    <div
+      v-if="dualStore.showSecondary"
+      ref="secPaneEl"
+      class="pane pane-secondary"
+      @mouseenter="dualStore.setFocusPane('secondary')"
+    >
+      <!-- eslint-disable-next-line vue/html-self-closing -->
+      <webview
+        v-if="dualStore.secondaryUrl"
+        ref="secWebviewEl"
+        :src="dualStore.secondaryUrl"
+        class="wv sec-wv"
+        allowpopups
+        @activate="dualStore.setFocusPane('secondary')"
+        @dom-ready="syncSecNav"
+        @did-navigate="syncSecNav"
+        @did-navigate-in-page="syncSecNav"
+        @did-start-loading="syncSecNav"
+      />
+      <div v-else class="sec-empty">{{ t('dual.empty') }}</div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .workbench {
+  position: relative;
   height: 100%;
   min-height: 0;
   overflow: hidden;
   display: flex;
+}
+
+/* ---- Split view (双屏) ---- */
+.pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* width comes from :style (mainStyle); pane-main owns the active page's webview stack. */
+.pane-secondary {
+  flex: 1 1 auto;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+.split-divider {
+  flex: none;
+  width: 6px;
+  cursor: col-resize;
+  background: var(--border);
+  transition: background 0.15s ease;
+}
+.split-divider:hover,
+.workbench.is-dragging .split-divider {
+  background: var(--accent);
+}
+
+/* While dragging, guests must not eat the pointer or the divider stalls mid-pane. */
+.workbench.is-dragging :deep(webview) {
+  pointer-events: none;
+}
+
+.sec-wv {
+  flex: 1;
+  min-height: 0;
+  border: none;
+}
+.sec-empty {
+  flex: 1;
+  display: grid;
+  place-content: center;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 0 24px;
+  text-align: center;
 }
 
 .webview-wrap {

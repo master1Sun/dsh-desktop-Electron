@@ -22,6 +22,7 @@ const emit = defineEmits<{
   'select-page': [id: string]
   'start-page': [id: string]
   'open-terminal': [id: string]
+  'popout-page': [id: string]
 }>()
 
 const open = ref(false)
@@ -49,6 +50,21 @@ function pick(p: PageState): void {
 function onStart(p: PageState): void {
   if (props.busyPages?.[p.id]) return
   emit('start-page', p.id)
+}
+
+/**
+ * C2: which rows may get their own window. A terminal page renders in the full-surface terminal
+ * instead, and an external site has no hosted view to detach — both would open an empty window.
+ * Starting is not a precondition: a detached window for a stopped page offers its own ▶ button.
+ */
+function canPopout(p: PageState): boolean {
+  return !p.external && p.kind !== 'terminal'
+}
+
+/** Same dismiss-before-emit rule as `pick()`: a window opened behind an open list is a stray list. */
+function onPopout(p: PageState): void {
+  close()
+  emit('popout-page', p.id)
 }
 
 /**
@@ -160,6 +176,23 @@ defineExpose({ close })
         <span v-if="blocked(p)" class="block-tag" :title="t('setup.runtimeMissingTag')">{{
           t('setup.missingTag')
         }}</span>
+        <button
+          v-if="canPopout(p)"
+          class="row-popout"
+          :title="t('pageMgr.popoutTip')"
+          @click="onPopout(p)"
+        >
+          <!-- A window with an arrow leaving it: the same "detach" idea as the OS-browser button. -->
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path
+              d="M1 1.6h5.6v4.8H1z M6.6 3.2l2.4 0v5.2h-5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.1"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
         <button
           v-if="needsStart(p)"
           :class="['row-start', { 'is-busy': props.busyPages?.[p.id] }]"
@@ -302,6 +335,28 @@ defineExpose({ close })
   border-radius: 999px;
   color: var(--warn);
   border: 1px solid var(--warn);
+}
+
+/* C2: a quieter sibling of the ▶ button — same box, no accent fill, so the row still reads
+   name → (start) → status first. */
+.row-popout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.row-popout:hover {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .row-start {

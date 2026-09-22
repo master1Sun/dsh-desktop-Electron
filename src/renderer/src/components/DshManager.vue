@@ -427,11 +427,22 @@ const versionLabel = (p: DshPluginInfo): string =>
             </el-button>
           </div>
 
-          <!-- Operation progress strip: visible while any long-running CLI op is active -->
+          <!-- Operation progress strip: visible while any long-running CLI op is active.
+               npm/pnpm report no byte progress, so this is the striped indeterminate bar (see
+               main.css) rather than a fake percentage; the elapsed counter is the real signal. -->
           <div v-if="opLabel" class="op-progress">
-            <span class="op-spinner" />
-            <span class="op-text">{{ opLabel }}</span>
-            <span v-if="opElapsedText" class="op-elapsed">{{ opElapsedText }}</span>
+            <div class="op-line">
+              <span class="op-text">{{ opLabel }}</span>
+              <span v-if="opElapsedText" class="op-elapsed">{{ opElapsedText }}</span>
+            </div>
+            <el-progress
+              :percentage="0"
+              :stroke-width="6"
+              :show-text="false"
+              indeterminate
+              striped
+              :striped-flow="true"
+            />
           </div>
 
           <el-table :data="plugins" size="small" :empty-text="t('dshMgr.pluginsEmpty')">
@@ -626,11 +637,11 @@ const versionLabel = (p: DshPluginInfo): string =>
   font-weight: 600;
 }
 
-/* Operation progress strip */
+/* Operation progress strip: caption row on top, the indeterminate bar filling the width below */
 .op-progress {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 6px 10px;
   margin-bottom: 10px;
   font-size: 12px;
@@ -639,14 +650,10 @@ const versionLabel = (p: DshPluginInfo): string =>
   border: 1px solid var(--border);
   border-radius: 6px;
 }
-.op-spinner {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  animation: op-spin 0.7s linear infinite;
-  flex-shrink: 0;
+.op-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .op-text {
   flex: 1;
@@ -658,11 +665,6 @@ const versionLabel = (p: DshPluginInfo): string =>
 .op-elapsed {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
-}
-@keyframes op-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 .dsh-footer {
   display: flex;

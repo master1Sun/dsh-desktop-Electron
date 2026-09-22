@@ -19,7 +19,9 @@ vi.mock('electron', () => ({
     getAppPath: () => repoRoot,
     getPath: () => scratch,
     isPackaged: false
-  }
+  },
+  // Plugin operations broadcast progress to every window; with no windows the calls are no-ops.
+  BrowserWindow: { getAllWindows: () => [] }
 }))
 
 // readPageMeta reads settings for per-page port overrides; conf rejects the mocked
@@ -44,8 +46,8 @@ vi.mock('electron-store', () => {
   }
 })
 
-const dsh = await import('../src/main/dsh')
-const pages = await import('../src/main/pages')
+const dsh = await import('../src/main/runtime/dsh')
+const pages = await import('../src/main/runtime/pages')
 
 describe('dsh plugin management against the installed CLI', () => {
   afterAll(() => {

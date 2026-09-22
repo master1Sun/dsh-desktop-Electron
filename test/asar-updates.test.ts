@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import * as asar from '../src/main/asar-updates'
+import * as asar from '../src/main/update/asar-updates'
 
 // updatesRoot() = dirname(app.getPath('exe'))/resources/updates; point it at a temp dir.
 const exePath = join(mkdtempSync(join(tmpdir(), 'asar-upd-')), 'electron.exe')

@@ -1,47 +1,15 @@
 import { reactive, ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { useTerminalStore } from './terminal'
-import type { EnvVarSpec, InstallProgress, PageProgress } from '../../../shared/types'
+import type { InstallProgress, PageProgress, PageState } from '../../../shared/types'
 import { t } from '../i18n'
 
-export interface PageState {
-  id: string
-  name: string
-  dir: string
-  port: number
-  /** effective port: the user override when set, else `port` */
-  containerPort?: number
-  startCommand: string
-  description?: string
-  external?: boolean
-  externalUrl?: string
-  kind?: 'page' | 'dsh' | 'openclaw' | 'terminal'
-  dshProfile?: string
-  /** appears in the top-bar 应用 menu with the generic AppManager panel */
-  manageAsApp?: boolean
-  envVars?: EnvVarSpec[]
-  status: 'stopped' | 'starting' | 'running' | 'error'
-  pid?: number
-  startedAt?: number
-  exitCode?: number | null
-  lastError?: string
-  /** crash-guard: abnormal exits since the last stable run (reset after 5 min healthy) */
-  crashes?: number
-  /** crash-guard: epoch ms of the scheduled auto-restart, 0/undefined when none pending */
-  nextRestartAt?: number
-  url?: string
-  launchUrl?: string
-  /**
-   * Set by the main process for a stopped hosted dsh/openclaw page whose on-demand CLI runtime is
-   * not provisioned yet. The badges/guards read this instead of the async runtimes store, so they
-   * can't flash the wrong verdict during the status-IPC round trip.
-   */
-  runtimeMissing?: boolean
-  /** #18/#16: page ids that must be running first (container.json `dependsOn`). */
-  dependsOn?: string[]
-  /** #16: last health-probe outcome while running; `unknown` before the first probe resolves. */
-  health?: { status: 'ok' | 'fail' | 'unknown'; fails: number; lastAt?: number; url?: string }
-}
+/**
+ * The one page-row shape, straight from `src/shared`: the main process is the only writer (every
+ * field arrives on the `ListPages` payload), so restating it here could only drift — and it did,
+ * silently dropping each newly added manifest field from every typed consumer in the renderer.
+ */
+export type { PageState }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
   const res = await p

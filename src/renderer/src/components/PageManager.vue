@@ -1,12 +1,29 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, FolderOpened, Download, Menu } from '@element-plus/icons-vue'
+import {
+  Delete,
+  FolderOpened,
+  Download,
+  Menu,
+  VideoPlay,
+  VideoPause,
+  Setting,
+  CopyDocument,
+  Monitor,
+  Document,
+  SuccessFilled,
+  CircleCloseFilled,
+  WarningFilled,
+  Loading,
+  Minus
+} from '@element-plus/icons-vue'
+import CustomEnvEditor from './CustomEnvEditor.vue'
 import { usePagesStore, type PageState } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import { useRuntimesStore } from '../stores/runtimes'
-import { CONTAINER_REPO_URL } from '@shared/types'
-import type { PageMetrics } from '@shared/types'
+import { CONTAINER_REPO_URL, DISPLAY_TIME_ZONE, DISPLAY_TIME_ZONE_LABEL } from '@shared/types'
+import type { PageMetrics, PortCheckResult } from '@shared/types'
 import { t } from '../i18n'
 
 /** Mirror of the main-process check: a filesystem path typed where a URL was expected. */
@@ -203,6 +220,49 @@ const configSaving = ref(false)
 
 const configEnvVars = computed(() => configFor.value?.envVars ?? [])
 
+/* ---- B2: free-form env vars, independent of the manifest's directory vars ----
+   The row table itself is shared with AppManager (CustomEnvEditor); the dialog only needs a handle
+   to validate and read the draft when it commits port + dirs + custom vars in one write. */
+const customEnvRef = ref<InstanceType<typeof CustomEnvEditor> | null>(null)
+/** Bumped per open so the editor remounts and re-seeds: a Cancel must not leave rows behind. */
+const configSeq = ref(0)
+
+/* ---- B3: port pre-flight ----
+   Checking on blur turns "start failed, port taken" into a warning before the user hits 保存.
+   Deliberately read-only: killing a third-party process from a config dialog is too easy to get
+   wrong, and the start-failure path still offers the one-click kill + retry. */
+const portProbe = ref<PortCheckResult | null>(null)
+
+/** One line for the dialog: fail-open (probe error) reads differently from a real conflict. */
+const portProbeText = computed(() => {
+  const p = portProbe.value
+  if (!p) return ''
+  if (p.probeError) return t('pageMgr.portProbeFail')
+  if (p.free) return t('pageMgr.portFreeOk', { port: p.port })
+  return t('pageMgr.portBusyWarn', {
+    port: p.port,
+    name: p.holder?.name ?? '?',
+    pid: p.holder?.pid ?? '?'
+  })
+})
+
+async function probePort(): Promise<void> {
+  portProbe.value = null
+  let n: number | undefined
+  try {
+    n = parsePort(configDraft.port)
+  } catch {
+    return // out of range — saveConfig reports that, no point probing nonsense
+  }
+  if (!n) return
+  try {
+    const res = await window.container.checkPortFree?.(n, configFor.value?.id)
+    if (res?.ok) portProbe.value = (res.data as PortCheckResult) ?? null
+  } catch {
+    portProbe.value = null
+  }
+}
+
 function openConfig(page: PageState): void {
   configFor.value = page
   configDraft.port = String(page.containerPort || page.port || '')
@@ -210,6 +270,8 @@ function openConfig(page: PageState): void {
   const stored = settingsStore.settings.pageEnvs?.[page.id] || {}
   configDraft.envs = {}
   for (const v of page.envVars ?? []) configDraft.envs[v.key] = stored[v.key] || ''
+  configSeq.value += 1
+  portProbe.value = null
   configVisible.value = true
 }
 
@@ -227,6 +289,12 @@ async function saveConfig(): Promise<void> {
     // 0/unset semantics: clearing the field reverts to the declared port
     port = n
   }
+  // The editor is only absent when the dialog never opened, in which case there is nothing to save.
+  const draft = customEnvRef.value?.collect()
+  if (draft && !draft.ok) {
+    ElMessage.error(draft.message)
+    return
+  }
   configSaving.value = true
   try {
     if (port !== (page.containerPort || undefined)) await pagesStore.setPort(page.id, port || 0)
@@ -237,7 +305,16 @@ async function saveConfig(): Promise<void> {
     for (const [k, v] of Object.entries(configDraft.envs)) vars[k] = String(v).trim()
     if (Object.keys(vars).length) next[page.id] = vars
     else delete next[page.id]
-    await settingsStore.patch({ pageEnvs: next })
+    // B2: an emptied value row deletes that variable — the only affordance that survives a
+    // round trip through the settings store (an explicit `KEY: ''` would inject an empty var).
+    const nextCustom: Record<string, Record<string, string>> = JSON.parse(
+      JSON.stringify(settingsStore.settings.pageCustomEnvs || {})
+    )
+    if (draft) {
+      if (Object.keys(draft.envs).length) nextCustom[page.id] = draft.envs
+      else delete nextCustom[page.id]
+    }
+    await settingsStore.patch({ pageEnvs: next, pageCustomEnvs: nextCustom })
     // Auto-start toggle: only write when it changed, so a plain port/env edit doesn't
     // churn the sticky-pin diff. Flipping it here is an explicit user action, so main
     // records it in autoStartManual — a later 默认打开 change won't silently undo it.
@@ -298,9 +375,23 @@ function statusText(s?: string): string {
   )
 }
 
+function statusColor(s?: string): string {
+  return (
+    {
+      running: 'var(--ok)',
+      starting: 'var(--warn)',
+      error: 'var(--err)',
+      stopped: 'var(--text-dim)'
+    }[s ?? ''] ?? 'var(--text-dim)'
+  )
+}
+
 function formatTime(ms: number): string {
   try {
-    return new Date(ms).toLocaleString()
+    // Render in the shared display zone (not the OS timezone) and append its label so a
+    // user in another region can't misread a bare wall-clock as their local time.
+    const text = new Date(ms).toLocaleString(undefined, { timeZone: DISPLAY_TIME_ZONE })
+    return `${text} (${DISPLAY_TIME_ZONE_LABEL})`
   } catch {
     return String(ms)
   }
@@ -311,10 +402,30 @@ function formatTime(ms: number): string {
    we keep a local map keyed by pageId so rows refresh without a store round trip. */
 const metricsMap = reactive<Record<string, PageMetrics>>({})
 let offMetrics: (() => void) | undefined
+
+/* ---- B1 resource trend ----
+   Main keeps a 120-sample ring per page (≈10 min at its 5 s cadence) and hands it over once on
+   mount; each broadcast then appends locally, so the curve advances without a second round trip
+   per tick. History for a page that drops out of the snapshot is discarded, matching main. */
+const HISTORY_CAP = 120
+const historyMap = reactive<Record<string, PageMetrics[]>>({})
+
+function appendHistory(list: PageMetrics[]): void {
+  const live = new Set(list.map((m) => m.pageId))
+  for (const id of Object.keys(historyMap)) if (!live.has(id)) delete historyMap[id]
+  for (const m of list) {
+    const arr = historyMap[m.pageId] ?? (historyMap[m.pageId] = [])
+    if (arr.length && arr[arr.length - 1].ts === m.ts) continue // a fetch can repeat the newest tick
+    arr.push(m)
+    if (arr.length > HISTORY_CAP) arr.splice(0, arr.length - HISTORY_CAP)
+  }
+}
+
 onMounted(() => {
   offMetrics = window.container.onPageMetrics?.((list) => {
     for (const id of Object.keys(metricsMap)) delete metricsMap[id]
     for (const m of list) metricsMap[m.pageId] = m
+    appendHistory(list)
   })
   window.container
     .getPageMetrics?.()
@@ -322,11 +433,111 @@ onMounted(() => {
       if (res?.ok) for (const m of (res.data as PageMetrics[]) ?? []) metricsMap[m.pageId] = m
     })
     .catch(() => undefined)
+  // The trend needs the samples that piled up before this panel was ever opened.
+  window.container
+    .getMetricsHistory?.()
+    .then((res) => {
+      if (!res?.ok) return
+      const map = (res.data as Record<string, PageMetrics[]>) ?? {}
+      for (const [id, rows] of Object.entries(map)) historyMap[id] = rows.slice(-HISTORY_CAP)
+    })
+    .catch(() => undefined)
 })
 onBeforeUnmount(() => offMetrics?.())
 
 function fmtCpu(v: number): string {
   return v >= 10 ? String(Math.round(v)) : v.toFixed(1)
+}
+
+/* Sparkline geometry: a 78×18 strip inside the row badge, a 520×96 chart in the config dialog.
+   Both are drawn with `preserveAspectRatio="none"`, so only the viewBox matters. */
+const SPARK_W = 78
+const SPARK_H = 18
+const TREND_W = 520
+const TREND_H = 96
+
+const cpuOf = (m: PageMetrics): number => m.cpu
+const memOf = (m: PageMetrics): number => m.memMb
+
+/**
+ * polyline points for one series in a w×h box, y scaled to the series' own max. `floor` is the
+ * smallest peak a flat line is measured against, so an idle page doesn't pin itself to the top.
+ */
+function seriesPoints(
+  rows: PageMetrics[],
+  pick: (m: PageMetrics) => number,
+  w: number,
+  h: number,
+  floor: number
+): string {
+  if (rows.length < 2) return ''
+  const max = Math.max(floor, ...rows.map(pick)) || 1
+  const step = w / (rows.length - 1)
+  return rows
+    .map(
+      (m, i) =>
+        `${(i * step).toFixed(1)},${(h - 1 - (Math.max(0, pick(m)) / max) * (h - 2)).toFixed(1)}`
+    )
+    .join(' ')
+}
+
+const configHistory = computed(() =>
+  configFor.value ? (historyMap[configFor.value.id] ?? []) : []
+)
+
+/** Two stacked charts rather than one dual-axis overlay: each series keeps an honest y-scale. */
+const trendSeries = computed(() => {
+  const rows = configHistory.value
+  if (rows.length < 2) return []
+  const last = rows[rows.length - 1]
+  return [
+    {
+      label: t('pageMgr.trendCpu'),
+      unit: '%',
+      color: 'var(--accent)',
+      points: seriesPoints(rows, cpuOf, TREND_W, TREND_H, 10),
+      peak: fmtCpu(Math.max(10, ...rows.map(cpuOf))),
+      now: fmtCpu(last.cpu)
+    },
+    {
+      label: t('pageMgr.trendMem'),
+      unit: 'MB',
+      color: 'var(--warn)',
+      points: seriesPoints(rows, memOf, TREND_W, TREND_H, 100),
+      peak: String(Math.round(Math.max(100, ...rows.map(memOf)))),
+      now: String(Math.round(last.memMb))
+    }
+  ]
+})
+
+/** Shared x-axis: the span the samples actually cover, in the container's display timezone. */
+const trendTimeFmt = new Intl.DateTimeFormat(undefined, {
+  timeZone: DISPLAY_TIME_ZONE,
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit'
+})
+const trendRange = computed(() => {
+  const rows = configHistory.value
+  const from = rows[0]?.ts
+  const to = rows[rows.length - 1]?.ts
+  if (!from || !to) return { from: '', to: '' }
+  return { from: trendTimeFmt.format(from), to: trendTimeFmt.format(to) }
+})
+const trendMinutes = computed(() => Math.max(1, Math.round((configHistory.value.length * 5) / 60)))
+
+/** C2: hand the row to the main process, which opens (or focuses) its own window for it. */
+function canPopout(row: PageState): boolean {
+  return !row.external && row.kind !== 'terminal'
+}
+
+async function popoutRow(row: PageState): Promise<void> {
+  try {
+    const res = await window.container.openPageWindow?.(row.id)
+    if (res && !res.ok) ElMessage.error(res.error || t('common.unknownError'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
 }
 
 /* ---- #16 health + dependency visualization ----
@@ -491,6 +702,9 @@ function hasDownDep(row: PageState): boolean {
                   <!-- A missing runtime never "starts": keep the dot grey instead of implying
                    progress (the amber 启动中 dot used to spin forever on these rows). -->
                   <span class="status-dot" :class="runtimeMissing(row) ? 'stopped' : row.status" />
+                  <!-- D1: a manifest-shipped icon when the page provides one; the plain name
+                       remains the fallback (no letter glyph to fight the status dot with). -->
+                  <img v-if="row.iconUrl" class="cell-icon" :src="row.iconUrl" alt="" />
                   {{ row.name }}
                 </div>
                 <div class="cell-sub">{{ row.description || row.dir }}</div>
@@ -530,14 +744,55 @@ function hasDownDep(row: PageState): boolean {
                     class="metric-badge"
                     :class="{ 'metric-over': metricsMap[row.id].overLimit }"
                   >
-                    {{ t('pageMgr.metricsCpu', { v: fmtCpu(metricsMap[row.id].cpu) }) }} ·
-                    {{ t('pageMgr.metricsMem', { v: Math.round(metricsMap[row.id].memMb) }) }}
+                    <span class="mb-item">
+                      {{ t('pageMgr.metricsCpu', { v: fmtCpu(metricsMap[row.id].cpu) }) }}
+                      <!-- B1: the ring's shape, not just its latest value — a leak and a spike
+                           look identical in a single number. -->
+                      <svg
+                        v-if="(historyMap[row.id]?.length ?? 0) > 1"
+                        class="mb-spark"
+                        :viewBox="`0 0 ${SPARK_W} ${SPARK_H}`"
+                        preserveAspectRatio="none"
+                      >
+                        <polyline
+                          :points="seriesPoints(historyMap[row.id], cpuOf, SPARK_W, SPARK_H, 10)"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
+                        />
+                      </svg>
+                    </span>
+                    ·
+                    <span class="mb-item">
+                      {{ t('pageMgr.metricsMem', { v: Math.round(metricsMap[row.id].memMb) }) }}
+                      <svg
+                        v-if="(historyMap[row.id]?.length ?? 0) > 1"
+                        class="mb-spark"
+                        :viewBox="`0 0 ${SPARK_W} ${SPARK_H}`"
+                        preserveAspectRatio="none"
+                      >
+                        <polyline
+                          :points="seriesPoints(historyMap[row.id], memOf, SPARK_W, SPARK_H, 100)"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.5"
+                          vector-effect="non-scaling-stroke"
+                        />
+                      </svg>
+                    </span>
                     <em v-if="metricsMap[row.id].overLimit">{{ t('pageMgr.metricsOver') }}</em>
                   </span>
                 </div>
                 <div v-if="runtimeMissing(row)" class="runtime-missing">
-                  <el-button size="small" text type="warning" @click="guideForMissing(row)">
-                    {{ t('setup.runtimeMissingTag') }} · {{ t('setup.installBtn') }}
+                  <el-button
+                    size="small"
+                    text
+                    type="warning"
+                    :title="t('setup.runtimeMissingTag')"
+                    @click="guideForMissing(row)"
+                  >
+                    {{ t('pageMgr.installRuntime') }}
                   </el-button>
                 </div>
                 <div
@@ -556,14 +811,12 @@ function hasDownDep(row: PageState): boolean {
                   plain
                   round
                   :loading="killing === row.id"
+                  :title="
+                    t('pageMgr.killPort', { name: row.portHolder.name, pid: row.portHolder.pid })
+                  "
                   @click="killHolderAndRetry(row)"
                 >
-                  {{
-                    t('pageMgr.killPort', {
-                      name: row.portHolder.name,
-                      pid: row.portHolder.pid
-                    })
-                  }}
+                  {{ t('pageMgr.killPortShort') }}
                 </el-button>
               </template>
             </el-table-column>
@@ -584,49 +837,40 @@ function hasDownDep(row: PageState): boolean {
                 <span v-else class="err-text">{{ t('pageMgr.notSet') }}</span>
               </template>
             </el-table-column>
-            <el-table-column :label="t('pageMgr.colStatus')" width="70">
+            <el-table-column :label="t('pageMgr.colStatus')" width="52" align="center">
               <template #default="{ row }">
-                <!-- When the runtime isn't installed, 启动中/失败 is noise — the actionable fact is
-                 未安装, so it owns the status cell (the name row links to the install guide). -->
-                <el-tag v-if="runtimeMissing(row)" size="small" type="warning" effect="plain" round>
-                  {{ t('setup.missingTag') }}
-                </el-tag>
-                <el-tag
-                  v-else
-                  size="small"
-                  :type="
-                    row.status === 'running'
-                      ? 'success'
-                      : row.status === 'error'
-                        ? 'danger'
-                        : row.status === 'starting'
-                          ? 'warning'
-                          : 'info'
-                  "
-                  round
+                <!-- Traffic-light status: a single colored glyph, no tag border/background.
+                     Color carries the state (green/amber/red/grey), the tooltip keeps the wording. -->
+                <el-icon
+                  class="status-icon"
+                  :class="{ 'is-spin': !runtimeMissing(row) && row.status === 'starting' }"
+                  :style="{ color: runtimeMissing(row) ? 'var(--warn)' : statusColor(row.status) }"
+                  :title="runtimeMissing(row) ? t('setup.missingTag') : statusText(row.status)"
                 >
-                  {{
-                    {
-                      running: t('pageMgr.statusRunning'),
-                      starting: t('pageMgr.statusStarting'),
-                      error: t('pageMgr.statusError'),
-                      stopped: t('pageMgr.statusStopped')
-                    }[row.status]
-                  }}
-                </el-tag>
+                  <WarningFilled v-if="runtimeMissing(row)" />
+                  <SuccessFilled v-else-if="row.status === 'running'" />
+                  <Loading v-else-if="row.status === 'starting'" />
+                  <CircleCloseFilled v-else-if="row.status === 'error'" />
+                  <Minus v-else />
+                </el-icon>
               </template>
             </el-table-column>
             <el-table-column
               :label="t('pageMgr.colAction')"
-              width="300"
+              width="190"
               align="right"
               class-name="col-actions"
             >
               <template #default="{ row }">
+                <!-- Icon-only actions (with tooltips): English labels used to overflow the fixed
+                     360px column and clip, so the text buttons became glyphs. -->
                 <el-button
                   v-if="!row.external && (row.kind === 'terminal' || row.containerPort || row.port)"
                   size="small"
                   text
+                  :title="
+                    row.status === 'running' ? t('pageMgr.actionStop') : t('pageMgr.actionStart')
+                  "
                   :loading="pagesStore.busy[row.id]"
                   @click="
                     row.status === 'running'
@@ -636,23 +880,60 @@ function hasDownDep(row: PageState): boolean {
                         : runRow(row)
                   "
                 >
-                  {{
-                    row.status === 'running' ? t('pageMgr.actionStop') : t('pageMgr.actionStart')
-                  }}
+                  <el-icon>
+                    <VideoPause v-if="row.status === 'running'" />
+                    <VideoPlay v-else />
+                  </el-icon>
                 </el-button>
-                <el-button v-if="!row.external" size="small" text @click="openConfig(row)">
-                  {{ t('pageMgr.actionConfig') }}
+                <el-button
+                  v-if="!row.external"
+                  size="small"
+                  text
+                  :title="t('pageMgr.actionConfig')"
+                  @click="openConfig(row)"
+                >
+                  <el-icon><Setting /></el-icon>
                 </el-button>
-                <el-button size="small" text @click="openTerminal(row)">
-                  {{ t('pageMgr.actionTerminal') }}
+                <!-- C2: a hosted http page only; a CLI page owns a full-surface terminal and an
+                     external site has no page state to detach. -->
+                <el-button
+                  v-if="canPopout(row)"
+                  size="small"
+                  text
+                  :title="t('pageMgr.popoutTip')"
+                  @click="popoutRow(row)"
+                >
+                  <el-icon><CopyDocument /></el-icon>
                 </el-button>
-                <el-button size="small" text @click="showLogs(row)">{{
-                  t('pageMgr.actionLogs')
-                }}</el-button>
-                <span v-if="row.builtin" class="builtin-tag" :title="t('pageMgr.builtinTip')">{{
-                  t('pageMgr.builtin')
-                }}</span>
-                <el-button v-else size="small" text type="danger" @click="remove(row)">
+                <el-button
+                  size="small"
+                  text
+                  :title="t('pageMgr.actionTerminal')"
+                  @click="openTerminal(row)"
+                >
+                  <el-icon><Monitor /></el-icon>
+                </el-button>
+                <el-button
+                  size="small"
+                  text
+                  :title="t('pageMgr.actionLogs')"
+                  @click="showLogs(row)"
+                >
+                  <el-icon><Document /></el-icon>
+                </el-button>
+                <!-- Built-in pages can't be removed: keep the slot as a dimmed icon + tooltip so
+                     the row width matches the removable rows in either language. -->
+                <span v-if="row.builtin" class="builtin-tag" :title="t('pageMgr.builtinTip')">
+                  <el-icon><Delete /></el-icon>
+                </span>
+                <el-button
+                  v-else
+                  size="small"
+                  text
+                  type="danger"
+                  :title="t('common.delete')"
+                  @click="remove(row)"
+                >
                   <el-icon><Delete /></el-icon>
                 </el-button>
               </template>
@@ -700,6 +981,28 @@ function hasDownDep(row: PageState): boolean {
       append-to-body
     >
       <el-form label-position="top" @submit.prevent="saveConfig">
+        <!-- D1: manifest provenance + the non-fatal problems found while reading it. -->
+        <div v-if="configFor" class="cfg-meta">
+          <span v-if="configFor.version"
+            >{{ t('pageMgr.manifestVersion') }} {{ configFor.version }}</span
+          >
+          <span v-if="configFor.author"
+            >{{ t('pageMgr.manifestAuthor') }} {{ configFor.author }}</span
+          >
+          <span v-if="configFor.schemaVersion"
+            >{{ t('pageMgr.manifestSchema') }} {{ configFor.schemaVersion }}</span
+          >
+          <span v-if="configFor.permissions?.length"
+            >{{ t('pageMgr.manifestPerms') }} {{ configFor.permissions.join('、') }}</span
+          >
+        </div>
+        <el-collapse v-if="configFor?.manifestWarnings?.length" class="cfg-notes">
+          <el-collapse-item :title="t('pageMgr.manifestTitle')" name="manifest">
+            <ul class="notes-list">
+              <li v-for="w in configFor.manifestWarnings" :key="w">{{ w }}</li>
+            </ul>
+          </el-collapse-item>
+        </el-collapse>
         <el-form-item
           v-if="configFor && configFor.kind !== 'terminal'"
           :label="t('pageMgr.configPortLabel')"
@@ -708,12 +1011,22 @@ function hasDownDep(row: PageState): boolean {
             v-model="configDraft.port"
             :placeholder="t('pageMgr.configPortPlaceholder')"
             clearable
+            @blur="probePort"
           />
           <span v-if="configFor?.port" class="cfg-hint">
             {{ t('pageMgr.configDeclaredPort', { port: configFor.port }) }}
             <template v-if="configFor.containerPort && configFor.containerPort !== configFor.port">
               {{ t('pageMgr.configPortOverride', { port: configFor.containerPort }) }}</template
             >
+          </span>
+          <!-- B3: a live probe of the typed port. Occupied is reported, never auto-killed —
+               the destructive path stays on the failed-start row where the holder is named. -->
+          <span
+            v-if="portProbe"
+            class="cfg-hint"
+            :class="portProbe.free || portProbe.probeError ? 'ok-text' : 'err-text'"
+          >
+            {{ portProbeText }}
           </span>
         </el-form-item>
         <el-form-item :label="t('appmgr.autoStart')">
@@ -724,9 +1037,13 @@ function hasDownDep(row: PageState): boolean {
           <el-input
             v-model="configDraft.envs[v.key]"
             :placeholder="
-              v.defaultPath
-                ? t('pageMgr.configEnvPlaceholder', { path: v.defaultPath })
-                : t('pageMgr.configEnvInputPlaceholder')
+              v.type === 'text'
+                ? v.defaultValue
+                  ? t('pageMgr.envTextDefault', { v: v.defaultValue })
+                  : t('pageMgr.envTextPlaceholder')
+                : v.defaultPath
+                  ? t('pageMgr.configEnvPlaceholder', { path: v.defaultPath })
+                  : t('pageMgr.configEnvInputPlaceholder')
             "
             clearable
           />
@@ -735,6 +1052,54 @@ function hasDownDep(row: PageState): boolean {
         <p v-if="configFor && !configEnvVars.length" class="cfg-hint">
           {{ t('pageMgr.configNoEnv') }}
         </p>
+
+        <!-- B2: arbitrary KEY=VALUE for this page, kept wholly separate from the declared dirs. -->
+        <CustomEnvEditor
+          v-if="configFor"
+          :key="configSeq"
+          ref="customEnvRef"
+          :page-id="configFor.id"
+        />
+
+        <!-- B1: the ring main keeps for this page, drawn as two honestly-scaled stacked charts. -->
+        <div v-if="trendSeries.length" class="trend">
+          <div class="trend-head">
+            <span>{{ t('pageMgr.trendTitle') }}</span>
+            <span class="cfg-hint">{{ t('pageMgr.trendTip', { n: trendMinutes }) }}</span>
+          </div>
+          <div v-for="s in trendSeries" :key="s.label" class="trend-chart">
+            <div class="tc-side">
+              <span>{{ s.peak }}{{ s.unit }}</span>
+              <span class="tc-name" :style="{ color: s.color }">{{ s.label }}</span>
+              <span>{{ s.now }}{{ s.unit }}</span>
+            </div>
+            <svg class="tc-svg" :viewBox="`0 0 ${TREND_W} ${TREND_H}`" preserveAspectRatio="none">
+              <line
+                :x1="0"
+                :y1="TREND_H / 2"
+                :x2="TREND_W"
+                :y2="TREND_H / 2"
+                stroke="var(--border)"
+                stroke-width="1"
+                vector-effect="non-scaling-stroke"
+                stroke-dasharray="3 4"
+              />
+              <polyline
+                :points="s.points"
+                fill="none"
+                :stroke="s.color"
+                stroke-width="1.5"
+                vector-effect="non-scaling-stroke"
+              />
+            </svg>
+          </div>
+          <div class="tc-time">
+            <span>{{ trendRange.from }}</span>
+            <span>{{ DISPLAY_TIME_ZONE_LABEL }}</span>
+            <span>{{ trendRange.to }}</span>
+          </div>
+        </div>
+        <p v-else-if="configFor" class="cfg-hint">{{ t('pageMgr.trendEmpty') }}</p>
       </el-form>
       <template #footer>
         <el-button @click="configVisible = false">{{ t('pageMgr.configCancel') }}</el-button>
@@ -747,13 +1112,15 @@ function hasDownDep(row: PageState): boolean {
 </template>
 
 <style scoped>
+/* Built-in page's disabled delete glyph: a span, not an el-button, so match the sibling
+   icon buttons' height + middle alignment to keep the action row on one line. */
 .builtin-tag {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  vertical-align: middle;
   color: var(--text-dim);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 1px 8px;
+  cursor: not-allowed;
   margin-left: 6px;
 }
 .hint {
@@ -896,9 +1263,32 @@ function hasDownDep(row: PageState): boolean {
   border-radius: 5px;
   font-size: 11.5px;
 }
-/* Five text buttons exceed 300px at wide fonts — keep them on one line. */
+/* Icon-only action column: the glyphs sit on one line and keep a tight, even rhythm.
+   The 6 buttons overflow the cell without an explicit clip, which el-table otherwise
+   renders as a trailing "…" — so free the cell from ellipsis handling here. */
 .installed :deep(.col-actions .cell) {
   white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+/* Trim icon-only buttons so all six fit without the ellipsis trigger. */
+.installed :deep(.col-actions .el-button.is-text) {
+  padding: 4px;
+}
+/* The 启动中 status glyph reads as in-progress only if it turns (standalone el-icon has no
+   built-in animation, unlike el-button's loading slot). */
+.is-spin {
+  animation: status-spin 1s linear infinite;
+}
+/* Bare traffic-light glyph in the status column: sized up so the color reads at a glance. */
+.status-icon {
+  font-size: 18px;
+  vertical-align: middle;
+}
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .installed :deep(.el-table .el-button.is-text + .el-button.is-text) {
   margin-left: 2px;
@@ -930,6 +1320,111 @@ function hasDownDep(row: PageState): boolean {
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;
+}
+
+/* ---- D1 icon in the row name ---- */
+.cell-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+/* ---- B1 inline sparkline in the resource badge ---- */
+.metric-badge .mb-item {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.mb-spark {
+  width: 34px;
+  height: 11px;
+  opacity: 0.85;
+}
+
+/* ---- config dialog: manifest meta, custom vars, trend ----
+   Plain class selectors only — the dialog teleports to <body>, so nothing may depend on an
+   ancestor inside this component. */
+.ok-text {
+  color: var(--ok);
+  font-size: 12px;
+}
+.cfg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.cfg-notes {
+  margin-bottom: 10px;
+  border-top: none;
+}
+.notes-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--warn);
+}
+/* The custom-var table styles itself (CustomEnvEditor's own scope). */
+.trend {
+  margin-top: 10px;
+}
+.trend .trend-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.trend .trend-head .cfg-hint {
+  margin-top: 0;
+}
+.trend-chart {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.tc-side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  width: 74px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.tc-side span:first-child {
+  text-align: right;
+}
+.tc-side span:last-child {
+  text-align: right;
+  font-weight: 600;
+  color: var(--text);
+}
+.tc-name {
+  text-align: center;
+  font-weight: 600;
+}
+.tc-svg {
+  flex: 1;
+  height: 76px;
+  min-width: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.trend .tc-time {
+  display: flex;
+  justify-content: space-between;
+  padding-left: 82px;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 </style>
 

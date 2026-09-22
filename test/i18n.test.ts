@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { dictionaries, m, registerLocaleSource } from '../src/main/i18n'
+import { dictionaries, invalidateLocaleCache, m, registerLocaleSource } from '../src/main/shell/i18n'
 
 const SRC = resolve(__dirname, '..', 'src')
 
@@ -28,6 +28,9 @@ describe('main-process i18n', () => {
   it('interpolates {params}', () => {
     expect(m('tray.stop', { name: 'dsh-web' })).toBe('停止 dsh-web')
     lang = 'en'
+    // The locale is memoized for every hot caller; a language flip reaches it through
+    // invalidateLocaleCache (the settings write path does the same), so a test has to as well.
+    invalidateLocaleCache()
     expect(m('tray.stop', { name: 'dsh-web' })).toBe('Stop dsh-web')
   })
 

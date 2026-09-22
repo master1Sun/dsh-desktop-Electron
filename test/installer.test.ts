@@ -37,7 +37,7 @@ vi.mock('electron-store', () => {
   }
 })
 
-import { installFromLocalDir, removePage } from '../src/main/installer'
+import { installFromLocalDir, removePage } from '../src/main/runtime/installer'
 import type { InstallProgress } from '../src/shared/types'
 
 describe('installFromLocalDir container.json seeding', () => {

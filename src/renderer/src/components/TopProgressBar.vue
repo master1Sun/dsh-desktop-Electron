@@ -93,8 +93,9 @@ const singlePercent = computed(() => single.value?.percent ?? null)
   position: relative;
   /* Docked inline on the draggable menu row: keep it clickable and the hover dropdown openable. */
   -webkit-app-region: no-drag;
-  /* Width-capped to roughly a quarter of the top bar so it stays a compact strip. */
-  width: clamp(150px, 25%, 320px);
+  /* Width-capped to well under a fifth of the top bar: a compact strip, not a second toolbar.
+     The live message is the first thing to give way (it ellipses), and the row's title carries it. */
+  width: clamp(120px, 15%, 200px);
   flex: none;
   font-size: 12px;
   color: var(--text-dim);
@@ -126,7 +127,7 @@ const singlePercent = computed(() => single.value?.percent ?? null)
 
 .tb-bar {
   flex: 1;
-  min-width: 56px;
+  min-width: 44px;
 }
 
 .tb-pct {

@@ -7,6 +7,7 @@ import WindowControls from './WindowControls.vue'
 import TopProgressBar from './TopProgressBar.vue'
 import { appPanelKey, parseAppPanel, type ExternalSite } from '../../../shared/types'
 import type { PageState } from '../stores/pages'
+import { useDualStore } from '../stores/dual'
 import { t } from '../i18n'
 
 export type PanelKind =
@@ -50,13 +51,12 @@ const emit = defineEmits<{
   'select-page': [id: string]
   'start-page': [id: string]
   'open-terminal': [id: string]
+  'popout-page': [id: string]
   'preview-site': [id: string]
   reload: []
   'go-back': []
   'go-forward': []
   detach: []
-  inspect: []
-  'open-logs': []
   'restart-terminal': []
   'restart-app': []
 }>()
@@ -69,6 +69,10 @@ const themeLabel = computed(
       dark: t('settings.themeDark')
     })[props.themeMode]
 )
+
+/** 双屏模式 controls live on this menu row; the panes they drive live in HomeView, so both
+    read/write the shared dual store rather than prop-drilling through App. */
+const dualStore = useDualStore()
 
 /**
  * MenuBar owns the group triggers, their dropdown lists, and the centered floating
@@ -152,13 +156,6 @@ const groups = computed<MenuGroup[]>(() => {
           title: t('menu.helpAboutUpdates'),
           panel: 'help' as const,
           count: props.outdatedCount ? String(props.outdatedCount) : undefined
-        },
-        { id: 'logs', title: t('menu.openLogsDir'), run: () => emit('open-logs') },
-        {
-          id: 'inspect',
-          title: t('menu.debugDevtools'),
-          disabled: !props.canOperate,
-          run: () => emit('inspect')
         },
         {
           id: 'restart-app',
@@ -345,6 +342,7 @@ onBeforeUnmount(() => {
       @select-page="(id) => emit('select-page', id)"
       @start-page="(id) => emit('start-page', id)"
       @open-terminal="(id) => emit('open-terminal', id)"
+      @popout-page="(id) => emit('popout-page', id)"
     />
 
     <nav class="groups">
@@ -415,6 +413,191 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <!-- 双屏模式 controls: docked on the menu row, just left of the window chrome, so they
+         never overlay the guest content. -->
+    <div class="dual-actions">
+      <button
+        class="dual-btn"
+        type="button"
+        :class="{ 'is-active': dualStore.on }"
+        :title="dualStore.on ? t('dual.exit') : t('dual.enter')"
+        :aria-label="dualStore.on ? t('dual.exit') : t('dual.enter')"
+        @click="dualStore.toggle()"
+      >
+        <!-- off: split-pane frame (enter 双屏) -->
+        <svg v-if="!dualStore.on" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+          <rect
+            x="2"
+            y="3"
+            width="12"
+            height="10"
+            rx="1.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+          />
+          <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+        </svg>
+        <!-- on: exit / logout (arrow leaving a panel) -->
+        <svg v-else width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M9 2.5 H3.5 A1 1 0 0 0 2.5 3.5 V12.5 A1 1 0 0 0 3.5 13.5 H9"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M11.5 8 H6 M9.5 5.5 L12 8 L9.5 10.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+      <template v-if="dualStore.on">
+        <button
+          v-if="dualStore.collapsed === 'none'"
+          class="dual-btn"
+          type="button"
+          :title="t('dual.hideMain')"
+          :aria-label="t('dual.hideMain')"
+          @click="dualStore.collapse('main')"
+        >
+          <!-- collapse main (left pane folds left) -->
+          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+            <rect
+              x="2"
+              y="3"
+              width="12"
+              height="10"
+              rx="1.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+            />
+            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+            <path
+              d="M6 6 L4 8 L6 10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button
+          v-else-if="dualStore.collapsed === 'main'"
+          class="dual-btn"
+          type="button"
+          :title="t('dual.restoreMain')"
+          :aria-label="t('dual.restoreMain')"
+          @click="dualStore.collapse('main')"
+        >
+          <!-- restore main (left pane unfolds right) -->
+          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+            <rect
+              x="2"
+              y="3"
+              width="12"
+              height="10"
+              rx="1.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+            />
+            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+            <path
+              d="M4 6 L6 8 L4 10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button
+          v-if="dualStore.collapsed === 'none'"
+          class="dual-btn"
+          type="button"
+          :title="t('dual.hideSecondary')"
+          :aria-label="t('dual.hideSecondary')"
+          @click="dualStore.collapse('secondary')"
+        >
+          <!-- collapse secondary (right pane folds right) -->
+          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+            <rect
+              x="2"
+              y="3"
+              width="12"
+              height="10"
+              rx="1.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+            />
+            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+            <path
+              d="M10 6 L12 8 L10 10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button
+          v-else-if="dualStore.collapsed === 'secondary'"
+          class="dual-btn"
+          type="button"
+          :title="t('dual.restoreSecondary')"
+          :aria-label="t('dual.restoreSecondary')"
+          @click="dualStore.collapse('secondary')"
+        >
+          <!-- restore secondary (right pane unfolds left) -->
+          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+            <rect
+              x="2"
+              y="3"
+              width="12"
+              height="10"
+              rx="1.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+            />
+            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+            <path
+              d="M12 6 L10 8 L12 10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <el-select
+          v-if="dualStore.showSecondary"
+          v-model="dualStore.secId"
+          size="small"
+          filterable
+          :reserve-keyword="false"
+          class="dual-picker"
+          popper-class="dual-picker-popper"
+          :placeholder="t('dual.pickPage')"
+        >
+          <el-option v-for="c in dualStore.secOptions" :key="c.id" :label="c.label" :value="c.id" />
+        </el-select>
+      </template>
+    </div>
+
     <WindowControls
       :is-dark="props.isDark"
       :theme-label="themeLabel"
@@ -482,6 +665,7 @@ onBeforeUnmount(() => {
 }
 
 .menubar button,
+.menubar .dual-actions,
 .menubar .dropdown,
 .menubar .panel-anchor {
   -webkit-app-region: no-drag;
@@ -616,6 +800,48 @@ onBeforeUnmount(() => {
   color: var(--text-dim);
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.dual-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+  flex: none;
+}
+
+.dual-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  font-size: 12px;
+  color: var(--text);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dual-btn:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dual-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.dual-picker {
+  /* Narrow on purpose: it sits in the busy top strip, and the full page name is in the
+     dropdown list / tooltip rather than the closed control. */
+  width: 116px;
 }
 
 .dropdown {
@@ -764,5 +990,16 @@ onBeforeUnmount(() => {
 .panel-body {
   overflow-y: auto;
   padding: 10px 12px 12px;
+}
+</style>
+
+<!--
+  The dual picker's trigger is intentionally narrow (it shares the busy top strip), but its
+  option list still has to be readable. Element Plus teleports the popper to <body>, so a
+  scoped rule can't reach it — this global rule targets only the class we hand it above.
+-->
+<style>
+.dual-picker-popper.el-popper {
+  min-width: 240px;
 }
 </style>

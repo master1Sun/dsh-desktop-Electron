@@ -1,6 +1,6 @@
 import { reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ExternalSite, Locale } from '../../../shared/types'
+import type { ExternalSite, Locale, DshReleaseChannel, ContainerReleaseChannel } from '../../../shared/types'
 import { t } from '../i18n'
 
 export interface DefaultView {
@@ -55,6 +55,16 @@ export interface Settings {
   trayPageEntries?: 'all' | 'running' | 'off'
   /** #26: 允许点亮托盘角标的级别 */
   trayBadge?: 'all' | 'alert' | 'off'
+  /** 页面自定义环境变量：pageId -> KEY -> value（与目录型 pageEnvs 互不影响） */
+  pageCustomEnvs?: Record<string, Record<string, string>>
+  /** DSH CLI 安装/检测使用的 dist-tag；缺省 = alpha */
+  dshChannel?: DshReleaseChannel
+  /** 容器自身 OTA 跟随的发布分支；缺省 = stable */
+  containerChannel?: ContainerReleaseChannel
+  /** 内存持续超限的页面处置：仅提示 / 自动重启 */
+  memLimitAction?: 'notify' | 'restart'
+  /** 自定义快捷键：action id -> accelerator；缺省的 action 用内置默认值 */
+  keybindings?: Record<string, string>
 }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {

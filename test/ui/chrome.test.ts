@@ -193,14 +193,15 @@ describe('shell chrome theme + layout', () => {
     await new Promise((r) => setTimeout(r, 60))
     expect(document.querySelector('.panel-card')).not.toBeNull()
     expect(document.querySelector('.installed')).not.toBeNull()
-    const cfgBtn = [...document.querySelectorAll('.installed .el-button')].find((b) =>
-      b.textContent?.includes('配置')
-    )
+    // Row actions are glyphs only — the label lives in the tooltip, so English can't overflow the
+    // fixed-width action column. Locate the entry point by that tooltip instead of by text.
+    const cfgBtn = document.querySelector('.installed .el-button[title="配置"]')
     expect(cfgBtn).not.toBeNull()
     await click(cfgBtn ?? null)
     await new Promise((r) => setTimeout(r, 80))
     const dlgs = [...document.querySelectorAll('.el-dialog')]
     const dlg = dlgs.find((d) => d.textContent?.includes('· 配置'))
+    expect(dlg).not.toBeNull()
     expect(dlg?.textContent).toContain('DSH (web) · 配置')
     // dynamic: the container.json-declared env var renders its own input
     expect(dlg?.textContent).toContain('DSH Home')
@@ -351,9 +352,9 @@ describe('shell chrome theme + layout', () => {
     )
     await click(helpTrigger ?? null)
     const helpRows = [...document.querySelectorAll('.drop-list .drop-item')]
-    // DevTools and 打开日志目录 both live under 帮助 now.
-    expect(helpRows.some((b) => b.textContent?.includes('DevTools'))).toBe(true)
-    expect(helpRows.some((b) => b.textContent?.includes('打开日志目录'))).toBe(true)
+    // 打开日志目录 / 调试 DevTools moved out of the menu — only the palette still offers them.
+    expect(helpRows.some((b) => b.textContent?.includes('DevTools'))).toBe(false)
+    expect(helpRows.some((b) => b.textContent?.includes('打开日志目录'))).toBe(false)
     const aboutRow = helpRows.find((b) => b.textContent?.includes('关于与更新'))
     expect(aboutRow).not.toBeNull()
     await click(aboutRow ?? null)

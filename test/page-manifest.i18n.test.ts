@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { registerLocaleSource, resolveText } from '../src/main/i18n'
+import { invalidateLocaleCache, registerLocaleSource, resolveText } from '../src/main/shell/i18n'
 import type { LocalizableText } from '../src/shared/types'
 
 /**
@@ -13,6 +13,16 @@ import type { LocalizableText } from '../src/shared/types'
  */
 
 let lang: 'zh' | 'en' = 'zh'
+
+/**
+ * The only way to change the active language here. `currentLocale()` memoizes, because every
+ * hot path reads it; a real settings write drops that cache through `notifyLocaleChanged()`, so
+ * a test flipping the injected source has to do the same or it keeps reading the old language.
+ */
+function setLang(l: 'zh' | 'en'): void {
+  lang = l
+  invalidateLocaleCache()
+}
 
 beforeEach(() => {
   lang = 'zh'
@@ -48,28 +58,28 @@ function textFields(manifest: RawManifest): Array<[string, unknown]> {
 describe('resolveText', () => {
   it('leaves a plain string alone in either language', () => {
     for (const l of ['zh', 'en'] as const) {
-      lang = l
+      setLang(l)
       expect(resolveText('DSH (web)')).toBe('DSH (web)')
     }
   })
 
   it('picks the variant matching the active language', () => {
     const value: LocalizableText = { zh: '配置目录', en: 'config directory' }
-    lang = 'zh'
+    setLang('zh')
     expect(resolveText(value)).toBe('配置目录')
-    lang = 'en'
+    setLang('en')
     expect(resolveText(value)).toBe('config directory')
   })
 
   it('falls back to the other variant instead of going blank', () => {
-    lang = 'en'
+    setLang('en')
     expect(resolveText({ zh: '仅中文' })).toBe('仅中文')
-    lang = 'zh'
+    setLang('zh')
     expect(resolveText({ en: 'English only' })).toBe('English only')
   })
 
   it('treats a missing or blank value as unset', () => {
-    lang = 'en'
+    setLang('en')
     expect(resolveText({ zh: '有中文', en: '' })).toBe('有中文')
     expect(resolveText('', 'fallback')).toBe('fallback')
     expect(resolveText(undefined, 'fallback')).toBe('fallback')
@@ -86,7 +96,7 @@ describe('shipped page manifests', () => {
       const fields = textFields(readManifest(id))
       expect(fields.length).toBeGreaterThan(0)
       for (const l of ['zh', 'en'] as const) {
-        lang = l
+        setLang(l)
         for (const [path, value] of fields) {
           expect(resolveText(value as LocalizableText | undefined), `${path} [${l}]`).toBeTruthy()
         }
@@ -96,7 +106,7 @@ describe('shipped page manifests', () => {
     it(`pages/${id}/container.json is really translated`, () => {
       const fields = textFields(readManifest(id))
       const read = (l: 'zh' | 'en'): string[] => {
-        lang = l
+        setLang(l)
         return fields.map(([, value]) => resolveText(value as LocalizableText | undefined))
       }
       // Not just structural: at least one field has to differ, or the file only *looks* localized.
@@ -107,10 +117,10 @@ describe('shipped page manifests', () => {
   it('resolves to different text per language', () => {
     const manifest = readManifest('openclaw')
     const label = manifest.envVars?.[0]?.label as LocalizableText | undefined
-    lang = 'zh'
+    setLang('zh')
     expect(resolveText(manifest.name as LocalizableText | undefined)).toBe('OpenClaw Gateway')
     expect(resolveText(label)).toBe('OPENCLAW 配置目录')
-    lang = 'en'
+    setLang('en')
     expect(resolveText(label)).toBe('OPENCLAW config dir')
   })
 })

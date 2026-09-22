@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { QuestionFilled, Download, Connection, Document } from '@element-plus/icons-vue'
+import { QuestionFilled, Download, Connection, Document, Tickets } from '@element-plus/icons-vue'
 import PageManager from './PageManager.vue'
 import DshManager from './DshManager.vue'
 import OpenclawManager from './OpenclawManager.vue'
@@ -12,9 +12,13 @@ import LogViewer from './LogViewer.vue'
 import { usePagesStore } from '../stores/pages'
 import { useUpdatesStore } from '../stores/updates'
 import { useTasksStore } from '../stores/tasks'
+import { useSettingsStore } from '../stores/settings'
 import type {
   BuiltinKind,
+  ContainerEvent,
+  EventLevel,
   IpcResult,
+  ListEventsArgs,
   NodeVersionInfo,
   UpdateCheckResult,
   UpdateProgress,
@@ -24,7 +28,7 @@ import type {
   SystemInfo,
   NetworkStats
 } from '@shared/types'
-import { parseAppPanel } from '@shared/types'
+import { DISPLAY_TIME_ZONE, DISPLAY_TIME_ZONE_LABEL, parseAppPanel } from '@shared/types'
 import { t } from '../i18n'
 
 const props = defineProps<{
@@ -33,6 +37,11 @@ const props = defineProps<{
   runtime: { version: string | null; ok: boolean; path: string; override?: boolean }
   runningCount: number
   totalCount: number
+  /**
+   * Vertical tab to open inside the help / settings panel. Lets a command-palette entry land on
+   *「事件动态」directly; only ever applied when it changes, so the user can still click around.
+   */
+  initialTab?: string
 }>()
 
 const emit = defineEmits<{
@@ -48,6 +57,7 @@ const emit = defineEmits<{
 const updates = useUpdatesStore()
 const pagesStore = usePagesStore()
 const tasks = useTasksStore()
+const settingsStore = useSettingsStore()
 
 /* Built-in agent runtimes (DSH 本体 / OpenClaw) surface as reprovision rows. When one is
    *missing* the row reads "检测失败 / 未检测到已安装版本"; here we turn it into an install
@@ -64,6 +74,33 @@ async function installBuiltinRow(row: UpdateCheckResult): Promise<void> {
   const kind = builtinKind(row)
   if (!kind) return
   const out = await tasks.installBuiltin(kind)
+  if (out) emit('check-updates')
+}
+
+/* B3 runtime rollback entry point: an upgrade that turns out worse can be re-provisioned at an
+   exact version (`npm install -g <pkg>@<version>`) — the only way back once the channel moved on. */
+async function provisionPinned(row: UpdateCheckResult): Promise<void> {
+  const kind = builtinKind(row)
+  if (!kind) return
+  let version = ''
+  try {
+    const res = await ElMessageBox.prompt(
+      t('panel.versionPrompt', { name: row.name }),
+      t('panel.versionBtn'),
+      {
+        confirmButtonText: t('common.ok'),
+        cancelButtonText: t('common.cancel'),
+        inputPlaceholder: t('panel.versionPlaceholder'),
+        inputValidator: (v: string) =>
+          !v.trim() || /^[\w.+-]+$/.test(v.trim()) || t('panel.versionPlaceholder')
+      }
+    )
+    version = String(res.value || '').trim()
+  } catch {
+    return // dismissed
+  }
+  const out = await tasks.installBuiltin(kind, version || undefined)
+  if (out && !version) ElMessage.info(t('panel.versionLatest'))
   if (out) emit('check-updates')
 }
 
@@ -149,6 +186,9 @@ async function resetBuiltinRow(row: UpdateCheckResult): Promise<void> {
    in a userData override, so running pages keep the old exe until they restart. */
 const nodeVersions = ref<NodeVersionInfo[]>([])
 const nodeSel = ref('')
+/** Reveal releases outside the hosted runtimes' engines range (tagged `usable:false`), so a
+    user can deliberately install an off-support Node; off by default to keep the common path safe. */
+const showIncompatible = ref(false)
 /** Distinct from `!nodeVersions.length`: the select's spinner + an explicit error caption,
     so a failed/empty fetch never masquerades as an endless loading state. */
 const nodeLoading = ref(false)
@@ -160,7 +200,9 @@ async function loadNodeVersions(): Promise<void> {
   nodeError.value = ''
   try {
     // Optional-call: older test mocks / non-Windows builds may not expose this at all.
-    const res = (await window.container.nodeListVersions?.()) as IpcResult | null
+    const res = (await window.container.nodeListVersions?.(
+      showIncompatible.value
+    )) as IpcResult | null
     if (res?.ok) {
       nodeVersions.value = (res.data as NodeVersionInfo[]) || []
       if (!nodeVersions.value.length) nodeError.value = t('panel.nodeVerEmpty')
@@ -176,11 +218,37 @@ async function loadNodeVersions(): Promise<void> {
   }
 }
 
-const nodeVersionLabel = (v: NodeVersionInfo): string =>
-  v.lts ? `${v.version} · LTS ${typeof v.lts === 'string' ? v.lts : ''}`.trim() : v.version
+/** Refetch after flipping the incompatible toggle — the widened list comes from main. */
+function onToggleIncompatible(): void {
+  void loadNodeVersions()
+}
+
+const nodeVersionLabel = (v: NodeVersionInfo): string => {
+  const base = v.lts
+    ? `${v.version} · LTS ${typeof v.lts === 'string' ? v.lts : ''}`.trim()
+    : v.version
+  return v.usable === false ? `${base} · ${t('panel.nodeVerIncompatible')}` : base
+}
 
 async function doNodeUpdate(): Promise<void> {
   if (!nodeSel.value || updates.nodeBusy) return
+  const sel = nodeVersions.value.find((v) => v.version === nodeSel.value)
+  // An out-of-range version would break page spawns, so gate it behind an explicit warning.
+  if (sel?.usable === false) {
+    try {
+      await ElMessageBox.confirm(
+        t('panel.nodeIncompatibleConfirm', { v: nodeSel.value }),
+        t('panel.nodeIncompatibleTitle'),
+        {
+          type: 'warning',
+          confirmButtonText: t('panel.nodeUpdateBtn'),
+          cancelButtonText: t('common.cancel')
+        }
+      )
+    } catch {
+      return // user backed out
+    }
+  }
   try {
     await updates.updateNode(nodeSel.value)
     await pagesStore.refresh().catch(() => undefined)
@@ -200,8 +268,147 @@ async function doNodeRestore(): Promise<void> {
   }
 }
 
-/** 帮助面板的竖排分类 tab：关于 / 更新 / 诊断 / 日志（与 SettingsPanel 同构）。 */
-const helpTab = ref('about')
+/** 帮助面板的竖排分类 tab：关于 / 更新 / 诊断 / 日志 / 事件（与 SettingsPanel 同构）。 */
+const helpTab = ref(props.initialTab || 'about')
+
+// A deep link arriving while the panel is already mounted must still move the rail — but only on
+// an actual change, otherwise it would yank the user back every time the parent re-renders.
+watch(
+  () => props.initialTab,
+  (tab) => {
+    if (tab) helpTab.value = tab
+  }
+)
+
+/* ---- A1 activity timeline (帮助 → 事件动态) ----
+   Cold read through IPC on demand + one live subscription while the tab is showing (the same
+   lifecycle the network poll uses, so a closed panel never holds work). `events.jsonl` is the
+   history; the subscription is what makes a crash appear the second it happens. */
+const events = ref<ContainerEvent[]>([])
+const eventFilters = reactive<{ level: '' | EventLevel; pageId: string }>({
+  level: '',
+  pageId: ''
+})
+const EVENTS_LIMIT = 300
+/** Sentinel for "events not tied to a page" (container boot, OTA, downloads). */
+const EVENT_PAGE_OTHER = '__other__'
+const eventsLoading = ref(false)
+let offEventStream: (() => void) | undefined
+
+async function loadEvents(): Promise<void> {
+  eventsLoading.value = true
+  try {
+    const args: ListEventsArgs = { limit: EVENTS_LIMIT }
+    if (eventFilters.level) args.level = eventFilters.level
+    const res = await window.container.listEvents?.(args)
+    events.value = res?.ok ? (res.data as ContainerEvent[]) || [] : []
+  } catch {
+    /* keep whatever is already on screen */
+  } finally {
+    eventsLoading.value = false
+  }
+}
+
+/** The page filter is applied locally: the sentinel has no server-side spelling. */
+const shownEvents = computed(() => {
+  const id = eventFilters.pageId
+  if (!id) return events.value
+  if (id === EVENT_PAGE_OTHER) return events.value.filter((e) => !e.pageId)
+  return events.value.filter((e) => e.pageId === id)
+})
+
+const eventPageOptions = computed(() => {
+  const ids = new Set(events.value.map((e) => e.pageId).filter(Boolean) as string[])
+  return [...ids]
+    .sort()
+    .map((id) => ({ id, name: pagesStore.pages.find((p) => p.id === id)?.name || id }))
+})
+
+function startEventStream(): void {
+  stopEventStream()
+  void loadEvents()
+  offEventStream = window.container.onEvent?.((ev) => {
+    // Newest-first, matching listEvents; drop the tail so the list stays bounded.
+    events.value = [ev, ...events.value].slice(0, EVENTS_LIMIT)
+  })
+}
+function stopEventStream(): void {
+  offEventStream?.()
+  offEventStream = undefined
+}
+watch(
+  () => [props.panel, helpTab.value] as const,
+  ([panel, tab]) => {
+    if (panel === 'help' && tab === 'events') startEventStream()
+    else stopEventStream()
+  }
+)
+onBeforeUnmount(stopEventStream)
+
+/* Each event kind interpolates from `evt.<kind>`; an unknown kind (a newer container wrote it)
+   still reads as its raw id plus the technical detail rather than a bare key. */
+function eventText(ev: ContainerEvent): string {
+  const params: Record<string, string | number> = {}
+  for (const [k, v] of Object.entries(ev.meta || {})) params[k] = String(v)
+  const sentence = t(`evt.${ev.kind}`, params)
+  return sentence === `evt.${ev.kind}` ? ev.kind : sentence
+}
+
+function eventGroup(ev: ContainerEvent): string {
+  const prefix = ev.kind.split('.')[0]
+  const label = t(`evt.group.${prefix}`)
+  return label === `evt.group.${prefix}` ? t('evt.group.unknown') : label
+}
+
+/* Timeline rows carry the wall-clock in the same zone every log stamp uses, so a row can be
+   lined up against main.log by eye. */
+const eventTimeFmt = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: DISPLAY_TIME_ZONE,
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false
+})
+function eventTime(ev: ContainerEvent): string {
+  return `${eventTimeFmt.format(new Date(ev.ts))} ${DISPLAY_TIME_ZONE_LABEL}`
+}
+
+const logFocus = ref<string>()
+
+/** Mirror of the main-process page-log file naming (`logger.logPageLine`). */
+const pageLogKey = (id: string): string => `pages/${id.replace(/[^\w.-]/g, '_')}.log`
+
+/** Jump a timeline row to its log: the container-wide rows land on main.log. */
+async function jumpToLog(ev: ContainerEvent): Promise<void> {
+  const key = ev.pageId ? pageLogKey(ev.pageId) : 'main'
+  // Clear first so re-clicking the same page still re-reads (the prop did not "change").
+  logFocus.value = ''
+  helpTab.value = 'logs'
+  await nextTick()
+  logFocus.value = key
+}
+
+function openLogDir(): void {
+  void window.container.openLogsDir?.()
+}
+
+/* ---- A2 release channels ---- */
+// Container OTA is fixed to the stable `release` branch (no UI switch); only DSH is selectable.
+const dshChannel = computed(() => settingsStore.settings.dshChannel || 'alpha')
+
+async function setChannel(value: string): Promise<void> {
+  try {
+    await settingsStore.patch({ dshChannel: value as 'alpha' | 'latest' })
+    ElMessage.success(t('panel.channelSaved'))
+    // The channel switch changes what the next probe should fetch *and* what "up to date"
+    // means, so main re-surveys; force a check so the table reflects it at once.
+    emit('check-updates')
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
 
 onMounted(() => {
   if (props.panel !== 'help') return
@@ -422,8 +629,11 @@ onBeforeUnmount(stopNetPoll)
 
 /* ---- #15 config snapshot / migration package ----
    Export bundles the page manifest + each container.json + relevant settings into a zip;
-   import restores them onto a fresh machine. Both drive a native file dialog in main. */
-const snapshotBusy = ref<'export' | 'import' | null>(null)
+   import restores them onto a fresh machine. Both drive a native file dialog in main.
+   The busy mode is spelled "restore" instead of the import keyword: a quote right after that
+   word is what once made the bundler's CommonJS-shim splice land inside a string literal and
+   fail the main-process build (guarded by test/i18n.test.ts). */
+const snapshotBusy = ref<'export' | 'restore' | null>(null)
 async function doExportSnapshot(): Promise<void> {
   if (snapshotBusy.value) return
   snapshotBusy.value = 'export'
@@ -452,7 +662,7 @@ async function doImportSnapshot(): Promise<void> {
   } catch {
     return
   }
-  snapshotBusy.value = 'import'
+  snapshotBusy.value = 'restore'
   try {
     const res = (await window.container.importSnapshot?.()) as IpcResult | null
     if (res?.ok) {
@@ -525,6 +735,9 @@ async function doImportSnapshot(): Promise<void> {
               <el-select
                 v-model="nodeSel"
                 size="small"
+                filterable
+                default-first-option
+                :reserve-keyword="false"
                 :placeholder="t('panel.nodeVersionPick')"
                 :loading="nodeLoading"
                 :disabled="updates.nodeBusy"
@@ -551,11 +764,21 @@ async function doImportSnapshot(): Promise<void> {
                 v-if="props.runtime.override"
                 size="small"
                 text
+                :title="t('panel.nodeRestoreTip')"
                 :disabled="updates.nodeBusy"
                 @click="doNodeRestore"
               >
                 {{ t('panel.nodeRestoreBtn') }}
               </el-button>
+              <label class="node-incompat-toggle" :title="t('panel.nodeShowIncompatibleTip')">
+                <el-switch
+                  v-model="showIncompatible"
+                  size="small"
+                  :disabled="updates.nodeBusy"
+                  @change="onToggleIncompatible"
+                />
+                <span>{{ t('panel.nodeShowIncompatible') }}</span>
+              </label>
             </span>
           </div>
           <div v-if="nodeError" class="node-load-err">
@@ -677,6 +900,22 @@ async function doImportSnapshot(): Promise<void> {
               {{ t('panel.checkUpdates') }}
             </el-button>
           </div>
+          <!-- A2: only DSH exposes a channel switch; container OTA is locked to stable release. -->
+          <div class="channel-row">
+            <span class="channel-label">{{ t('panel.channelTitle') }}</span>
+            <label class="channel-pick">
+              {{ t('panel.channelDsh') }}
+              <el-select
+                size="small"
+                style="width: 140px"
+                :model-value="dshChannel"
+                @update:model-value="(v: string) => setChannel(v)"
+              >
+                <el-option value="alpha" :label="t('panel.channelAlpha')" />
+                <el-option value="latest" :label="t('panel.channelLatest')" />
+              </el-select>
+            </label>
+          </div>
           <el-table :data="updates.results" size="small" :empty-text="t('panel.updatesEmpty')">
             <el-table-column :label="t('panel.colName')" min-width="200">
               <template #default="{ row }">
@@ -722,7 +961,7 @@ async function doImportSnapshot(): Promise<void> {
                 <el-tag size="small" round :type="statusType(row)">{{ statusLabel(row) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column :label="t('panel.colAction')" width="90" align="right">
+            <el-table-column :label="t('panel.colAction')" width="130" align="right">
               <template #default="{ row }">
                 <el-button
                   v-if="row.pendingRestart"
@@ -779,6 +1018,17 @@ async function doImportSnapshot(): Promise<void> {
                 >
                   {{ t('panel.resetBtn') }}
                 </el-button>
+                <!-- B3: a built-in runtime can always be re-provisioned at an exact version. -->
+                <div v-if="builtinKind(row)" class="cell-sub">
+                  <el-button
+                    size="small"
+                    text
+                    :disabled="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
+                    @click="provisionPinned(row)"
+                  >
+                    {{ t('panel.versionBtn') }}
+                  </el-button>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -861,7 +1111,7 @@ async function doImportSnapshot(): Promise<void> {
               </el-button>
               <el-button
                 size="small"
-                :loading="snapshotBusy === 'import'"
+                :loading="snapshotBusy === 'restore'"
                 @click="doImportSnapshot"
               >
                 {{ t('panel.importSnapshotBtn') }}
@@ -913,7 +1163,71 @@ async function doImportSnapshot(): Promise<void> {
           <div class="head">
             <span>{{ t('panel.logViewerTitle') }}</span>
           </div>
-          <LogViewer />
+          <LogViewer :focus-key="logFocus" />
+        </el-tab-pane>
+
+        <!-- A1: the crash / lifecycle timeline. Rows deep-link into the log they describe. -->
+        <el-tab-pane name="events">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><Tickets /></el-icon>{{ t('panel.tabEvents') }}</span
+            >
+          </template>
+          <div class="head">
+            <span>{{ t('panel.tabEvents') }}</span>
+            <el-select
+              v-model="eventFilters.level"
+              size="small"
+              style="width: 110px"
+              @change="loadEvents"
+            >
+              <el-option value="" :label="t('panel.eventsLevelAll')" />
+              <el-option value="info" :label="t('panel.eventsLevelInfo')" />
+              <el-option value="warn" :label="t('panel.eventsLevelWarn')" />
+              <el-option value="error" :label="t('panel.eventsLevelError')" />
+            </el-select>
+            <el-select v-model="eventFilters.pageId" size="small" style="width: 150px">
+              <el-option value="" :label="t('panel.eventsPageAll')" />
+              <el-option :value="EVENT_PAGE_OTHER" :label="t('panel.eventsPageOther')" />
+              <el-option v-for="p in eventPageOptions" :key="p.id" :value="p.id" :label="p.name" />
+            </el-select>
+            <el-button size="small" :loading="eventsLoading" @click="loadEvents">
+              {{ t('panel.eventsReload') }}
+            </el-button>
+            <el-button size="small" @click="openLogDir">{{
+              t('panel.eventsOpenLogDir')
+            }}</el-button>
+            <span class="evt-count">{{ t('panel.eventsCount', { n: shownEvents.length }) }}</span>
+          </div>
+          <div class="cell-sub evt-tip">{{ t('panel.eventsTip') }}</div>
+          <div v-if="!shownEvents.length" class="evt-empty">{{ t('panel.eventsEmpty') }}</div>
+          <div v-else class="evt-list">
+            <div
+              v-for="(ev, i) in shownEvents"
+              :key="`${ev.ts}-${i}`"
+              class="evt-row"
+              :title="t('panel.eventsJumpLog')"
+              @click="jumpToLog(ev)"
+            >
+              <span class="evt-dot" :class="`lv-${ev.level}`" />
+              <span class="evt-time">{{ eventTime(ev) }}</span>
+              <el-tag
+                size="small"
+                effect="plain"
+                round
+                :title="t('panel.eventsRawKind', { kind: ev.kind })"
+              >
+                {{ eventGroup(ev) }}
+              </el-tag>
+              <span class="evt-text">
+                {{ eventText(ev) }}
+                <span v-if="ev.pageId" class="evt-page">{{
+                  pagesStore.pages.find((p) => p.id === ev.pageId)?.name || ev.pageId
+                }}</span>
+                <div v-if="ev.detail" class="evt-detail cell-sub">{{ ev.detail }}</div>
+              </span>
+            </div>
+          </div>
         </el-tab-pane>
       </el-tabs>
     </section>
@@ -1072,10 +1386,31 @@ async function doImportSnapshot(): Promise<void> {
 .kv .node-update-ctl {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   width: auto;
   margin-left: auto;
   color: inherit;
+}
+
+/* Wrapping moves whole controls to the next line — their captions must never break mid-word. */
+.node-update-ctl .el-button,
+.node-incompat-toggle {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* 「显示不兼容版本」switch sits after the action buttons, set off by a divider. */
+.node-incompat-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+  padding-left: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-left: 1px solid var(--border);
 }
 
 .node-prog {
@@ -1261,5 +1596,100 @@ async function doImportSnapshot(): Promise<void> {
 }
 .iface-mac {
   max-width: none;
+}
+
+/* ---- A2 release-channel row ---- */
+.channel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  font-size: 12.5px;
+}
+.channel-label {
+  font-weight: 550;
+}
+.channel-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+.channel-row > .cell-sub {
+  flex-basis: 100%;
+}
+
+/* ---- A1 activity timeline ---- */
+.evt-tip {
+  margin-bottom: 8px;
+}
+.evt-count {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.evt-empty {
+  padding: 18px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.evt-list {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.evt-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  cursor: pointer;
+}
+.evt-row:last-child {
+  border-bottom: none;
+}
+.evt-row:hover {
+  background: var(--surface);
+}
+.evt-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.evt-dot.lv-warn {
+  background: var(--warn);
+}
+.evt-dot.lv-error {
+  background: var(--err);
+}
+.evt-time {
+  flex: none;
+  min-width: 150px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.evt-text {
+  flex: 1;
+  min-width: 0;
+}
+.evt-page {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.evt-detail {
+  word-break: break-all;
 }
 </style>

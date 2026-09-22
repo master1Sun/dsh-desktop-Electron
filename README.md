@@ -56,6 +56,38 @@ DSH 插件市场是**渲染层内置静态页**（`src/renderer/src/views/Market
 - 安装方式：设置页「Pages 管理」→ git URL 克隆 / 本地目录复制。
 - **端口自定义**：导入表单可填端口（留空则沿用项目 `container.json` 声明值），已安装项目在列表点「改端口」随时调整（填 `0` 恢复项目声明值）。覆盖值存在容器设置 `pagePorts`（按 pageId 索引），**不改写项目自己的 `container.json`**，因此更新/重克隆项目不会丢配置；注入子进程的 `PORT` 与就绪探测都用覆盖后的端口，改动在下次启动生效。dsh / openclaw 项目同样适用。
 
+### 页面接入规范（container.json 全字段）
+
+机器可读版本见 [`pages/container.schema.json`](pages/container.schema.json)（JSON Schema draft-07，供编辑器做字段联想与校验）；下面是同一份契约的人类说明。在项目里加一行 `"$schema": "../../container.schema.json"` 就能开启联想，容器读清单时会忽略这个字段。**所有字段都可省略**，缺失时容器按默认值推断。未知字段或类型不符**不会**让页面启动失败：`readPageMeta()` 只把它们记成警告，展示在该页「配置」对话框顶部的「manifest 提示」折叠区，并往「事件动态」写一条 `manifest.invalid`（同一组警告只记一次，修好后不再新增）。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `schemaVersion` | number | 清单针对的 schema 版本；仅记录与展示，不做强制。 |
+| `name` / `description` | string 或 `{zh,en}` | 菜单与列表里的标题/说明；`name` 缺省用目录名。 |
+| `author` / `version` | string | 作者与页面自身版本，展示在「配置」对话框；与更新检测读到的 npm/git 版本无关。 |
+| `icon` | string | `data:` URL，或**相对页面目录**的图片路径（png/jpg/jpeg/svg/webp/ico）。超 64KB、含 `..`、绝对路径或文件缺失都会被忽略并记警告，界面回退到首字母图标。 |
+| `kind` | `page` / `dsh` / `openclaw` / `terminal` | 运行方式，默认 `page`。 |
+| `port` / `startCommand` | number / string | 服务端口与启动命令；命令缺省时按 `server.js` → `index.js` → `npm run start` 推断。 |
+| `external` / `externalUrl` | boolean / string | 外链页：不拉进程、不等端口，直接内嵌该地址。 |
+| `healthUrl` | string | 假死探测：完整 URL，或以 `{port}` 占位、按本页端口拼接的路径；连续失败会把进程判定为 hung 并重启一次。外链页忽略。 |
+| `manageAsApp` | boolean | 额外出现在顶栏「应用」菜单并用通用管理面板；dsh / openclaw 默认就是 true。 |
+| `dependsOn` | string[] | 需要先运行的 page id，「启动依赖页」按序拉起；自引用会被丢弃。 |
+| `dsh` / `openclaw` | object | 对应 kind 的专属配置（`profile`、`port`）。 |
+| `permissions` | string[] | 能力声明（`notify` / `downloads` / `externalShell`）：当前**仅记录与展示**，不做拦截；未知值会告警。 |
+| `envVars` | object[] | 见下。 |
+
+`envVars[]` 每一项：
+
+- `key`：注入该页子进程的环境变量名。只有声明了它的页面会收到，A 页的 `CODEX_HOME` 不会漏进 B 页。
+- `label` / `description`：设置面板里的标题与提示，同样支持双语。
+- `type`：`dir`（默认，即历史行为）→ 目录选择器，值会在启动前按需创建；`text` → 自由文本（feature flag、API base 之类），**不做任何展开**。
+- `defaultPath`：`dir` 型在用户留空时的默认目录，支持 `~` 与 `{envRoot}`。
+- `legacyPath`：CLI 在容器之外的旧目录（如 `~/.codex`）；它存在时优先于 `defaultPath`，避免把已登录/已有会话的目录悄悄换掉。
+- `defaultValue`：`text` 型的字面默认值（只在 `type: "text"` 时生效）。整条链都为空则该变量**不注入**。
+- 纯 `page` 且未声明 `APP_DIR` 时，容器自动补一个指向安装目录的 `APP_DIR`，不写清单也能在设置里改路径。
+
+**用户侧自由变量**：某页「配置」对话框与应用面板里的「自定义变量」写进容器设置 `pageCustomEnvs[pageId]`，spawn 时在清单声明之后**最后合并**，所以会盖过同名声明项。主进程只接受 `[A-Za-z_][A-Za-z0-9_]*` 形式的名字并丢弃容器自用的保留名（`PATH`、`NODE_OPTIONS`、`npm_config_registry` 等），界面另外禁止 `__` 前缀；值为空的行等于删除该变量。两类变量都要重启该页才生效。
+
 ## DSH 插件管理
 
 容器随包安装了 `@deepseek-ai/dsh`（DeepSeek Harness CLI），设置页「DSH 插件管理」卡片直接驱动它的 `dsh plugin` 子命令：

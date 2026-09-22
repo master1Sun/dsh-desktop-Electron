@@ -2,7 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MenuBar, { type PanelKind } from './components/MenuBar.vue'
-import { appPanelKey, GLASS_BLUR_MAX_PX } from '@shared/types'
+import {
+  appPanelKey,
+  DEFAULT_KEYBINDINGS,
+  GLASS_BLUR_MAX_PX,
+  KEYBINDING_ACTIONS,
+  type KeybindingAction
+} from '@shared/types'
+import { formatAccelerator, matchesAccelerator } from '@shared/accel'
 import MenuPanelContent from './components/MenuPanelContent.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import TerminalDrawer from './components/TerminalDrawer.vue'
@@ -11,11 +18,13 @@ import SetupGate from './components/SetupGate.vue'
 import HomeView from './views/HomeView.vue'
 import { usePagesStore, type PageState } from './stores/pages'
 import { useSettingsStore, applyReduceMotion } from './stores/settings'
+import { useDualStore } from './stores/dual'
 import { useTerminalStore } from './stores/terminal'
 import { useUpdatesStore } from './stores/updates'
 import { useRuntimesStore } from './stores/runtimes'
 import { ElConfigProvider } from 'element-plus'
 import { locale as i18nLocale, t, epLocale } from './i18n'
+import { askAiWith, registerAskAiJump, unregisterAskAiJump } from './askAi'
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
@@ -23,9 +32,49 @@ const store = useTerminalStore()
 const hasBridge = typeof window !== 'undefined' && !!window.container
 const updatesStore = useUpdatesStore()
 const runtimes = useRuntimesStore()
+const dualStore = useDualStore()
 
 /** Panels float over the workbench instead of replacing it, so an embedded page never unmounts. */
 const activePanel = ref<string | null>(null)
+
+/**
+ * Vertical tab a panel should open on, set by a palette command (「查看事件动态」→ help/events).
+ * Cleared whenever the panel closes so the next ordinary menu click lands on its default tab.
+ */
+const panelTab = ref<string | null>(null)
+watch(activePanel, (panel) => {
+  if (panel !== 'help') panelTab.value = null
+})
+
+/* ---- C2: detached page window ----
+   The main process opens `?popout=<pageId>` in its own BrowserWindow; this renderer instance then
+   paints only a 28px caption bar over the page, with no menu / workbench / drawer. It shares the
+   default session, so a page the user already signed into in the main window is signed in here. */
+const popoutPageId = (() => {
+  try {
+    return new URLSearchParams(window.location.search).get('popout') || ''
+  } catch {
+    return ''
+  }
+})()
+const isPopout = computed(() => Boolean(popoutPageId))
+const popoutPage = computed(() => pagesStore.pages.find((p) => p.id === popoutPageId) || null)
+
+function closePopout(): void {
+  window.container?.closeWindow?.().catch(() => undefined)
+}
+
+function minimizePopout(): void {
+  window.container?.minimizeWindow?.().catch(() => undefined)
+}
+
+function toggleMaximizePopout(): void {
+  window.container?.toggleMaximize?.().catch(() => undefined)
+}
+
+function startPopoutPage(): void {
+  if (popoutPageId) void startPage(popoutPageId)
+}
 
 /* ---- Ctrl+K command palette ---- */
 const paletteOpen = ref(false)
@@ -33,6 +82,19 @@ const paletteOpen = ref(false)
 /** Stop a running page from the palette; failures surface as a toast. */
 function stopPage(id: string): void {
   pagesStore.stop(id).catch((err) => ElMessage.error((err as Error).message))
+}
+
+/** Restart a page from the palette — the same store call the page manager row uses. */
+function restartPage(id: string): void {
+  pagesStore.restart(id).catch((err) => ElMessage.error((err as Error).message))
+}
+
+/**
+ * Reveal the terminal drawer from the palette: focus the last session if one exists,
+ * otherwise start a root shell (which itself opens the drawer). */
+function openTerminalDrawer(): void {
+  if (store.sessions.length) store.open = true
+  else void store.start('container', t('terminal.rootTitle')).catch(() => undefined)
 }
 
 const PANEL_COMMANDS: { kind: PanelKind; label: string }[] = [
@@ -94,6 +156,21 @@ const commands = computed<Command[]>(() => {
         run: () => void startPage(p.id)
       })
     }
+    // C1/C2: every hosted page is poppable into its own window and restartable in place.
+    // The shortcut hint only shows for the page the global binding would pop out.
+    list.push({
+      id: `popout-${p.id}`,
+      title: t('palette.cmdPopoutPage', { name: p.name }),
+      hint: p.id === activePageId.value ? keyHint('popoutCurrent') : undefined,
+      group: t('palette.groupPages'),
+      run: () => void popoutPageIdAction(p.id)
+    })
+    list.push({
+      id: `restart-${p.id}`,
+      title: t('palette.cmdRestartPage', { name: p.name }),
+      group: t('palette.groupPages'),
+      run: () => restartPage(p.id)
+    })
   }
   for (const s of settingsStore.settings.externalSites) {
     list.push({
@@ -127,6 +204,7 @@ const commands = computed<Command[]>(() => {
     {
       id: 'act-devtools',
       title: t('palette.actDevtools'),
+      hint: keyHint('devtools'),
       group: t('palette.groupActions'),
       keywords: 'F12',
       run: () => void toggleDevTools()
@@ -135,7 +213,13 @@ const commands = computed<Command[]>(() => {
       id: 'act-updates',
       title: t('palette.actCheckUpdates'),
       group: t('palette.groupActions'),
-      run: () => updatesStore.check(true)
+      keywords: 'update updates check 更新',
+      // Open the Help panel (where the update table lives) and force a fresh check,
+      // instead of running a check the user can't see.
+      run: () => {
+        activePanel.value = 'help'
+        updatesStore.check(true).catch(() => undefined)
+      }
     },
     {
       id: 'act-logs',
@@ -145,6 +229,58 @@ const commands = computed<Command[]>(() => {
       run: openLogsDir
     }
   )
+  // Terminal drawer only mounts with the preload bridge (PTY IPC); skip it in plain-browser dev.
+  if (hasBridge) {
+    list.push({
+      id: 'act-terminal',
+      title: t('palette.actTerminal'),
+      hint: keyHint('terminal'),
+      group: t('palette.groupActions'),
+      keywords: 'terminal shell cmd console 终端',
+      run: () => openTerminalDrawer()
+    })
+  }
+  // A1: the crash/activity timeline lives in the help panel — give it a direct entry.
+  list.push({
+    id: 'act-events',
+    title: t('palette.cmdEvents'),
+    hint: keyHint('eventsTimeline'),
+    group: t('palette.groupActions'),
+    keywords: 'event events timeline crash activity 事件 动态 时间线 崩溃',
+    run: () => openHelpTab('events')
+  })
+  /* D2: agent entry points. Only offered when the page is actually hosted — a CLI-only
+     openclaw install has no web UI to jump to, and the clipboard hand-off needs one. */
+  const claw = agentPage('openclaw')
+  if (claw && claw.kind !== 'terminal') {
+    list.push({
+      id: 'ai-ask',
+      title: t('palette.cmdAskOpenclaw'),
+      group: t('palette.groupAi'),
+      keywords: 'ai ask openclaw claw question 提问 问',
+      run: () => void askAgent('openclaw')
+    })
+    if (activePageId.value) {
+      list.push({
+        id: 'ai-ask-context',
+        title: t('palette.cmdAskContext'),
+        hint: currentTitle.value,
+        group: t('palette.groupAi'),
+        keywords: 'ai ask context logs clipboard openclaw 提问 上下文 日志',
+        run: () => void askWithContext()
+      })
+    }
+  }
+  const dshPage = agentPage('dsh')
+  if (dshPage) {
+    list.push({
+      id: 'ai-dsh-web',
+      title: t('palette.cmdOpenDshWeb'),
+      group: t('palette.groupAi'),
+      keywords: 'ai dsh web 工作台',
+      run: () => void openPage(dshPage.id)
+    })
+  }
   // Generic agent-app settings entries — only for apps without a dedicated panel.
   for (const p of pagesStore.pages) {
     if (p.manageAsApp && p.kind !== 'dsh' && p.kind !== 'openclaw') {
@@ -188,6 +324,38 @@ const webNav = ref({ back: false, forward: false })
 const externalView = ref(false)
 
 const pageUrl = (p: PageState): string => p.launchUrl || p.url || ''
+
+/**
+ * Pages the dual-pane secondary screen can show: every running web page (with a live URL)
+ * plus the configured external sites. CLI/terminal pages are excluded (they own the full
+ * surface elsewhere). HomeView filters out the page already shown in the main pane.
+ */
+const secondaryChoices = computed<{ id: string; label: string; url: string }[]>(() => {
+  const out: { id: string; label: string; url: string }[] = []
+  for (const p of pagesStore.pages) {
+    if (p.kind === 'terminal') continue
+    const url = p.external ? p.externalUrl || pageUrl(p) : pageUrl(p)
+    if (url) out.push({ id: `p-${p.id}`, label: p.name, url })
+  }
+  for (const s of settingsStore.settings.externalSites) {
+    if (s.url) out.push({ id: `s-${s.id}`, label: s.name, url: s.url })
+  }
+  return out
+})
+
+/** A detached window can only offer 启动该页面 for a hosted page that is down and not booting. */
+const popoutStartable = computed(() => {
+  const p = popoutPage.value
+  return Boolean(p) && p?.kind !== 'terminal' && p?.status !== 'running' && p?.status !== 'starting'
+})
+
+/** Caption-bar sub-line: why the page isn't on screen right now ('' when it is). */
+const popoutSub = computed(() => {
+  const p = popoutPage.value
+  if (!p) return t('app.popoutLoadFail')
+  if (p.status === 'running' && !pageUrl(p)) return t('app.popoutLoadFail')
+  return p.status === 'running' ? '' : t('app.popoutStopped')
+})
 
 /** CLI-only pages (kind=terminal) take over the whole content area with a terminal. */
 const activeTerminalPage = computed(
@@ -269,6 +437,8 @@ function cancelStart(): void {
  * Returns true once the page is (or is being) shown, false when there is nothing to do.
  */
 async function restoreDefaultView(): Promise<boolean> {
+  // A detached window shows exactly one page and never the configured default view.
+  if (isPopout.value) return false
   const dv = settingsStore.settings.defaultView
   if (activePageId.value || dv.kind === 'none') return false
   // A saved external address can be the default view too: point the webview straight at
@@ -489,13 +659,6 @@ function reload(): void {
   webviewLoading.value = true
 }
 
-async function inspectWebview(): Promise<void> {
-  const guestId = (
-    homeRef.value?.webviewEl as { getWebContentsId?: () => number } | null
-  )?.getWebContentsId?.()
-  await window.container.toggleDevTools(guestId).catch(() => undefined)
-}
-
 /** Open the embedded page in the system browser — some features (popups, clipboard,
     native file dialogs) are limited inside <webview>. */
 function detachCurrentPage(): void {
@@ -527,7 +690,7 @@ async function restartContainer(): Promise<void> {
   window.container.relaunchApp().catch(() => undefined)
 }
 
-/** Reveal the main-process log folder (Help menu / palette action). */
+/** Reveal the main-process log folder (palette action; the 帮助 menu no longer carries it). */
 function openLogsDir(): void {
   window.container.openLogsDir().catch(() => undefined)
 }
@@ -657,9 +820,10 @@ watchEffect(() => {
 })
 
 // Keep the OS window/taskbar caption in the active language (index.html holds the zh default
-// so the very first paint before settings load is already Chinese).
+// so the very first paint before settings load is already Chinese). A detached window names the
+// page it holds instead, since several of them can be open at once.
 watchEffect(() => {
-  document.title = t('app.title')
+  document.title = isPopout.value ? popoutPage.value?.name || popoutPageId : t('app.title')
 })
 
 // The title-bar button is a pure day/night switch: it pins the opposite of what
@@ -675,29 +839,169 @@ async function toggleDevTools(): Promise<void> {
   await window.container.toggleDevTools().catch(() => undefined)
 }
 
+/**
+ * C1: the effective shortcut map — stored overrides over the shipped defaults. An action bound
+ * to '' is deliberately unbound (the recorder clears a binding that way), so `??` not `||`.
+ */
+const keybindings = computed<Record<KeybindingAction, string>>(() => {
+  const stored = settingsStore.settings.keybindings || {}
+  const out = { ...DEFAULT_KEYBINDINGS }
+  for (const action of KEYBINDING_ACTIONS) {
+    const v = stored[action]
+    if (typeof v === 'string') out[action] = v
+  }
+  return out
+})
+
+/**
+ * Palette hint for a rebindable action: the *effective* shortcut, not the shipped one, so the
+ * list stays truthful after the user edits 快捷键. '' means deliberately unbound → no hint.
+ */
+function keyHint(action: KeybindingAction): string | undefined {
+  const text = formatAccelerator(keybindings.value[action])
+  return text ? t('palette.hintKey', { key: text }) : undefined
+}
+
+/**
+ * Run one shortcut action. Also the entry point for a key pressed *inside* a hosted page: the main
+ * process matches the same bindings on the guest's before-input-event and forwards the action, so
+ * both routes land here and behave identically.
+ */
+function runAction(action: KeybindingAction): void {
+  // A detached page window has no palette, drawer or panels to close — only devtools carries over.
+  if (isPopout.value && action !== 'devtools') return
+  switch (action) {
+    case 'palette':
+      paletteOpen.value = !paletteOpen.value
+      break
+    case 'devtools':
+      void toggleDevTools()
+      break
+    case 'terminal':
+      openTerminalDrawer()
+      break
+    case 'closePanel':
+      if (activePanel.value) activePanel.value = null
+      break
+    case 'popoutCurrent':
+      void popoutCurrentPage()
+      break
+    case 'eventsTimeline':
+      openHelpTab('events')
+      break
+  }
+}
+
+/** Open (or focus) the help panel on a given vertical tab. */
+function openHelpTab(tab: string): void {
+  panelTab.value = tab
+  activePanel.value = 'help'
+}
+
+/**
+ * C2: hand the active page to the main process, which opens (or focuses) its own window. Only
+ * hosted http pages qualify — a CLI page owns a full-surface terminal, an external site has no
+ * page state to pop out.
+ */
+async function popoutPageIdAction(id: string): Promise<void> {
+  const page = pagesStore.pages.find((p) => p.id === id)
+  if (!page || page.external || page.kind === 'terminal') {
+    ElMessage.warning(t('pageMgr.popoutDisabled'))
+    return
+  }
+  try {
+    const res = await window.container.openPageWindow?.(id)
+    if (res && !res.ok) ElMessage.error(res.error || t('common.unknownError'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
+function popoutCurrentPage(): Promise<void> {
+  const id = activePageId.value
+  if (!id) return Promise.resolve()
+  return popoutPageIdAction(id)
+}
+
+/* ---- D2: AI assistant aggregation ---- */
+/** First hosted page of a managed agent kind, started on demand by openPage(). */
+function agentPage(kind: 'openclaw' | 'dsh'): PageState | undefined {
+  return pagesStore.pages.find((p) => p.kind === kind && !p.external)
+}
+
+async function askAgent(kind: 'openclaw' | 'dsh'): Promise<void> {
+  const page = agentPage(kind)
+  if (!page) {
+    ElMessage.warning(t('app.askAiNoTarget'))
+    return
+  }
+  await openPage(page.id)
+}
+
+/** Copy the active page's identity + its last log lines, then jump to OpenClaw to paste. */
+async function askWithContext(): Promise<void> {
+  const id = activePageId.value
+  const page = pagesStore.pages.find((p) => p.id === id)
+  let tail: string[] = []
+  if (page && !page.external) {
+    tail = await pagesStore.logs(page.id).catch(() => [])
+  }
+  const text = t('app.askAiContext', {
+    name: page?.name || id || t('app.selectPage'),
+    url: (page ? pageUrl(page) : '') || '-',
+    logs: tail.slice(-20).join('\n') || '-'
+  })
+  await askAiWith(text)
+}
+
 /** MenuBar peels its drop list on the same Esc keydown (document bubble, before us). */
 function onKeydown(ev: KeyboardEvent): void {
-  if (ev.key === 'F12') {
-    ev.preventDefault()
-    void toggleDevTools()
-  } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') {
-    ev.preventDefault()
-    paletteOpen.value = !paletteOpen.value
-  } else if (ev.key === 'Escape' && activePanel.value && !paletteOpen.value) {
-    activePanel.value = null
+  if (ev.repeat || (ev.ctrlKey && ev.altKey)) return
+  const pressed = {
+    key: ev.key,
+    code: ev.code,
+    ctrl: ev.ctrlKey,
+    shift: ev.shiftKey,
+    alt: ev.altKey,
+    meta: ev.metaKey
   }
+  const map = keybindings.value
+  const hit = KEYBINDING_ACTIONS.find((action) => matchesAccelerator(map[action], pressed))
+  if (!hit) return
+  // Esc is the one binding the hosted page must keep when no panel is open, and the palette
+  // owns its own Escape handling — both are the "nothing of ours to do" case.
+  if (hit === 'closePanel' && (!activePanel.value || paletteOpen.value)) return
+  ev.preventDefault()
+  runAction(hit)
 }
 
 let disposeNativeTheme: (() => void) | null = null
 let disposeMaximized: (() => void) | null = null
 let disposeOpenTerminal: (() => void) | null = null
 let disposeQuitConfirm: (() => void) | null = null
+let disposeHotkey: (() => void) | null = null
 let quitDialogOpen = false
+
+/**
+ * C2: point this window's single webview at the page it was detached for. Started on demand —
+ * a pop-out for a page that is down shows the 启动该页面 affordance rather than an error.
+ */
+async function initPopout(): Promise<void> {
+  const page = popoutPage.value
+  if (!page) return
+  activePageId.value = page.id
+  if (page.kind === 'terminal' || page.status !== 'running') return
+  showInWebview(page)
+}
 
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   if (window.container) {
     disposeOpenTerminal = window.container.onOpenTerminalPage((id) => void openPage(id))
+    // A container shortcut pressed inside a hosted page: main matched it and says what to run.
+    disposeHotkey = window.container.onHotkey?.((sig) => runAction(sig.action))
+    // D2: every "复制并问 AI" entry point hands the jump-to-agent step to this window.
+    registerAskAiJump(() => askAgent('openclaw'))
     // Load persisted settings BEFORE probing the OS scheme: applyTheme('auto') needs
     // systemPrefersDark already known, and the reapply below must not run with stale settings.
     await settingsStore.load().catch(() => undefined)
@@ -732,6 +1036,12 @@ onMounted(async () => {
     })
   }
   await pagesStore.refresh().catch(() => undefined)
+  // A detached window stops here: it has already loaded language/theme and resolved its one page,
+  // and needs neither the runtime guide probe, the default view, nor the update survey.
+  if (isPopout.value) {
+    await initPopout()
+    return
+  }
   runtimes.refresh().catch(() => undefined)
   // The configured default page wins over the CLI auto-start surface: it is what the
   // user asked to see on entry and gets started on demand when it isn't running yet.
@@ -760,6 +1070,8 @@ onBeforeUnmount(() => {
   disposeMaximized?.()
   disposeOpenTerminal?.()
   disposeQuitConfirm?.()
+  disposeHotkey?.()
+  unregisterAskAiJump()
 })
 
 watch(activePanel, (panel) => {
@@ -769,7 +1081,7 @@ watch(activePanel, (panel) => {
   // the `pagesStore.refresh()` above re-fetches, so we skip the expensive async status IPC here.
   if (panel === 'dsh' || panel === 'openclaw' || panel === 'help')
     runtimes.refresh().catch(() => undefined)
-  if (panel === 'help' && !updatesStore.results.length) {
+  if (panel === 'help' && !updatesStore.results.length && !updatesStore.checking) {
     updatesStore.check().catch(() => undefined)
   }
 })
@@ -833,6 +1145,25 @@ const runningCount = computed(() => pagesStore.runningPages.length)
 /** The top-bar reload/devtools buttons act on the live webview; disable them on the market
     screen and while a CLI page owns the content area (the terminal has its own restart). */
 const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPage.value)
+
+/* ---- 双屏 × 顶部前进/后退 ----
+   Which pane the nav buttons aim at is decided by the mouse: HomeView flips
+   `dualStore.activePane` on pane hover / guest focus, and the nav-state HomeView pushes up
+   already describes that pane. An external address must sit on THAT pane for the buttons to
+   show — hosted pages keep their own in-page navigation and stay button-free. */
+/** The picker ids: `s-<siteId>` is a saved external site, `p-<pageId>` a hosted page. */
+const secondaryHostsExternal = computed(() => {
+  if (isPopout.value || !dualStore.on || !dualStore.showSecondary) return false
+  const id = dualStore.secId
+  if (!id || !dualStore.secondaryUrl) return false
+  if (id.startsWith('s-')) return true
+  return Boolean(pagesStore.pages.find((p) => `p-${p.id}` === id)?.external)
+})
+const showNav = computed(() =>
+  dualStore.activePane === 'secondary'
+    ? secondaryHostsExternal.value
+    : externalView.value && canOperate.value
+)
 </script>
 
 <template>
@@ -846,6 +1177,7 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
       </div>
 
       <MenuBar
+        v-if="!isPopout"
         :current="activePanel"
         :running-count="runningCount"
         :total-count="pagesStore.pages.length"
@@ -860,7 +1192,7 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
         :can-operate="canOperate"
         :can-go-back="webNav.back"
         :can-go-forward="webNav.forward"
-        :show-nav="externalView && canOperate"
+        :show-nav="showNav"
         :terminal-mode="Boolean(activeTerminalPage)"
         :external-sites="settingsStore.settings.externalSites"
         @open="activePanel = $event"
@@ -869,15 +1201,14 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
         @select-page="openPage"
         @start-page="startPage"
         @open-terminal="(id: string) => openPage(id)"
+        @popout-page="popoutPageIdAction"
         @preview-site="previewSiteById"
         @reload="reload"
         @go-back="webviewGoBack"
         @go-forward="webviewGoForward"
         @detach="detachCurrentPage"
-        @inspect="inspectWebview"
         @restart-terminal="cliTermRef?.restart()"
         @restart-app="restartContainer"
-        @open-logs="openLogsDir"
       >
         <template #settings>
           <MenuPanelContent
@@ -946,10 +1277,68 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
             :total-count="pagesStore.pages.length"
+            :initial-tab="panelTab ?? undefined"
             @check-updates="updatesStore.check(true)"
           />
         </template>
       </MenuBar>
+
+      <!-- C2: a detached window swaps the whole menu bar for a 28px caption strip. The strip is
+           the drag region (the window is frameless); its controls opt back out of dragging. -->
+      <div v-if="isPopout" class="popout-bar">
+        <span class="popout-dot" :class="`s-${popoutPage?.status || 'stopped'}`" />
+        <span class="popout-title">{{ popoutPage?.name || popoutPageId }}</span>
+        <span v-if="popoutSub" class="popout-sub">{{ popoutSub }}</span>
+        <span class="popout-spacer" />
+        <button v-if="popoutStartable" class="popout-btn" @click="startPopoutPage">
+          {{ t('app.popoutStart') }}
+        </button>
+        <!-- Right-end window controls: same frameless contract as the main shell's title bar. -->
+        <div class="popout-win">
+          <button
+            class="popout-win-btn"
+            :title="t('app.popoutMinimize')"
+            :aria-label="t('app.popoutMinimize')"
+            @click="minimizePopout"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+          </button>
+          <button
+            class="popout-win-btn"
+            :title="isMaximized ? t('app.popoutRestore') : t('app.popoutMaximize')"
+            :aria-label="isMaximized ? t('app.popoutRestore') : t('app.popoutMaximize')"
+            @click="toggleMaximizePopout"
+          >
+            <svg v-if="!isMaximized" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <rect
+                x="1.5"
+                y="1.5"
+                width="7"
+                height="7"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+              />
+            </svg>
+            <svg v-else width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <rect x="1" y="3" width="6" height="6" fill="none" stroke="currentColor" stroke-width="1.2" />
+              <path d="M3 3 V1 H9 V7 H7" fill="none" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+          </button>
+          <button
+            class="popout-win-btn popout-win-close"
+            :title="t('app.popoutClose')"
+            :aria-label="t('app.popoutClose')"
+            @click="closePopout"
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+          </button>
+        </div>
+      </div>
 
       <main class="content">
         <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
@@ -969,8 +1358,9 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
           :logs="bootLogs"
           :slow="bootSlow"
           :elapsed-text="bootElapsedText"
-          :market-active="!webviewActive && !activeTerminalPage"
+          :market-active="!isPopout && !webviewActive && !activeTerminalPage"
           :external-view="externalView"
+          :secondary-choices="secondaryChoices"
           @nav-state="onNavState"
           @guest-stop-loading="webviewLoading = false"
           @install-pages="activePanel = 'pages'"
@@ -982,12 +1372,12 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
       <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
          v-show, not v-if: unmounting drops the global onPtyData subscription, which
          would silently kill output for every embedded shell terminal tab. -->
-      <TerminalDrawer v-if="hasBridge" v-show="store.open" />
+      <TerminalDrawer v-if="hasBridge && !isPopout" v-show="store.open" />
 
-      <CommandPalette v-model="paletteOpen" :commands="commands" />
+      <CommandPalette v-if="!isPopout" v-model="paletteOpen" :commands="commands" />
 
       <!-- First-run dependency gate: a blocking overlay until the built-in Node is present. -->
-      <SetupGate />
+      <SetupGate v-if="!isPopout" />
     </div>
   </el-config-provider>
 </template>
@@ -1023,5 +1413,107 @@ const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPa
   border-radius: 0;
   border: none;
   box-shadow: none;
+}
+
+/* ---- C2: detached page window caption ---- */
+.popout-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 28px;
+  padding: 0 6px 0 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  /* The window is frameless, so this strip is its only drag handle. */
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.popout-bar .popout-btn {
+  -webkit-app-region: no-drag;
+}
+
+.popout-title {
+  overflow: hidden;
+  font-weight: 600;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popout-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popout-spacer {
+  flex: 1;
+}
+
+.popout-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.popout-dot.s-running {
+  background: var(--ok);
+}
+.popout-dot.s-starting {
+  background: var(--warn);
+}
+.popout-dot.s-error {
+  background: var(--err);
+}
+
+.popout-btn {
+  flex: none;
+  padding: 2px 8px;
+  font: inherit;
+  color: var(--text-dim);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.popout-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* Window controls flush to the strip's right edge: flat square buttons, no border. */
+.popout-win {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  height: 100%;
+  margin-right: -6px;
+}
+
+.popout-win-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 100%;
+  color: var(--text-dim);
+  cursor: pointer;
+  background: none;
+  border: none;
+  /* Inside the drag strip each control must opt back out of window dragging. */
+  -webkit-app-region: no-drag;
+}
+.popout-win-btn:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.popout-win-close:hover {
+  color: #fff;
+  background: var(--err);
 }
 </style>

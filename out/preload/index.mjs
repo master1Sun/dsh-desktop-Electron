@@ -117,14 +117,27 @@ const IPC = {
   /** #26: what the embedded webviews hold (cookies per domain, cache + storage bytes) → WebDataReport */
   GetWebData: "container:get-web-data",
   /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
-  ClearWebData: "container:clear-web-data"
+  ClearWebData: "container:clear-web-data",
+  /** activity timeline: read filtered events from logs/events.jsonl (ListEventsArgs → ContainerEvent[]) */
+  ListEvents: "container:list-events",
+  /** broadcast: one new activity-timeline event (ContainerEvent) */
+  OnEvent: "container:event",
+  /** #20 follow-up: retained CPU/RAM history per running page → Record<pageId, PageMetrics[]> */
+  GetMetricsHistory: "container:get-metrics-history",
+  /** open a hosted page in its own top-level window (pageId) — shares the embedded-page session */
+  OpenPageWindow: "container:open-page-window",
+  /** is a TCP port free on 127.0.0.1? → { free, holder? } so the config dialog can warn up front */
+  CheckPortFree: "container:check-port-free",
+  /** broadcast: a rebindable shortcut was pressed *inside* a hosted webview, so the shell window
+   *  that owns the action runs it (HotkeySignal). The guest consumed nothing back. */
+  OnHotkey: "container:hotkey"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
-  nodeListVersions: () => ipcRenderer.invoke(IPC.ListNodeVersions),
+  nodeListVersions: (includeIncompatible) => ipcRenderer.invoke(IPC.ListNodeVersions, includeIncompatible),
   nodeUpdate: (version) => ipcRenderer.invoke(IPC.UpdateNodeRuntime, version),
   nodeRestoreBundled: () => ipcRenderer.invoke(IPC.RestoreBundledNode),
-  provisionBuiltin: (kind) => ipcRenderer.invoke(IPC.ProvisionBuiltin, kind),
+  provisionBuiltin: (kind, version) => ipcRenderer.invoke(IPC.ProvisionBuiltin, kind, version),
   onNodeUpdateProgress: (cb) => {
     const listener = (_e, p) => cb(p);
     ipcRenderer.on(IPC.OnNodeUpdateProgress, listener);
@@ -165,6 +178,26 @@ const api = {
   getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
   getPageMetrics: () => ipcRenderer.invoke(IPC.GetPageMetrics),
   killPortHolder: (port) => ipcRenderer.invoke(IPC.KillPortHolder, port),
+  // port pre-flight for the page config dialog; `pageId` lets the main process ignore the page's
+  // own listener when it is the one being edited
+  checkPortFree: (port, pageId) => ipcRenderer.invoke(IPC.CheckPortFree, port, pageId),
+  // activity timeline (帮助 → 事件动态): cold read + live rows
+  listEvents: (args) => ipcRenderer.invoke(IPC.ListEvents, args),
+  onEvent: (cb) => {
+    const listener = (_e, ev) => cb(ev);
+    ipcRenderer.on(IPC.OnEvent, listener);
+    return () => ipcRenderer.removeListener(IPC.OnEvent, listener);
+  },
+  // retained CPU/RAM trend samples per running page, for the sparkline and the config chart
+  getMetricsHistory: () => ipcRenderer.invoke(IPC.GetMetricsHistory),
+  // open a page in its own window (the renderer's minimal `?popout=` layout)
+  openPageWindow: (pageId) => ipcRenderer.invoke(IPC.OpenPageWindow, pageId),
+  // a container shortcut pressed inside a hosted page, forwarded by the main process
+  onHotkey: (cb) => {
+    const listener = (_e, sig) => cb(sig);
+    ipcRenderer.on(IPC.OnHotkey, listener);
+    return () => ipcRenderer.removeListener(IPC.OnHotkey, listener);
+  },
   rollbackAsar: () => ipcRenderer.invoke(IPC.RollbackAsar),
   onUpdateResults: (cb) => {
     const listener = (_e, results) => cb(results);

@@ -3,9 +3,12 @@ import { electronAPI } from '@electron-toolkit/preload'
 import {
   IPC,
   type BuiltinKind,
+  type ContainerEvent,
   type DownloadProgress,
   type DshPluginOpEvent,
+  type HotkeySignal,
   type InstallProgress,
+  type ListEventsArgs,
   type PageProgress,
   type ReadLogsArgs,
   type UpdateCheckResult,
@@ -17,10 +20,12 @@ import {
 
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
-  nodeListVersions: () => ipcRenderer.invoke(IPC.ListNodeVersions),
+  nodeListVersions: (includeIncompatible?: boolean) =>
+    ipcRenderer.invoke(IPC.ListNodeVersions, includeIncompatible),
   nodeUpdate: (version: string) => ipcRenderer.invoke(IPC.UpdateNodeRuntime, version),
   nodeRestoreBundled: () => ipcRenderer.invoke(IPC.RestoreBundledNode),
-  provisionBuiltin: (kind: BuiltinKind) => ipcRenderer.invoke(IPC.ProvisionBuiltin, kind),
+  provisionBuiltin: (kind: BuiltinKind, version?: string) =>
+    ipcRenderer.invoke(IPC.ProvisionBuiltin, kind, version),
   onNodeUpdateProgress: (cb: (p: UpdateProgress) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, p: UpdateProgress): void => cb(p)
     ipcRenderer.on(IPC.OnNodeUpdateProgress, listener)
@@ -64,6 +69,27 @@ const api = {
   getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
   getPageMetrics: () => ipcRenderer.invoke(IPC.GetPageMetrics),
   killPortHolder: (port: number) => ipcRenderer.invoke(IPC.KillPortHolder, port),
+  // port pre-flight for the page config dialog; `pageId` lets the main process ignore the page's
+  // own listener when it is the one being edited
+  checkPortFree: (port: number, pageId?: string) =>
+    ipcRenderer.invoke(IPC.CheckPortFree, port, pageId),
+  // activity timeline (帮助 → 事件动态): cold read + live rows
+  listEvents: (args: ListEventsArgs) => ipcRenderer.invoke(IPC.ListEvents, args),
+  onEvent: (cb: (ev: ContainerEvent) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, ev: ContainerEvent): void => cb(ev)
+    ipcRenderer.on(IPC.OnEvent, listener)
+    return () => ipcRenderer.removeListener(IPC.OnEvent, listener)
+  },
+  // retained CPU/RAM trend samples per running page, for the sparkline and the config chart
+  getMetricsHistory: () => ipcRenderer.invoke(IPC.GetMetricsHistory),
+  // open a page in its own window (the renderer's minimal `?popout=` layout)
+  openPageWindow: (pageId: string) => ipcRenderer.invoke(IPC.OpenPageWindow, pageId),
+  // a container shortcut pressed inside a hosted page, forwarded by the main process
+  onHotkey: (cb: (sig: HotkeySignal) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, sig: HotkeySignal): void => cb(sig)
+    ipcRenderer.on(IPC.OnHotkey, listener)
+    return () => ipcRenderer.removeListener(IPC.OnHotkey, listener)
+  },
   rollbackAsar: () => ipcRenderer.invoke(IPC.RollbackAsar),
   onUpdateResults: (cb: (results: UpdateCheckResult[]) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, results: UpdateCheckResult[]): void =>

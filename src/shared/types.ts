@@ -4,6 +4,20 @@ export const NODE_VERSION_REQUIRED = 'v24.21.0'
 export const CONTAINER_REPO_URL = 'https://github.com/master1Sun/dsh-desktop-Electron.git'
 
 /**
+ * Every human-facing timestamp — main-process log stamps, exported bundle fields, snapshot /
+ * diagnostic file names, and UI time labels — renders in this zone so reports from different
+ * machines read the same wall-clock. Single source so the main process and renderer never drift.
+ */
+export const DISPLAY_TIME_ZONE = 'Asia/Shanghai'
+
+/**
+ * Short suffix noting the zone on bare formatted times (which otherwise read ambiguous to a user
+ * in another region). Kept separate from {@link DISPLAY_TIME_ZONE} because the IANA id is for
+ * Intl, the label is for people.
+ */
+export const DISPLAY_TIME_ZONE_LABEL = 'UTC+8'
+
+/**
  * #25: ceiling (px) for the frosted-glass blur the 毛玻璃效果 slider can reach. The slider
  * itself stays 0–100 (%); the settings value (`glassBlur`) is written straight to
  * `--glass-blur`, so both the preview and the persisted value are clamped to this range —
@@ -76,6 +90,15 @@ export interface EnvVarSpec {
   legacyPath?: string
   /** helper text under the input explaining what this directory holds */
   description?: string
+  /**
+   * Editor kind for the generated settings input. Absent/'dir' keeps the historical behaviour
+   * (directory picker, value resolved through the home-dir precedence chain and auto-created).
+   * 'text' turns the row into a free-form string the manifest author can default via
+   * `defaultValue` — for feature flags / API base URLs that aren't paths.
+   */
+  type?: 'dir' | 'text'
+  /** literal fallback for `type: 'text'` vars when the user set no override (no `~` expansion) */
+  defaultValue?: string
 }
 
 export interface PageMeta {
@@ -122,6 +145,34 @@ export interface PageMeta {
    * guard's restart ladder takes over instead of the row silently lying.
    */
   healthUrl?: string
+  /**
+   * Manifest schema the project targets (container.json `schemaVersion`). Absent = the
+   * pre-versioning shape. Only recorded and surfaced: the container reads every field it
+   * knows regardless, so an *older* page never needs a bump to keep working.
+   */
+  schemaVersion?: number
+  /** manifest author string, shown in the page config dialog */
+  author?: string
+  /** the page's own version (independent of any git/npm update signal) */
+  version?: string
+  /**
+   * Ready-to-use icon for the row: a `data:` URL, or a path relative to the page directory.
+   * The main process reads the file and inlines it, so the renderer never resolves paths
+   * inside `pages/`. Undefined (or rejected for size) = the UI's letter/default glyph.
+   */
+  iconUrl?: string
+  /**
+   * Declared capabilities (container.json `permissions`), e.g. ['notify', 'downloads',
+   * 'externalShell']. Declarative only — recorded and displayed so a third-party page can be
+   * reviewed for what it *asks* for; nothing is gated on it yet.
+   */
+  permissions?: string[]
+  /**
+   * Non-fatal container.json problems found while reading the manifest (unknown keys, wrong
+   * types). Surfaced in the page config dialog so an author sees typos instead of silently
+   * having a field ignored.
+   */
+  manifestWarnings?: string[]
 }
 
 export interface PageState extends PageMeta {
@@ -242,6 +293,14 @@ export interface ContainerSettings {
   pageEnvs: Record<string, Record<string, string>>
   /** per-page port overrides: pageId -> port; wins over container.json so imported projects need no editing */
   pagePorts: Record<string, number>
+  /**
+   * Free-form per-page environment variables (pageId -> KEY -> value) the user adds in the page
+   * config dialog. Deliberately separate from `pageEnvs`: that map is directory-typed and fed to
+   * the home-dir resolution chain, while these are injected verbatim into the child's env.
+   * Restart-required, like `pageEnvs`. Values may carry secrets, so diagnostics masks them with
+   * the same variable-name rule it applies everywhere.
+   */
+  pageCustomEnvs?: Record<string, Record<string, string>>
   /** restart a page whose process crashes after having been up; off = surface the error only */
   crashAutoRestart: boolean
   /** OS notifications for out-of-band events (guard gave up restarting, staged update ready) */
@@ -279,6 +338,11 @@ export interface ContainerSettings {
    */
   windowBounds?: WindowBounds
   /**
+   * Same memory, one slot per detached page window (see `IPC.OpenPageWindow`), keyed by page id —
+   * a popout the user arranged beside the container should not jump back to the centre.
+   */
+  popoutBounds?: Record<string, WindowBounds>
+  /**
    * #26: motion preference. 'auto' (default) follows the OS `prefers-reduced-motion`; 'on'/'off'
    * force it for this app only. The renderer resolves all three down to one `.reduce-motion`
    * class on `<html>`, which is what every animation-damping rule keys off — so 'off' works even
@@ -294,6 +358,99 @@ export interface ContainerSettings {
   trayPageEntries?: 'all' | 'running' | 'off'
   /** #26: which tiers may light the tray badge: all = update/resource/alert, alert = a crashed page only, off = never */
   trayBadge?: 'all' | 'alert' | 'off'
+  /**
+   * Dist-tag the DSH CLI is (re)provisioned from. 'alpha' is what the container shipped with
+   * (dsh publishes prereleases there), 'latest' tracks the stable release. Read at install and
+   * update-check time, so switching only changes what the *next* reprovision pulls.
+   */
+  dshChannel?: DshReleaseChannel
+  /**
+   * Which OTA branch the container's own asar update follows: 'stable' = the `release` branch,
+   * 'beta' = `release-beta` (falling back to `release` when the beta branch doesn't exist yet).
+   */
+  containerChannel?: ContainerReleaseChannel
+  /**
+   * What to do when a running page stays above `memWarnMb`: 'notify' only flags it (the
+   * historical behaviour), 'restart' reboots a page that has been up long enough that a restart
+   * is cheaper than a leak-induced OOM.
+   */
+  memLimitAction?: 'notify' | 'restart'
+  /**
+   * Custom shortcut bindings: action id -> accelerator string ('Ctrl+K', 'F12',
+   * 'Ctrl+Shift+Enter'). Absent key = the built-in default for that action, so this map only
+   * ever holds the user's overrides and stays small.
+   */
+  keybindings?: Record<string, string>
+}
+
+/** Dist-tags {@link ContainerSettings.dshChannel} can pick between. */
+export type DshReleaseChannel = 'alpha' | 'latest'
+
+/** OTA branches {@link ContainerSettings.containerChannel} can pick between. */
+export type ContainerReleaseChannel = 'stable' | 'beta'
+
+/**
+ * Every rebindable shortcut. The ids double as the i18n key suffix (`keybinding.<id>`), and the
+ * set is closed on purpose: an action not listed here has no handler, so a free-form map key
+ * from a hand-edited store would silently do nothing.
+ */
+export const KEYBINDING_ACTIONS = [
+  'palette',
+  'devtools',
+  'terminal',
+  'closePanel',
+  'popoutCurrent',
+  'eventsTimeline'
+] as const
+export type KeybindingAction = (typeof KEYBINDING_ACTIONS)[number]
+
+/**
+ * Shipped defaults, in Electron-accelerator spelling. `eventsTimeline` has none: it is a
+ * palette command, and stealing a key from the hosted page would be a bad trade.
+ */
+export const DEFAULT_KEYBINDINGS: Record<KeybindingAction, string> = {
+  palette: 'Ctrl+K',
+  devtools: 'F12',
+  terminal: 'Ctrl+`',
+  closePanel: 'Esc',
+  popoutCurrent: 'Ctrl+Shift+Enter',
+  eventsTimeline: ''
+}
+
+/**
+ * Severity of one entry in the activity timeline. Mirrors the log levels so a row can reuse
+ * the log viewer's colour vocabulary: info = normal lifecycle, warn = recovered/degraded
+ * (crash-restart, over-budget, manifest typo), error = something the user must act on.
+ */
+export type EventLevel = 'info' | 'warn' | 'error'
+
+/**
+ * One activity-timeline entry. `kind` is a stable machine id (`page.running`, `ota.apply` …)
+ * that the renderer resolves to a localized template — the *event* is persisted, the sentence
+ * is not, so switching language still reads the whole history in the new locale. `detail`/`meta`
+ * carry the raw technical facts (exit code, port, version) that no translation should own.
+ */
+export interface ContainerEvent {
+  /** epoch ms */
+  ts: number
+  level: EventLevel
+  kind: string
+  /** hosting page the row belongs to, when any (drives the filter dropdown + jump-to-log) */
+  pageId?: string
+  /** raw technical text (an error message, a git line) — shown as-is, never translated */
+  detail?: string
+  /** interpolation params for the `evt.<kind>` template (port, code, version …) */
+  meta?: Record<string, string | number | boolean>
+}
+
+/** Args for `IPC.ListEvents`; every filter is optional, `limit` defaults to 200. */
+export interface ListEventsArgs {
+  limit?: number
+  level?: EventLevel
+  pageId?: string
+  kind?: string
+  /** only events at/after this epoch ms */
+  since?: number
 }
 
 /** #26: persisted BrowserWindow geometry; `maximized` is restored on top of the bounds. */
@@ -317,6 +474,19 @@ export interface RegistryCandidate {
   label: { zh: string; en: string }
   /** the registry the container falls back to when `npmRegistry` is empty */
   builtin?: boolean
+}
+
+/**
+ * Result of `IPC.CheckPortFree`: whether 127.0.0.1:port is bindable, and when it isn't, which
+ * foreign process is LISTENing (same lookup the start-failure path uses for its kill-and-retry).
+ * `probeError` marks an inconclusive check (a platform whose port query failed) as opposed to a
+ * definite conflict, so the UI only ever warns on `free === false`.
+ */
+export interface PortCheckResult {
+  port: number
+  free: boolean
+  holder?: { pid: number; name: string }
+  probeError?: boolean
 }
 
 /** #26: outcome of probing one registry's `/-/ping` endpoint. */
@@ -398,9 +568,17 @@ export interface UpdateOutcome {
  *   counts; `resumed` is true when an interrupted earlier attempt's partial file was kept and
  *   the write continued from its size (断点续传) rather than restarting from zero.
  * - `done`: the file is complete and staged as pending — the renderer clears the row.
+ *
+ * A built-in runtime row (dsh / openclaw) rides the same channel but has no byte counts: npm
+ * installs report no percentage, so it streams `phase:'fetch'` with no `percent` (an
+ * indeterminate bar) and puts npm's own latest stderr line in `message`. `builtin` names which
+ * runtime it is so the top bar can label the row from the *UI* dictionary — `name` is a
+ * main-process-translated row title and would not follow a mid-session language switch.
  */
 export interface UpdateProgress {
   name: string
+  /** which built-in runtime this row belongs to; absent for the container's own OTA download */
+  builtin?: BuiltinKind
   phase: 'fetch' | 'extract' | 'done'
   /** bytes written so far (extract) */
   received?: number
@@ -410,7 +588,7 @@ export interface UpdateProgress {
   percent?: number
   /** true when an existing partial download was resumed rather than restarted */
   resumed?: boolean
-  /** already-localized human line (built in the main process) */
+  /** human line under the bar: main-process translated, except a built-in install's raw npm output */
   message?: string
 }
 
@@ -582,6 +760,9 @@ export interface NodeVersionInfo {
   date: string
   /** LTS codename when the line is LTS, false otherwise */
   lts: string | false
+  /** false only when "显示不兼容版本" pulled a release outside the hosted runtimes' engines
+      range (would break page spawns); omitted/true means it satisfies those engines. */
+  usable?: boolean
 }
 
 /**
@@ -709,8 +890,28 @@ export const IPC = {
   /** #26: what the embedded webviews hold (cookies per domain, cache + storage bytes) → WebDataReport */
   GetWebData: 'container:get-web-data',
   /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
-  ClearWebData: 'container:clear-web-data'
+  ClearWebData: 'container:clear-web-data',
+  /** activity timeline: read filtered events from logs/events.jsonl (ListEventsArgs → ContainerEvent[]) */
+  ListEvents: 'container:list-events',
+  /** broadcast: one new activity-timeline event (ContainerEvent) */
+  OnEvent: 'container:event',
+  /** #20 follow-up: retained CPU/RAM history per running page → Record<pageId, PageMetrics[]> */
+  GetMetricsHistory: 'container:get-metrics-history',
+  /** open a hosted page in its own top-level window (pageId) — shares the embedded-page session */
+  OpenPageWindow: 'container:open-page-window',
+  /** is a TCP port free on 127.0.0.1? → { free, holder? } so the config dialog can warn up front */
+  CheckPortFree: 'container:check-port-free',
+  /** broadcast: a rebindable shortcut was pressed *inside* a hosted webview, so the shell window
+   *  that owns the action runs it (HotkeySignal). The guest consumed nothing back. */
+  OnHotkey: 'container:hotkey'
 } as const
+
+/** Payload of {@link IPC.OnHotkey}: which action fired and for which page, if any. */
+export interface HotkeySignal {
+  action: KeybindingAction
+  /** the hosted page whose webview received the keypress */
+  pageId?: string
+}
 
 /** One row of `IPC.ListLogFiles`. `key` is 'main' or a `pages/<file>` basename. */
 export interface LogFileInfo {
@@ -761,6 +962,8 @@ export interface PageMetrics {
   /** resident set size in MB summed over the process tree */
   memMb: number
   overLimit?: boolean
+  /** epoch ms of this sample — the trend chart's x-axis */
+  ts?: number
 }
 
 /**

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { checkUpdates, performUpdate, clearUpdateCache, normalizeRepoUrl, recloneUrl } from '../src/main/git-updates'
+import { checkUpdates, performUpdate, clearUpdateCache, normalizeRepoUrl, recloneUrl } from '../src/main/update/git-updates'
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] })

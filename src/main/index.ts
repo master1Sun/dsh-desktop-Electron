@@ -1,26 +1,46 @@
+/**
+ * Main-process entry. It deliberately stays at src/main/ root: electron-vite names the bundle
+ * after its entry, and boot.cjs + the OTA asar swap are both anchored to `out/main/index.js`.
+ * Everything else is grouped by responsibility:
+ *
+ *   runtime/ what the container hosts — the page registry & lifecycle, the dsh / openclaw /
+ *            bundled-Node CLIs, pty terminals, port forensics, project import, metrics,
+ *            snapshots and diagnostics
+ *   update/  how things get newer — the unified update check, the OTA app.asar channel, git
+ *            pulls, the bundled-Node updater, and webview file downloads
+ *   shell/   the window and its plumbing — IPC handlers, settings store, file logging, the
+ *            event log, i18n, tray & notifications, window bounds, web data, user-data
+ */
 import { app, BrowserWindow, dialog, shell } from 'electron'
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
-import { PageRegistry } from './pages'
-import { registerIpc } from './ipc'
-import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './openclaw'
-import { pnpmBinDirs } from './dsh'
-import { getSettings, resolvePagesDir, resolveProjectDir, applyLaunchAtStartup, applyNpmRegistryEnv } from './store'
-import { getNodeRuntimeInfo } from './node-runtime'
-import { m, onLocaleChanged, registerLocaleSource } from './i18n'
-import { installFileLogger } from './logger'
-import { registerDownloadHandling } from './downloads'
-import { ensureAsciiUserData } from './user-data'
-import { appIconPath } from './icon'
-import { createTray, rebuildTrayMenu } from './tray'
+import { PageRegistry } from './runtime/pages'
+import { registerIpc, flushPopoutBounds } from './shell/ipc'
+import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './runtime/openclaw'
+import { pnpmBinDirs } from './runtime/dsh'
+import {
+  getSettings,
+  resolvePagesDir,
+  resolveProjectDir,
+  applyLaunchAtStartup,
+  applyNpmRegistryEnv
+} from './shell/store'
+import { getNodeRuntimeInfo } from './runtime/node-runtime'
+import { m, onLocaleChanged, registerLocaleSource } from './shell/i18n'
+import { installFileLogger } from './shell/logger'
+import { logEvent } from './shell/events'
+import { registerDownloadHandling } from './update/downloads'
+import { ensureAsciiUserData } from './shell/user-data'
+import { appIconPath } from './shell/icon'
+import { createTray, rebuildTrayMenu } from './shell/tray'
 import {
   flushWindowBounds,
   resolveBounds,
   unwatchWindowBounds,
   watchWindowBounds
-} from './window-bounds'
+} from './shell/window-bounds'
 
 // Why userData must be ASCII before any path-dependent init (logger, electron-store,
 // node override): see user-data.ts. The call itself has to stay here, first thing.
@@ -61,6 +81,7 @@ const FATAL_ERROR_CODES = new Set(['MODULE_NOT_FOUND', 'ERR_UNKNOWN_BUILTIN_MODU
 let fatalEscalated = false
 process.on('uncaughtException', (err) => {
   console.error('[container] uncaught exception:', err)
+  logEvent({ level: 'error', kind: 'app.crash', detail: err?.stack || err?.message || String(err) })
   const code = (err as NodeJS.ErrnoException).code
   if (app.isPackaged && code && FATAL_ERROR_CODES.has(code) && !fatalEscalated) {
     fatalEscalated = true // only one dialog even if the broken pump keeps throwing
@@ -292,6 +313,12 @@ if (!gotLock) {
     electronApp.setAppUserModelId('com.dsh.desktop-container')
     ensureUnpackedForUpdate()
     markBootOk()
+    // Timeline anchor: every later row is read relative to the boot it happened in.
+    logEvent({
+      level: 'info',
+      kind: 'app.boot',
+      meta: { version: app.getVersion(), packaged: app.isPackaged }
+    })
 
     // Detect a boot-triggered launch before the window is created so it can come up hidden,
     // and re-assert the OS registration so it always matches the persisted setting (a manual
@@ -380,6 +407,7 @@ if (!gotLock) {
     isQuitting = true
     // #26: a quit can arrive before the move/resize debounce fires — write the final geometry now.
     flushWindowBounds()
+    flushPopoutBounds() // detached page windows keep their own rects
     if (registry && !shutdownDone) {
       shutdownDone = true // one-shot: never reset, re-entrant quits fall through to Electron
       e.preventDefault()

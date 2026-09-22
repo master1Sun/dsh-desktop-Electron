@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, defineComponent, h, onMounted, reactive, ref, watch } from 'vue'
+import { ElIcon, ElMessage, ElMessageBox, ElTooltip } from 'element-plus'
 import {
   Monitor,
   Operation,
@@ -8,7 +8,9 @@ import {
   FolderOpened,
   Connection,
   Lock,
-  Bell
+  Bell,
+  Key,
+  InfoFilled
 } from '@element-plus/icons-vue'
 import { usePagesStore } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
@@ -22,8 +24,12 @@ import type {
 import {
   GLASS_BLUR_MAX_PX,
   NPM_REGISTRY_DEFAULT,
-  REGISTRY_CANDIDATES
+  REGISTRY_CANDIDATES,
+  DEFAULT_KEYBINDINGS,
+  KEYBINDING_ACTIONS,
+  type KeybindingAction
 } from '../../../shared/types'
+import { acceleratorFromEvent, formatAccelerator, parseAccelerator } from '../../../shared/accel'
 import { t } from '../i18n'
 
 const emit = defineEmits<{
@@ -34,7 +40,44 @@ const emit = defineEmits<{
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
 
-/** Which settings tab is open — one of view / behavior / alerts / download / network / env / privacy. */
+/**
+ * A compact ⓘ that reveals a row's full description on hover. Settings rows used to render a
+ * permanent `<div class="tip">` paragraph under every control, which made the panel tall and
+ * noisy; the wording lives here instead so each row stays on one line.
+ */
+const InfoTip = defineComponent({
+  name: 'InfoTip',
+  props: { content: { type: String, required: true } },
+  setup: (props) => () =>
+    h(
+      ElTooltip,
+      {
+        content: props.content,
+        placement: 'top',
+        showAfter: 120,
+        popperClass: 'settings-tip-popper'
+      },
+      {
+        default: () =>
+          h(
+            ElIcon,
+            {
+              class: 'tip-icon',
+              style: {
+                fontSize: '14px',
+                color: 'var(--text-dim)',
+                marginLeft: '5px',
+                verticalAlign: 'middle',
+                cursor: 'help'
+              }
+            },
+            { default: () => h(InfoFilled) }
+          )
+      }
+    )
+})
+
+/** Which settings tab is open — one of view / behavior / alerts / keys / download / network / env / privacy. */
 const activeTab = ref('view')
 
 /* ---- dynamic per-page directory env config ----
@@ -42,8 +85,14 @@ const activeTab = ref('view')
 interface EnvRow {
   key: string
   label: string
-  defaultPath?: string
   description?: string
+  /** 'text' rows are free-form values, not directories — no `~` expansion, own placeholder. */
+  type?: 'dir' | 'text'
+  /**
+   * What an empty input falls back to: the declared directory for path vars, the literal value
+   * for `type: 'text'` ones. One field because both only ever feed the same two display slots.
+   */
+  fallback?: string
 }
 interface EnvSection {
   pageId: string
@@ -68,11 +117,22 @@ const envSections = computed<EnvSection[]>(() =>
       vars: (p.envVars ?? []).map((v) => ({
         key: v.key,
         label: v.label || v.key,
-        defaultPath: v.defaultPath,
-        description: v.description
+        description: v.description,
+        type: v.type,
+        fallback: v.type === 'text' ? v.defaultValue : v.defaultPath
       }))
     }))
 )
+
+/**
+ * The per-env-var help: a project-authored `description` wins; otherwise explain the injection
+ * in one line. Used to sit as an inline tip under each input — now surfaced through InfoTip.
+ */
+function envRowTip(row: EnvRow): string {
+  if (row.description) return row.description
+  const def = row.fallback ? t('settings.envInjectDefault', { path: row.fallback }) : ''
+  return `${t('settings.envInjectPrefix')}${row.key}${t('settings.envInjectSuffix', { def })}`
+}
 
 const envDrafts = reactive<Record<string, string>>({})
 const draftKey = (pageId: string, key: string): string => `${pageId}::${key}`
@@ -94,6 +154,91 @@ watch(
   },
   { immediate: true }
 )
+
+/* ---- C1 editable shortcuts ----
+   Only overrides live in settings: an absent key means "shipped default", an empty string means
+   the user deliberately unbound it. Both are shown so 恢复默认 is never a surprise. */
+const recording = ref<KeybindingAction | null>(null)
+
+interface KeyRow {
+  action: KeybindingAction
+  name: string
+  /** display form of the effective binding; '' when unbound */
+  text: string
+  /** the other action sharing this combination, when there is one */
+  conflictWith: string
+  custom: boolean
+  defaultText: string
+}
+
+const keyRows = computed<KeyRow[]>(() => {
+  const stored = settingsStore.settings.keybindings || {}
+  const effective: Record<KeybindingAction, string> = { ...DEFAULT_KEYBINDINGS }
+  for (const action of KEYBINDING_ACTIONS) {
+    const v = stored[action]
+    if (typeof v === 'string') effective[action] = v
+  }
+  // Two actions on one combination is a user error worth naming, not just a red box: the
+  // matcher resolves it by table order, so the loser would look like an intermittent bug.
+  const holders = new Map<string, KeybindingAction[]>()
+  for (const action of KEYBINDING_ACTIONS) {
+    const accel = effective[action]
+    if (!accel) continue
+    holders.set(accel, [...(holders.get(accel) || []), action])
+  }
+  return KEYBINDING_ACTIONS.map((action) => {
+    const accel = effective[action]
+    const others = (holders.get(accel) || []).filter((a) => a !== action)
+    return {
+      action,
+      name: t(`kb.${action}`),
+      text: formatAccelerator(accel),
+      conflictWith: others.length ? t(`kb.${others[0]}`) : '',
+      custom: stored[action] !== undefined && stored[action] !== DEFAULT_KEYBINDINGS[action],
+      defaultText: t('settings.keysDefault', {
+        key: formatAccelerator(DEFAULT_KEYBINDINGS[action])
+      })
+    }
+  })
+})
+
+async function saveKeybinding(action: KeybindingAction, accel: string): Promise<void> {
+  const next = { ...(settingsStore.settings.keybindings || {}), [action]: accel }
+  await patch({ keybindings: next }, t('settings.keysSaved'))
+}
+
+/**
+ * Capture-mode keydown. The recorder owns the key, so both the global handler in App.vue and the
+ * focused hosted page must be kept from also acting on it — hence preventDefault + stop.
+ */
+function onRecordKeydown(action: KeybindingAction, ev: KeyboardEvent): void {
+  ev.preventDefault()
+  ev.stopPropagation()
+  if (ev.key === 'Escape') {
+    recording.value = null // Esc means "cancel" here, even though it is a bindable key elsewhere
+    return
+  }
+  const accel = acceleratorFromEvent({
+    key: ev.key,
+    code: ev.code,
+    ctrl: ev.ctrlKey,
+    shift: ev.shiftKey,
+    alt: ev.altKey,
+    meta: ev.metaKey
+  })
+  if (!accel) return // a bare modifier is a prefix, not a shortcut yet
+  if (!parseAccelerator(accel)) {
+    ElMessage.warning(t('settings.keysBad'))
+    return
+  }
+  recording.value = null
+  void saveKeybinding(action, accel)
+}
+
+/** A whole-settings write: main replaces the key outright, so `{}` really does restore the table. */
+async function resetKeybindings(): Promise<void> {
+  await patch({ keybindings: {} }, t('settings.keysResetDone'))
+}
 
 /* ---- 环境目录 root ----
    Every runtime's home dir defaults into <envRoot>/<runtime>; the root itself follows
@@ -313,7 +458,9 @@ async function resetTerminalHeight(): Promise<void> {
    *not* "no registry" — it means the built-in default, so the picker writes '' for that row. */
 const registryProbes = ref<Record<string, RegistryProbe>>({})
 const probing = ref(false)
-const currentRegistry = computed(() => settingsStore.settings.npmRegistry?.trim() || NPM_REGISTRY_DEFAULT)
+const currentRegistry = computed(
+  () => settingsStore.settings.npmRegistry?.trim() || NPM_REGISTRY_DEFAULT
+)
 const customRegistry = ref(settingsStore.settings.npmRegistry || '')
 watch(
   () => settingsStore.settings.npmRegistry,
@@ -346,7 +493,9 @@ const bestRegistry = computed<RegistryProbe | null>(() => {
 const bestName = computed(() => {
   const best = bestRegistry.value
   if (!best) return ''
-  return labelOf(REGISTRY_CANDIDATES.find((c) => c.id === best.id)?.label ?? { zh: best.url, en: best.url })
+  return labelOf(
+    REGISTRY_CANDIDATES.find((c) => c.id === best.id)?.label ?? { zh: best.url, en: best.url }
+  )
 })
 async function probeAllRegistries(): Promise<void> {
   if (probing.value) return
@@ -421,7 +570,11 @@ async function loadWebData(): Promise<void> {
 }
 
 /** Clear one scope; `confirmKey` marks the destructive ones (they sign pages out). */
-async function clearWeb(scope: 'cache' | 'cookies' | 'storage' | 'all', domain?: string, confirmKey = ''): Promise<void> {
+async function clearWeb(
+  scope: 'cache' | 'cookies' | 'storage' | 'all',
+  domain?: string,
+  confirmKey = ''
+): Promise<void> {
   if (confirmKey) {
     try {
       await ElMessageBox.confirm(t(confirmKey), t('settings.webDataClear'), {
@@ -464,7 +617,10 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
-          <el-form-item :label="t('settings.defaultPage')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.defaultPage') }}<InfoTip :content="t('settings.defaultPageTip')"
+            /></template>
             <el-select v-model="viewValue" style="width: 340px">
               <el-option
                 v-for="opt in viewOptions.plain"
@@ -482,7 +638,6 @@ onMounted(loadWebData)
                 />
               </el-option-group>
             </el-select>
-            <div class="tip">{{ t('settings.defaultPageTip') }}</div>
           </el-form-item>
 
           <el-form-item :label="t('settings.theme')">
@@ -497,7 +652,10 @@ onMounted(loadWebData)
           </el-form-item>
 
           <!-- #25 theme customization: accent override + frosted-blur strength -->
-          <el-form-item :label="t('settings.accentColor')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.accentColor') }}<InfoTip :content="t('settings.accentTip')"
+            /></template>
             <div class="accent-row">
               <el-color-picker
                 :model-value="settingsStore.settings.accentColor || ''"
@@ -512,10 +670,12 @@ onMounted(loadWebData)
                 {{ t('settings.accentReset') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.accentTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.glassFx')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.glassFx') }}<InfoTip :content="t('settings.glassFxTip')"
+            /></template>
             <div class="blur-row">
               <el-slider
                 v-model="frostDraft"
@@ -528,7 +688,6 @@ onMounted(loadWebData)
               />
               <span class="blur-val">{{ frostDraft }}%</span>
             </div>
-            <div class="tip">{{ t('settings.glassFxTip') }}</div>
           </el-form-item>
 
           <el-form-item :label="t('settings.language')">
@@ -550,7 +709,10 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
-          <el-form-item :label="t('settings.minimizeToTray')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.minimizeToTray') }}<InfoTip :content="t('settings.minimizeTip')"
+            /></template>
             <el-switch
               :model-value="settingsStore.settings.minimizeToTray"
               @update:model-value="
@@ -560,27 +722,36 @@ onMounted(loadWebData)
                 )
               "
             />
-            <div class="tip">{{ t('settings.minimizeTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.launchAtStartup')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.launchAtStartup')
+              }}<InfoTip :content="t('settings.launchAtStartupTip')" />
+            </template>
             <el-switch
               :model-value="settingsStore.settings.launchAtStartup"
               @update:model-value="patch({ launchAtStartup: $event as boolean })"
             />
-            <div class="tip">{{ t('settings.launchAtStartupTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.crashAutoRestart')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.crashAutoRestart')
+              }}<InfoTip :content="t('settings.crashAutoRestartTip')" />
+            </template>
             <el-switch
               :model-value="settingsStore.settings.crashAutoRestart"
               @update:model-value="patch({ crashAutoRestart: $event as boolean })"
             />
-            <div class="tip">{{ t('settings.crashAutoRestartTip') }}</div>
           </el-form-item>
 
           <!-- #26: terminal height (stored-only until now) plus the window/motion memory. -->
-          <el-form-item :label="t('settings.terminalHeight')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.terminalHeight')
+              }}<InfoTip :content="t('settings.terminalHeightTip')"
+            /></template>
             <div class="blur-row">
               <el-slider
                 v-model="termHeightDraft"
@@ -600,18 +771,23 @@ onMounted(loadWebData)
                 {{ t('settings.accentReset') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.terminalHeightTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.rememberWindow')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.rememberWindow')
+              }}<InfoTip :content="t('settings.rememberWindowTip')"
+            /></template>
             <el-switch
               :model-value="settingsStore.settings.rememberWindowBounds !== false"
               @update:model-value="patch({ rememberWindowBounds: $event as boolean })"
             />
-            <div class="tip">{{ t('settings.rememberWindowTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.reduceMotion')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.reduceMotion') }}<InfoTip :content="t('settings.reduceMotionTip')"
+            /></template>
             <el-radio-group
               :model-value="settingsStore.settings.reduceMotion || 'auto'"
               @update:model-value="patch({ reduceMotion: $event as 'auto' | 'on' | 'off' })"
@@ -620,7 +796,6 @@ onMounted(loadWebData)
               <el-radio-button value="on">{{ t('settings.alwaysOn') }}</el-radio-button>
               <el-radio-button value="off">{{ t('settings.alwaysOff') }}</el-radio-button>
             </el-radio-group>
-            <div class="tip">{{ t('settings.reduceMotionTip') }}</div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -633,15 +808,21 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
-          <el-form-item :label="t('settings.systemNotifications')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.systemNotifications')
+              }}<InfoTip :content="t('settings.systemNotificationsTip')" />
+            </template>
             <el-switch
               :model-value="settingsStore.settings.systemNotifications"
               @update:model-value="patch({ systemNotifications: $event as boolean })"
             />
-            <div class="tip">{{ t('settings.systemNotificationsTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.memWarnMb')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.memWarnMb') }}<InfoTip :content="t('settings.memWarnMbTip')"
+            /></template>
             <div class="blur-row">
               <el-slider
                 v-model="memWarnDraft"
@@ -653,24 +834,42 @@ onMounted(loadWebData)
               />
               <span class="blur-val">{{ memWarnDraft }} MB</span>
             </div>
-            <div class="tip">{{ t('settings.memWarnMbTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.trayPageEntries')">
+          <!-- B1: what the container does once a page sits over that budget for a while. -->
+          <el-form-item>
+            <template #label
+              >{{ t('settings.memLimitAction')
+              }}<InfoTip :content="t('settings.memLimitActionTip')"
+            /></template>
+            <el-radio-group
+              :model-value="settingsStore.settings.memLimitAction || 'notify'"
+              @update:model-value="patch({ memLimitAction: $event as 'notify' | 'restart' })"
+            >
+              <el-radio-button value="notify">{{ t('settings.memLimitNotify') }}</el-radio-button>
+              <el-radio-button value="restart">{{ t('settings.memLimitRestart') }}</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+
+          <el-form-item>
+            <template #label
+              >{{ t('settings.trayPageEntries')
+              }}<InfoTip :content="t('settings.trayPageEntriesTip')"
+            /></template>
             <el-radio-group
               :model-value="settingsStore.settings.trayPageEntries || 'all'"
-              @update:model-value="
-                patch({ trayPageEntries: $event as 'all' | 'running' | 'off' })
-              "
+              @update:model-value="patch({ trayPageEntries: $event as 'all' | 'running' | 'off' })"
             >
               <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
               <el-radio-button value="running">{{ t('settings.trayRunning') }}</el-radio-button>
               <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
             </el-radio-group>
-            <div class="tip">{{ t('settings.trayPageEntriesTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.trayBadge')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.trayBadge') }}<InfoTip :content="t('settings.trayBadgeTip')"
+            /></template>
             <el-radio-group
               :model-value="settingsStore.settings.trayBadge || 'all'"
               @update:model-value="patch({ trayBadge: $event as 'all' | 'alert' | 'off' })"
@@ -679,10 +878,13 @@ onMounted(loadWebData)
               <el-radio-button value="alert">{{ t('settings.trayAlertOnly') }}</el-radio-button>
               <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
             </el-radio-group>
-            <div class="tip">{{ t('settings.trayBadgeTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.externalOpenMode')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.externalOpenMode')
+              }}<InfoTip :content="t('settings.externalOpenModeTip')"
+            /></template>
             <el-radio-group
               :model-value="settingsStore.settings.openExternalIn"
               @update:model-value="
@@ -694,9 +896,52 @@ onMounted(loadWebData)
                 t('settings.systemBrowser')
               }}</el-radio-button>
             </el-radio-group>
-            <div class="tip">{{ t('settings.externalOpenModeTip') }}</div>
           </el-form-item>
         </el-form>
+      </el-tab-pane>
+
+      <!-- C1: 快捷键 —— every action the shell binds, recorded straight into settings.keybindings. -->
+      <el-tab-pane name="keys">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Key /></el-icon>{{ t('settings.tabKeys') }}</span
+          >
+        </template>
+        <div class="keys-head">
+          <span class="keys-title"
+            >{{ t('settings.keysTitle') }}<InfoTip :content="t('settings.keysTip')"
+          /></span>
+          <el-button size="small" @click="resetKeybindings">{{
+            t('settings.keysReset')
+          }}</el-button>
+        </div>
+        <div v-for="row in keyRows" :key="row.action" class="key-row">
+          <span class="key-name">{{ row.name }}</span>
+          <el-input
+            class="key-input"
+            :class="{ 'key-conflict': row.conflictWith }"
+            :model-value="row.text"
+            :placeholder="
+              recording === row.action ? t('settings.keysRecord') : t('settings.keysNone')
+            "
+            readonly
+            @focus="recording = row.action"
+            @blur="recording = null"
+            @keydown="onRecordKeydown(row.action, $event)"
+          />
+          <el-button
+            size="small"
+            text
+            :disabled="!row.text && !row.custom"
+            @click="saveKeybinding(row.action, '')"
+          >
+            {{ t('settings.keysClear') }}
+          </el-button>
+          <span v-if="row.conflictWith" class="tip keys-err">{{
+            t('settings.keysConflict', { other: row.conflictWith })
+          }}</span>
+          <span v-else-if="row.custom" class="tip">{{ row.defaultText }}</span>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane name="download">
@@ -706,7 +951,16 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
-          <el-form-item :label="t('settings.downloadDir')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.downloadDir')
+              }}<InfoTip
+                :content="
+                  t('settings.downloadDirTip', {
+                    dir: downloadDirInfo?.downloadDir || t('settings.envRootLoaded')
+                  })
+                "
+            /></template>
             <div class="env-root-row">
               <el-input
                 v-model="downloadDirDraft"
@@ -723,13 +977,6 @@ onMounted(loadWebData)
                 t('common.browse')
               }}</el-button>
             </div>
-            <div class="tip">
-              {{
-                t('settings.downloadDirTip', {
-                  dir: downloadDirInfo?.downloadDir || t('settings.envRootLoaded')
-                })
-              }}
-            </div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -742,7 +989,10 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
-          <el-form-item :label="t('settings.registryPick')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.registryPick') }}<InfoTip :content="t('settings.registryTip')"
+            /></template>
             <div class="reg-list">
               <div
                 v-for="c in REGISTRY_CANDIDATES"
@@ -763,10 +1013,12 @@ onMounted(loadWebData)
                 </el-button>
               </div>
             </div>
-            <div class="tip">{{ t('settings.registryTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.registryProbe')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.registryProbe') }}<InfoTip :content="t('settings.registryProbeTip')"
+            /></template>
             <div class="act-row act-end">
               <el-button size="small" :loading="probing" @click="probeAllRegistries">
                 {{ t('settings.registryProbeBtn') }}
@@ -781,10 +1033,13 @@ onMounted(loadWebData)
                 {{ t('settings.registryUseBest', { name: bestName, ms: bestRegistry.ms ?? 0 }) }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.registryProbeTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.registryCustom')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.registryCustom')
+              }}<InfoTip :content="t('settings.registryCustomTip')"
+            /></template>
             <div class="act-row">
               <el-input
                 v-model="customRegistry"
@@ -802,7 +1057,6 @@ onMounted(loadWebData)
                 {{ t('common.save') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.registryCustomTip') }}</div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -814,7 +1068,17 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
-          <el-form-item :label="t('settings.envRoot')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.envRoot')
+              }}<InfoTip
+                :content="
+                  t('settings.envRootTip', {
+                    root: envRootInfo?.envRoot || t('settings.envRootLoaded'),
+                    envRoot: '{envRoot}'
+                  })
+                "
+            /></template>
             <div class="env-root-row">
               <el-input
                 v-model="envRootDraft"
@@ -829,14 +1093,6 @@ onMounted(loadWebData)
               />
               <el-button size="small" @click="browseEnvRoot">{{ t('common.browse') }}</el-button>
             </div>
-            <div class="tip">
-              {{
-                t('settings.envRootTip', {
-                  root: envRootInfo?.envRoot || t('settings.envRootLoaded'),
-                  envRoot: '{envRoot}'
-                })
-              }}
-            </div>
           </el-form-item>
         </el-form>
 
@@ -844,14 +1100,17 @@ onMounted(loadWebData)
           <div v-for="section in envSections" :key="section.pageId" class="env-section">
             <div class="env-page-name neon">{{ section.pageName }}</div>
             <el-form label-position="left" size="small">
-              <el-form-item v-for="row in section.vars" :key="row.key" :label="row.label">
+              <el-form-item v-for="row in section.vars" :key="row.key">
+                <template #label>{{ row.label }}<InfoTip :content="envRowTip(row)" /> </template>
                 <el-input
                   :model-value="envDrafts[draftKey(section.pageId, row.key)] || ''"
                   :placeholder="
-                    row.defaultPath
-                      ? t('settings.envInputPlaceholderDefault', {
-                          path: displayPath(row.defaultPath)
-                        })
+                    row.fallback
+                      ? row.type === 'text'
+                        ? t('settings.envTextPlaceholder', { v: row.fallback })
+                        : t('settings.envInputPlaceholderDefault', {
+                            path: displayPath(row.fallback)
+                          })
                       : t('settings.envInputPlaceholderEmpty')
                   "
                   style="width: 340px"
@@ -861,19 +1120,6 @@ onMounted(loadWebData)
                   "
                   @change="savePageEnv(section.pageId, row.key, String($event))"
                 />
-                <div class="tip">
-                  <template v-if="row.description">{{ row.description }}</template>
-                  <template v-else>
-                    {{ t('settings.envInjectPrefix') }} <code>{{ row.key }}</code>
-                    {{
-                      t('settings.envInjectSuffix', {
-                        def: row.defaultPath
-                          ? t('settings.envInjectDefault', { path: row.defaultPath })
-                          : ''
-                      })
-                    }}
-                  </template>
-                </div>
               </el-form-item>
             </el-form>
           </div>
@@ -889,7 +1135,10 @@ onMounted(loadWebData)
           >
         </template>
         <el-form label-position="left" size="small">
-          <el-form-item :label="t('settings.webDataTitle')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.webDataTitle') }}<InfoTip :content="t('settings.webDataTip')"
+            /></template>
             <div class="act-row">
               <span class="wd-size">
                 {{ t('settings.webDataTotal', { size: webDataTotal }) }}
@@ -898,20 +1147,25 @@ onMounted(loadWebData)
                 {{ t('common.refresh') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.webDataTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.webDataCache')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.webDataCache') }}<InfoTip :content="t('settings.webDataCacheTip')"
+            /></template>
             <div class="act-row">
               <span class="wd-size">{{ sizeText(webData?.cacheBytes ?? 0) }}</span>
               <el-button size="small" :loading="webDataBusy === 'cache'" @click="clearWeb('cache')">
                 {{ t('settings.webDataClear') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.webDataCacheTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.webDataStorage')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.webDataStorage')
+              }}<InfoTip :content="t('settings.webDataStorageTip')"
+            /></template>
             <div class="act-row">
               <span class="wd-size">{{ sizeText(webData?.storageBytes ?? 0) }}</span>
               <el-button
@@ -922,10 +1176,13 @@ onMounted(loadWebData)
                 {{ t('settings.webDataClear') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.webDataStorageTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.webDataCookies')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.webDataCookies')
+              }}<InfoTip :content="t('settings.webDataCookiesTip')"
+            /></template>
             <div class="act-row">
               <span class="wd-size">
                 {{ t('settings.webDataCookieCount', { n: webData?.totalCookies ?? 0 }) }}
@@ -939,10 +1196,13 @@ onMounted(loadWebData)
                 {{ t('settings.webDataClearAll') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.webDataCookiesTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.webDataPerSite')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.webDataPerSite')
+              }}<InfoTip :content="t('settings.webDataPerSiteTip')"
+            /></template>
             <div v-if="webData?.cookieDomains.length" class="reg-list scroll">
               <div v-for="d in webData.cookieDomains" :key="d.domain" class="reg-row">
                 <span class="wd-site">{{ d.domain }}</span>
@@ -958,10 +1218,12 @@ onMounted(loadWebData)
               </div>
             </div>
             <div v-else class="env-empty">{{ t('settings.webDataNoCookies') }}</div>
-            <div class="tip">{{ t('settings.webDataPerSiteTip') }}</div>
           </el-form-item>
 
-          <el-form-item :label="t('settings.webDataAll')">
+          <el-form-item>
+            <template #label
+              >{{ t('settings.webDataAll') }}<InfoTip :content="t('settings.webDataAllTip')"
+            /></template>
             <div class="act-row act-end">
               <el-button
                 size="small"
@@ -973,7 +1235,6 @@ onMounted(loadWebData)
                 {{ t('settings.webDataAllBtn') }}
               </el-button>
             </div>
-            <div class="tip">{{ t('settings.webDataAllTip') }}</div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -992,15 +1253,18 @@ onMounted(loadWebData)
    label must fit on one line, or it would wrap out of its 24px box. */
 .settings-panel {
   --settings-label-w: 166px;
+  /* 内容列的固定高度上限：超过不再拉高面板，改为 tab 内部出滚动条。 */
+  --settings-content-max-h: 520px;
 }
 
 /* Vertical (left) tab rail: a compact icon+label column instead of a top strip. The active
    item gets a soft accent background; the hairline EP would draw between the nav and the
-   content is removed so the two columns read as one card. */
+   content is removed so the two columns read as one card.
+   The old `min-height` used `stretch`, which let tall tabs (环境目录 / 隐私数据) grow the
+   whole panel; `flex-start` + a max-height on the content column caps it instead. */
 .settings-tabs {
   display: flex;
-  align-items: stretch;
-  min-height: 240px;
+  align-items: flex-start;
 }
 .settings-tabs :deep(.el-tabs__header) {
   margin: 0 16px 0 0;
@@ -1048,7 +1312,11 @@ onMounted(loadWebData)
 }
 .settings-tabs :deep(.el-tabs__content) {
   flex: 1;
-  overflow: hidden;
+  min-width: 0;
+  /* EP 会给这个盒子写行内 overflow/height（竖排时行内 height 为 auto），这里用 max-height
+     给内容列封顶；`!important` 防御 animateHeight 未来写入行内高度把它覆盖。 */
+  max-height: var(--settings-content-max-h) !important;
+  overflow-y: auto !important;
   /* The column used to sit flush with the rail and the panel's own padding, so the row hover
      wash ran straight into both. A little air on all four sides keeps it off the edges. */
   padding: 6px 8px 8px 6px;
@@ -1154,7 +1422,9 @@ onMounted(loadWebData)
 .settings-panel :deep(.el-form-item):hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
-  transition: background 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
 }
 .env-empty {
   font-size: 12.5px;
@@ -1253,5 +1523,56 @@ onMounted(loadWebData)
 .reg-list.scroll {
   max-height: 240px;
   overflow-y: auto;
+}
+
+/* ---- C1 shortcut recorder ----
+   One four-track grid (name / binding / clear / status) so every row lines up with the panel's
+   shared label column instead of drifting with the length of the action name. */
+.settings-panel .keys-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 2px;
+}
+.settings-panel .keys-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-panel .key-row {
+  display: grid;
+  grid-template-columns: var(--settings-label-w) 180px auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin: 6px 0;
+}
+.settings-panel .key-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+.settings-panel .key-input {
+  width: 180px;
+  cursor: pointer;
+}
+.settings-panel .key-input :deep(.el-input__inner) {
+  font-family: var(--mono, ui-monospace, monospace);
+  text-align: center;
+}
+.settings-panel .key-conflict :deep(.el-input__wrapper) {
+  box-shadow: 0 0 0 1px var(--err) inset;
+}
+.settings-panel .keys-err {
+  margin-top: 0;
+  color: var(--err);
+}
+</style>
+
+<style>
+/* Rendered in a teleported popper, so it can't live in the scoped block above. */
+.settings-tip-popper {
+  max-width: 340px;
+  line-height: 1.6;
 }
 </style>

@@ -15,8 +15,8 @@ vi.mock('electron', () => ({
   app: { getAppPath: () => repoRoot, getPath: () => scratch, isPackaged: false }
 }))
 
-const { PageRegistry } = await import('../src/main/pages')
-const { createDshPage } = await import('../src/main/dsh')
+const { PageRegistry } = await import('../src/main/runtime/pages')
+const { createDshPage } = await import('../src/main/runtime/dsh')
 
 function tcpOpen(port: number): Promise<boolean> {
   return new Promise((resolve) => {

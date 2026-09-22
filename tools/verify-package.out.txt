@@ -1,23 +1,21 @@
 ===== dist/ artifacts =====
-  builder-debug.yml                                    0.0 MB  2026-09-21T10:10:58.813Z
-  builder-effective-config.yaml                        0.0 MB  2026-09-21T10:10:06.935Z
-  dsh-desktop-electron-0.1.10-setup.exe                100.1 MB  2026-09-21T10:10:55.189Z
-  dsh-desktop-electron-0.1.10-setup.exe.blockmap       0.1 MB  2026-09-21T10:10:58.801Z
-  latest.yml                                           0.0 MB  2026-09-21T10:10:58.816Z
-  win-unpacked                                         DIR  2026-09-21T10:10:31.821Z
+  builder-debug.yml                                    0.0 MB  2026-09-22 14:02:16
+  builder-effective-config.yaml                        0.0 MB  2026-09-22 09:13:24
+  DesktopContainer-0.1.11.exe                          100.1 MB  2026-09-22 09:15:00
+  DesktopContainer-0.1.11.exe.blockmap                 0.1 MB  2026-09-22 09:15:03
+  latest.yml                                           0.0 MB  2026-09-22 09:15:03
+  win-unpacked                                         DIR  2026-09-22 14:02:15
 
 ===== installer sanity =====
-  dsh-desktop-electron-0.1.10-setup.exe: 100.1 MB, header="MZ" (OK)
+  DesktopContainer-0.1.11.exe: 100.1 MB, header="MZ" (OK)
 
 ===== win-unpacked/resources =====
-  app-update.yml         0.0 MB
-  app.asar               56.4 MB
+  app.asar               56.9 MB
   app.asar.unpacked         177 files  8.1 MB
   boot.cjs               0.0 MB
-  elevate.exe            0.1 MB
   icon.png               0.2 MB
-  pages                       2 files  0.0 MB
-  TOTAL                     184 files  64.8 MB
+  pages                       3 files  0.0 MB
+  TOTAL                     183 files  65.2 MB
 
 ===== bundled runtime entry points in the package =====
   MISS resources/node/node.exe
@@ -33,7 +31,7 @@
   OK   resources/pages/dsh-web/container.json  0.0 MB
   MISS resources/pages/dsh-plugin-market/container.json
   OK   resources/pages/openclaw/container.json  0.0 MB
-  OK   resources/app.asar  56.4 MB
+  OK   resources/app.asar  56.9 MB
 
 ===== app.asar packed top-level (resources/ must be absent) =====
   node_modules/, out/, package.json, resources/

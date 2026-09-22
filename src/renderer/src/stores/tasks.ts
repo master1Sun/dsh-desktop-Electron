@@ -63,18 +63,25 @@ export const useTasksStore = defineStore('tasks', () => {
       })
   })
 
-  // Container self-update: the row id keys off the streamed `name`, but the label is rendered
-  // here via the UI dictionary (the only thing on this channel is the container itself) so it
-  // follows the live language like every other top-bar string. Built-in dsh / openclaw installs
-  // go through installBuiltin below (npm install has no byte progress).
+  // Container self-update *and* built-in runtime updates (关于与更新 ▸ 更新 DSH 本体 / OpenClaw):
+  // the row id keys off the streamed `name`, but the label is rendered here via the UI dictionary
+  // so it follows the live language. The npm path has no byte progress (percent stays null → an
+  // indeterminate flow), so npm's own latest output line is shown as the detail instead.
   window.container?.onUpdateProgress?.((p) => {
     const id = 'update:' + p.name
     if (p.phase === 'done') remove(id)
     else
       upsert(id, {
-        label: t('app.title'),
+        label: p.builtin
+          ? t(p.builtin === 'dsh' ? 'topbar.dsh' : 'topbar.openclaw')
+          : t('app.title'),
         percent: toPercent(p),
-        message: p.phase === 'extract' ? t('topbar.writing') : t('topbar.downloading')
+        message:
+          p.builtin && p.message
+            ? p.message
+            : p.phase === 'extract'
+              ? t('topbar.writing')
+              : t('topbar.downloading')
       })
   })
 
@@ -142,17 +149,21 @@ export const useTasksStore = defineStore('tasks', () => {
 
   /**
    * Install/upgrade a built-in agent runtime through the main-process bundled-npm path.
-   * Brackets an indeterminate top-bar task (npm has no byte progress) and surfaces the
+   * Brackets an indeterminate top-bar task (npm has no byte progress; the *update-check* row's
+   * 更新 button streams npm's own output instead — see the onUpdateProgress source above) and surfaces the
    * outcome as a toast, so the first-run gate and the 关于与更新 panel share one entry
    * point. Returns the outcome, or `null` when it failed / was already running.
+   *
+   * `version` pins the exact release to install (`pkg@<version>`) instead of following the
+   * configured channel — the escape hatch back to a known-good runtime after a bad upgrade.
    */
-  async function installBuiltin(kind: BuiltinKind): Promise<UpdateOutcome | null> {
+  async function installBuiltin(kind: BuiltinKind, version?: string): Promise<UpdateOutcome | null> {
     const id = 'builtin:' + kind
     if (tasks[id]) return null
     const label = kind === 'dsh' ? t('topbar.dsh') : t('topbar.openclaw')
     upsert(id, { label, percent: null, message: t('topbar.installing') })
     try {
-      const res = await window.container.provisionBuiltin(kind)
+      const res = await window.container.provisionBuiltin(kind, version)
       if (!res.ok) throw new Error(res.error || t('common.unknownError'))
       const out = res.data as UpdateOutcome
       if (!out.ok) ElMessage.warning(out.error || t('updates.incomplete', { name: label }))

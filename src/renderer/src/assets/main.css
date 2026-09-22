@@ -345,3 +345,35 @@ html.reduce-motion .el-radio-button__inner:active {
 .fade-leave-to {
   opacity: 0;
 }
+
+/* --- indeterminate progress bars --------------------------------------------
+   A task with no byte progress (npm install, a git negotiate, a dsh plugin op) can only show
+   a striped flow, so every caller passes `percentage: 0` + `indeterminate`. Element Plus drives
+   that mode by animating the inner segment's `left` while its *width* stays the inline
+   `percentage` — i.e. 0, an invisible segment sweeping — and its `--striped-flow` rule even
+   replaces that animation with a background-position one. The result was a dead grey track that
+   looked like a frozen bar rather than a running task.
+   This gives "no percentage" a real simulated loader: a fixed-width segment sweeping across the
+   track, keeping EP's flowing stripes where the caller asked for stripes. `!important` is needed
+   to beat the inline width/animation EP writes on the element itself. */
+.el-progress-bar__inner--indeterminate {
+  width: 30% !important;
+  animation: dsh-marquee 1.6s ease-in-out infinite !important;
+}
+.el-progress-bar__inner--indeterminate.el-progress-bar__inner--striped {
+  animation:
+    dsh-marquee 1.6s ease-in-out infinite,
+    striped-flow 2.4s linear infinite !important;
+}
+@keyframes dsh-marquee {
+  0% {
+    left: -30%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+/* Motion budget off: keep the segment visible (the row still reads as in-flight) but stop sliding. */
+html.reduce-motion .el-progress-bar__inner--indeterminate {
+  animation: none !important;
+}

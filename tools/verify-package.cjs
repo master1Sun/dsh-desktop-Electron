@@ -47,7 +47,7 @@ const dist = path.join(root, 'dist')
 for (const f of fs.existsSync(dist) ? fs.readdirSync(dist) : []) {
   const p = path.join(dist, f)
   const st = fs.statSync(p)
-  out.push(`  ${f.padEnd(52)} ${st.isDirectory() ? 'DIR' : mb(st.size)}  ${st.mtime.toISOString()}`)
+  out.push(`  ${f.padEnd(52)} ${st.isDirectory() ? 'DIR' : mb(st.size)}  ${st.mtime.toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai', hour12: false })}`)
 }
 
 // pick the newest installer exe in dist/ instead of a hardcoded name+version

@@ -2,10 +2,11 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import EmptyState from './EmptyState.vue'
+import CustomEnvEditor from './CustomEnvEditor.vue'
 import { usePagesStore } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import { useUpdatesStore } from '../stores/updates'
-import type { UpdateCheckResult } from '../../../shared/types'
+import type { EnvVarSpec, UpdateCheckResult } from '../../../shared/types'
 import { t } from '../i18n'
 
 /**
@@ -117,6 +118,50 @@ async function browseEnv(key: string): Promise<void> {
   await saveEnv(key)
 }
 
+/**
+ * What an empty input means for one declared var: the directory it falls back to, the literal
+ * default of a `type: 'text'` one — or nothing at all, which is the only honest reading for a
+ * free-form var with no default (buildPageEnv then omits it).
+ */
+function envPlaceholder(v: EnvVarSpec): string {
+  if (v.type === 'text') {
+    return v.defaultValue
+      ? t('pageMgr.envTextDefault', { v: v.defaultValue })
+      : t('pageMgr.envTextPlaceholder')
+  }
+  return v.defaultPath
+    ? t('pageMgr.configEnvPlaceholder', { path: v.defaultPath })
+    : t('pageMgr.configEnvInputPlaceholder')
+}
+
+/* ---- B2: the page's free-form KEY=VALUE rows (shared editor, its own save button) ----
+   Unlike the dir vars above there is no discrete change event to commit on — a row is only
+   finished when the user says so — hence an explicit save instead of @change. */
+const customEnvRef = ref<InstanceType<typeof CustomEnvEditor> | null>(null)
+
+async function saveCustomEnv(): Promise<void> {
+  const p = page.value
+  const editor = customEnvRef.value
+  if (!p || !editor) return
+  const draft = editor.collect()
+  if (!draft.ok) {
+    ElMessage.error(draft.message)
+    return
+  }
+  const next: Record<string, Record<string, string>> = JSON.parse(
+    JSON.stringify(settingsStore.settings.pageCustomEnvs || {})
+  )
+  // An emptied row deletes that variable: `KEY: ''` would really inject an empty value.
+  if (Object.keys(draft.envs).length) next[p.id] = draft.envs
+  else delete next[p.id]
+  try {
+    await settingsStore.patch({ pageCustomEnvs: next })
+    ElMessage.success(t('pageMgr.msgConfigSaved'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+
 /* ---- update row (from the shared update survey, matched by install dir) ---- */
 const updateRow = computed<UpdateCheckResult | null>(
   () => updates.results.find((r) => r.dir === page.value?.dir) ?? null
@@ -141,6 +186,23 @@ const statusText = computed(() => {
 })
 const statusClass = computed(() => `st-${page.value?.status || 'stopped'}`)
 
+/* ---- C2: the same page in its own window ---- */
+const canPopout = computed(() => {
+  const p = page.value
+  return Boolean(p && !p.external && p.kind !== 'terminal')
+})
+
+function popout(): void {
+  const p = page.value
+  if (!p) return
+  window.container
+    .openPageWindow?.(p.id)
+    .then((res) => {
+      if (res && !res.ok) ElMessage.error(res.error || t('common.unknownError'))
+    })
+    .catch((err) => ElMessage.error((err as Error).message))
+}
+
 // The survey may not have run yet when the panel first opens — nudge a cached check.
 onMounted(() => {
   if (!updates.results.length) updates.check().catch(() => undefined)
@@ -154,6 +216,7 @@ onMounted(() => {
   <div v-else class="appmgr">
     <header class="head">
       <div class="head-main">
+        <img v-if="page.iconUrl" class="head-icon" :src="page.iconUrl" alt="" />
         <span class="name neon">{{ page.name }}</span>
         <span class="status" :class="statusClass">{{ statusText }}</span>
         <el-tag v-if="(page.crashes || 0) > 0" size="small" type="danger" effect="plain" round>
@@ -194,6 +257,10 @@ onMounted(() => {
         >
           {{ t('pageMgr.actionTerminal') }}
         </el-button>
+        <!-- C2: the page in its own window; a terminal row has nothing to show there. -->
+        <el-button v-if="canPopout" size="small" :title="t('pageMgr.popoutTip')" @click="popout">
+          {{ t('pageMgr.actionPopout') }}
+        </el-button>
       </div>
       <label class="row-switch">
         <el-switch v-model="autoStart" size="small" />
@@ -216,13 +283,22 @@ onMounted(() => {
       </div>
       <div v-for="v in page.envVars || []" :key="v.key" class="field env">
         <span class="label" :title="v.key">{{ v.label || v.key }}</span>
-        <el-input v-model="envDrafts[v.key]" size="small" class="env-input" @change="saveEnv(v.key)">
-          <template #append>
+        <el-input
+          v-model="envDrafts[v.key]"
+          size="small"
+          class="env-input"
+          :placeholder="envPlaceholder(v)"
+          @change="saveEnv(v.key)"
+        >
+          <!-- A directory gets a picker; a free-form value that opens a folder is a trap. -->
+          <template v-if="v.type !== 'text'" #append>
             <el-button size="small" @click="browseEnv(v.key)">{{ t('appmgr.browse') }}</el-button>
           </template>
         </el-input>
         <span v-if="v.description" class="hint">{{ v.description }}</span>
       </div>
+      <CustomEnvEditor ref="customEnvRef" :page-id="pageId" />
+      <el-button size="small" @click="saveCustomEnv">{{ t('common.save') }}</el-button>
     </section>
 
     <section class="blk">
@@ -274,6 +350,16 @@ onMounted(() => {
 .head .name {
   font-size: 14px;
   font-weight: 650;
+}
+
+/* D1: the manifest's own icon when it ships one; the row text needs no shift for it. */
+.head-icon {
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  vertical-align: -5px;
+  object-fit: contain;
+  border-radius: 5px;
 }
 
 .head .status {
