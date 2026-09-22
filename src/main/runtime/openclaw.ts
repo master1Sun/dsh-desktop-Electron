@@ -11,6 +11,7 @@ import {
   updateSettings
 } from '../shell/store'
 import { getNodeExePath, bundledEnv } from './node-runtime'
+import { bridgeEnvVars } from './mcp-bridge'
 import type { ContainerManifest } from './pages'
 import { m, msgIn } from '../shell/i18n'
 import { OPENCLAW_DEFAULT_PORT } from '../../shared/types'
@@ -77,7 +78,9 @@ function resolveOpenclawCommand(): { cmd: string; script: string } | null {
 
 /** env with the openclaw config home pointed at the resolved location. */
 function openclawEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...extra })
+  // The MCP bridge pointers ride along too: openclaw discovers the hub's tool catalog
+  // through DSH_MCP_CATALOG instead of the container guessing its config format.
+  return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...bridgeEnvVars(), ...extra })
 }
 
 /**

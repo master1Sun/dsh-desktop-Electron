@@ -55,6 +55,13 @@ function metaFor(id: string, envVars?: EnvVarSpec[]): PageMeta {
   return { id, name: id, dir: scratch, port: 0, startCommand: '', envVars }
 }
 
+/** The MCP bridge rides along on every spawn (design); the chains under test here are the
+    declared/free-form ones, so exact-equality assertions look at the page's own vars only. */
+function pageEnv(meta: PageMeta): Record<string, string> {
+  const { DSH_MCP_BRIDGE_DIR, DSH_MCP_CATALOG, DSH_MCP_CONFIG_JSON, ...rest } = buildPageEnv(meta)
+  return rest
+}
+
 const ENV_ROOT = join(scratch, 'env')
 
 /** Point the whole env chain at a scratch tree so the case never touches a real `~/.dsh`. */
@@ -85,7 +92,7 @@ afterEach(() => {
 
 describe('declared directory vars', () => {
   it('expands {envRoot} in a default and creates the directory', () => {
-    const env = buildPageEnv(
+    const env = pageEnv(
       metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/fixture' }])
     )
     // The placeholder is substituted textually, so the manifest's own separator survives
@@ -98,7 +105,7 @@ describe('declared directory vars', () => {
   it('lets a user override beat the declared default, and expands ~', () => {
     stubProcessEnv('FIXTURE_HOME', undefined)
     updateSettings({ pageEnvs: { p1: { FIXTURE_HOME: '~/fixture-override' } } })
-    const env = buildPageEnv(
+    const env = pageEnv(
       metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/fixture' }])
     )
     expect(env.FIXTURE_HOME).toBe(join(homedir(), 'fixture-override'))
@@ -107,24 +114,24 @@ describe('declared directory vars', () => {
   it('lets the inherited process env beat both', () => {
     stubProcessEnv('FIXTURE_HOME', join(scratch, 'from-process'))
     updateSettings({ pageEnvs: { p1: { FIXTURE_HOME: join(scratch, 'from-settings') } } })
-    const env = buildPageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/x' }]))
+    const env = pageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/x' }]))
     expect(env.FIXTURE_HOME).toBe(join(scratch, 'from-process'))
   })
 
   it('omits a var with nothing behind it instead of injecting an empty string', () => {
-    expect(buildPageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME' }]))).toEqual({})
+    expect(pageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME' }]))).toEqual({})
   })
 
   it('keeps an unusable spec row out of the way', () => {
     // A manifest row missing its key can't be edited or injected — skip it, don't spawn `""=`.
-    expect(buildPageEnv(metaFor('p1', [{ key: '' }]))).toEqual({})
-    expect(buildPageEnv(metaFor('p1', undefined))).toEqual({})
+    expect(pageEnv(metaFor('p1', [{ key: '' }]))).toEqual({})
+    expect(pageEnv(metaFor('p1', undefined))).toEqual({})
   })
 })
 
 describe('declared text vars', () => {
   it('falls back to the manifest default and stays verbatim', () => {
-    const env = buildPageEnv(
+    const env = pageEnv(
       metaFor('p1', [{ key: 'FIXTURE_FLAG', type: 'text', defaultValue: ' {envRoot}/literal ' }])
     )
     // No expansion for a text value: `~`/`{envRoot}` are directory conventions, and a feature
@@ -135,14 +142,14 @@ describe('declared text vars', () => {
   it('prefers the user override, then the inherited env, over the default', () => {
     const spec: EnvVarSpec[] = [{ key: 'FIXTURE_FLAG', type: 'text', defaultValue: 'from-manifest' }]
     updateSettings({ pageEnvs: { p1: { FIXTURE_FLAG: 'from-settings' } } })
-    expect(buildPageEnv(metaFor('p1', spec))).toEqual({ FIXTURE_FLAG: 'from-settings' })
+    expect(pageEnv(metaFor('p1', spec))).toEqual({ FIXTURE_FLAG: 'from-settings' })
     stubProcessEnv('FIXTURE_FLAG', 'from-process')
-    expect(buildPageEnv(metaFor('p1', spec))).toEqual({ FIXTURE_FLAG: 'from-process' })
+    expect(pageEnv(metaFor('p1', spec))).toEqual({ FIXTURE_FLAG: 'from-process' })
   })
 
   it('injects nothing for an optional flag nobody set', () => {
     updateSettings({ pageEnvs: { p1: { FIXTURE_FLAG: '   ' } } })
-    expect(buildPageEnv(metaFor('p1', [{ key: 'FIXTURE_FLAG', type: 'text' }]))).toEqual({})
+    expect(pageEnv(metaFor('p1', [{ key: 'FIXTURE_FLAG', type: 'text' }]))).toEqual({})
   })
 })
 
@@ -151,7 +158,7 @@ describe('free-form overrides', () => {
     updateSettings({
       pageCustomEnvs: { p1: { FIXTURE_HOME: join(scratch, 'user-picked') } }
     })
-    const env = buildPageEnv(
+    const env = pageEnv(
       metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/fixture' }])
     )
     expect(env.FIXTURE_HOME).toBe(join(scratch, 'user-picked'))
@@ -159,7 +166,7 @@ describe('free-form overrides', () => {
 
   it('passes values through without expansion', () => {
     updateSettings({ pageCustomEnvs: { p1: { FIXTURE_URL: '{envRoot}/raw', FIXTURE_TILDE: '~/raw' } } })
-    const env = buildPageEnv(metaFor('p1'))
+    const env = pageEnv(metaFor('p1'))
     expect(env).toEqual({ FIXTURE_URL: '{envRoot}/raw', FIXTURE_TILDE: '~/raw' })
   })
 
@@ -177,17 +184,17 @@ describe('free-form overrides', () => {
         }
       }
     })
-    expect(buildPageEnv(metaFor('p1'))).toEqual({ GOOD_KEY: '1' })
+    expect(pageEnv(metaFor('p1'))).toEqual({ GOOD_KEY: '1' })
   })
 
   it('is scoped to the page it was written for', () => {
     updateSettings({ pageCustomEnvs: { other: { FIXTURE_FLAG: 'leak' } } })
-    expect(buildPageEnv(metaFor('p1', [{ key: 'FIXTURE_FLAG', type: 'text' }]))).toEqual({})
+    expect(pageEnv(metaFor('p1', [{ key: 'FIXTURE_FLAG', type: 'text' }]))).toEqual({})
   })
 
   it('still injects a value stored as a number by an imported snapshot', () => {
     updateSettings({ pageCustomEnvs: { p1: { FIXTURE_PORT: 8123 as unknown as string } } })
-    expect(buildPageEnv(metaFor('p1'))).toEqual({ FIXTURE_PORT: '8123' })
+    expect(pageEnv(metaFor('p1'))).toEqual({ FIXTURE_PORT: '8123' })
   })
 })
 

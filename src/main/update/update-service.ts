@@ -8,6 +8,11 @@ import { getNodeExePath } from '../runtime/node-runtime'
 import { getDshStatus, repairPnpmCmd } from '../runtime/dsh'
 import { openclawVersion } from '../runtime/openclaw'
 import { resolveInstallDir, getSettings } from '../shell/store'
+import {
+  MCP_PKG_GROUP,
+  mcpPackagesRoot,
+  mcpPackagesStatus
+} from '../runtime/mcp-packages'
 import { m } from '../shell/i18n'
 import { logEvent } from '../shell/events'
 import {
@@ -191,7 +196,8 @@ async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
       (await getDshStatus()).version,
       dshChannel()
     ),
-    checkBuiltin('OpenClaw', openclawRoot() || '', OPENCLAW_PKG, openclawVersion())
+    checkBuiltin('OpenClaw', openclawRoot() || '', OPENCLAW_PKG, openclawVersion()),
+    checkMcpPackages()
   ])
 }
 
@@ -424,6 +430,95 @@ async function reprovisionOpenclaw(
 }
 
 /**
+ * One aggregated update row for the curated MCP server packages (userData/mcp). The panel
+ * shows a single group row rather than one per package: they install together and the version
+ * column reads "installed/total" while some are still missing (no real npm package backs
+ * MCP_PKG_GROUP — it is a synthetic marker the renderer matches on to offer the group's install
+ * button).
+ */
+async function checkMcpPackages(): Promise<UpdateCheckResult> {
+  const name = m('upd.mcpName')
+  const base: UpdateCheckResult = {
+    name,
+    dir: mcpPackagesRoot() || '',
+    isContainer: false,
+    ok: false,
+    source: 'builtin',
+    packageName: MCP_PKG_GROUP,
+    action: 'reprovision',
+    canAutoUpdate: true
+  }
+  const statuses = mcpPackagesStatus()
+  const missing = statuses.filter((s) => !s.installed).length
+  let registryDown = false
+  let outdated: string | null = null
+  for (const s of statuses) {
+    if (!s.installed) continue
+    const latest = await fetchNpmLatest(s.pkg)
+    if (!latest) registryDown = true
+    else if (s.version && isNewer(s.version, latest)) outdated = outdated || s.pkg
+  }
+  if (missing === 0 && registryDown)
+    return { ...base, currentVersion: `${statuses.length}`, error: m('upd.registryUnreachable') }
+  const currentVersion = missing ? `${statuses.length - missing}/${statuses.length}` : statuses[0]?.version
+  return {
+    ...base,
+    ok: true,
+    currentVersion,
+    hasUpdate: missing > 0 || outdated !== null,
+    latestVersion: missing ? m('upd.mcpMissingCount', { n: missing }) : outdated ? `${m('upd.mcpOutdatedPrefix')} ${outdated}` : undefined
+  }
+}
+
+/**
+ * Install/refresh every curated MCP server package into userData/mcp with the bundled npm
+ * (registry routed like every other install; `--no-save` keeps the folder purely a store).
+ * `pinned` applies one version to all of them — the coarse escape hatch after a bad upstream
+ * release; a package without that version fails the whole install loudly, which is intended.
+ */
+async function installMcpPackages(
+  pinned?: string,
+  onProgress?: ProgressCb,
+  rowName?: string
+): Promise<UpdateOutcome> {
+  const name = m('upd.mcpName')
+  const root = mcpPackagesRoot()
+  if (!root) return { name, ok: false, updated: false, error: m('upd.mcpRootMissing') }
+  const watch = npmWatcher(rowName || name, 'mcp', onProgress)
+  const before = mcpPackagesStatus()
+    .filter((s) => s.installed)
+    .map((s) => `${s.pkg}@${s.version}`)
+    .join(',')
+  try {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, '.npmrc'), `registry=${registryUrl()}\n`)
+    const node = getNodeExePath()
+    const npmCli = bundledNpmCli()
+    if (!existsSync(npmCli)) throw new Error(m('upd.npmMissing', { npm: npmCli }))
+    const specs = mcpPackagesStatus().map((s) => `${s.pkg}@${pinned || 'latest'}`)
+    await runNpm(
+      node,
+      [npmCli, 'install', '--global', '--no-save', '--prefix', root, ...specs, '--ignore-scripts', '--no-audit', '--no-fund'],
+      { ...process.env, npm_config_prefix: root },
+      15 * 60_000,
+      watch
+    )
+  } catch (err) {
+    return { name, ok: false, updated: false, error: (err as Error).message || String(err) }
+  }
+  const after = mcpPackagesStatus()
+    .filter((s) => s.installed)
+    .map((s) => `${s.pkg}@${s.version}`)
+    .join(',')
+  return {
+    name,
+    ok: true,
+    updated: after !== before,
+    message: after !== before ? m('upd.mcpReady') : m('upd.mcpAlreadyReady', { after: after || '?' })
+  }
+}
+
+/**
  * Install (or upgrade) a built-in agent runtime with the bundled npm.
  *
  * The same code path the 关于与更新 panel's reprovision row drives, surfaced as a
@@ -438,6 +533,15 @@ async function reprovisionOpenclaw(
  */
 export async function provisionBuiltin(kind: BuiltinKind, pinned?: string): Promise<UpdateOutcome> {
   const version = (pinned || '').trim()
+  if (kind === 'mcp') {
+    const result = await installMcpPackages(version)
+    logEvent(
+      result.ok
+        ? { level: 'info', kind: 'runtime.provision', detail: result.message, meta: { name: kind } }
+        : { level: 'error', kind: 'runtime.provisionFail', detail: result.error, meta: { name: kind } }
+    )
+    return result
+  }
   const result = kind === 'dsh' ? await updateDshSelf(version) : await reprovisionOpenclaw(version)
   logEvent(
     result.ok
@@ -491,9 +595,11 @@ async function runUpdate(
     case 'reprovision':
       // Stream npm's own output as an indeterminate row, keyed by this row's name so both the
       // panel's inline bar and the window top bar light up for a built-in runtime update.
-      return target.packageName === DSH_PKG
-        ? updateDshSelf(undefined, onProgress, target.name)
-        : reprovisionOpenclaw(undefined, onProgress, target.name)
+      return target.packageName === MCP_PKG_GROUP
+        ? installMcpPackages(undefined, onProgress, target.name)
+        : target.packageName === DSH_PKG
+          ? updateDshSelf(undefined, onProgress, target.name)
+          : reprovisionOpenclaw(undefined, onProgress, target.name)
     case 'manual':
       return {
         name: target.name,

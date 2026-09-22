@@ -5,6 +5,7 @@ import { QuestionFilled, Download, Connection, Document, Tickets } from '@elemen
 import PageManager from './PageManager.vue'
 import DshManager from './DshManager.vue'
 import OpenclawManager from './OpenclawManager.vue'
+import McpManager from './McpManager.vue'
 import ExternalSitesManager from './ExternalSitesManager.vue'
 import SettingsPanel from './SettingsPanel.vue'
 import AppManager from './AppManager.vue'
@@ -65,6 +66,9 @@ const settingsStore = useSettingsStore()
 const DSH_PKG = '@deepseek-ai/dsh'
 function builtinKind(row: UpdateCheckResult): BuiltinKind | null {
   if (row.source !== 'builtin' || !row.packageName) return null
+  // The MCP group row carries a synthetic package name (see runtime/mcp-packages) — same
+  // install-button flow as dsh/openclaw, just provisioning userData/mcp.
+  if (row.packageName.startsWith('@modelcontextprotocol/')) return 'mcp'
   return row.packageName === DSH_PKG ? 'dsh' : 'openclaw'
 }
 function notInstalledBuiltin(row: UpdateCheckResult): boolean {
@@ -434,14 +438,19 @@ const statusLabel = (r: UpdateCheckResult): string =>
 const statusType = (r: { ok: boolean; hasUpdate?: boolean }): string =>
   !r.ok ? 'info' : r.hasUpdate ? 'warning' : 'success'
 
-/** Short provenance tag for built-in rows so they read apart from git repos. */
-const sourceTag = (r: { name: string; source?: string; action?: string }): string | null =>
+/** Short provenance tag for built-in rows so they read apart from git repos. Routed through
+    builtinKind (package-name based) instead of a name match: the MCP group row's bilingual
+    name contains neither 'DSH' nor 'OpenClaw', and used to fall through to the OpenClaw tag. */
+const BUILTIN_TAGS: Record<BuiltinKind, string> = {
+  dsh: 'DeepSeek Harness',
+  openclaw: 'OpenClaw',
+  mcp: 'MCP'
+}
+const sourceTag = (r: UpdateCheckResult): string | null =>
   r.source === 'builtin'
     ? r.action === 'none'
       ? t('panel.tagBuiltin')
-      : r.name.includes('DSH')
-        ? 'DSH'
-        : 'OpenClaw'
+      : BUILTIN_TAGS[builtinKind(r) ?? 'openclaw']
     : null
 
 /** The middle column shows a branch for git rows, the registry latest for version rows. */
@@ -714,6 +723,10 @@ async function doImportSnapshot(): Promise<void> {
       <OpenclawManager />
     </section>
 
+    <section v-else-if="props.panel === 'mcp'" class="sec">
+      <McpManager />
+    </section>
+
     <!-- Help: 关于 + 更新 + 诊断 + 日志 merged into one panel, split by a vertical tab rail. -->
     <section v-else-if="props.panel === 'help'" class="sec help">
       <el-tabs v-model="helpTab" class="help-tabs" tab-position="left">
@@ -961,68 +974,69 @@ async function doImportSnapshot(): Promise<void> {
                 <el-tag size="small" round :type="statusType(row)">{{ statusLabel(row) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column :label="t('panel.colAction')" width="130" align="right">
+            <el-table-column :label="t('panel.colAction')" width="150" align="right">
               <template #default="{ row }">
-                <el-button
-                  v-if="row.pendingRestart"
-                  size="small"
-                  type="primary"
-                  round
-                  @click="relaunchNow"
-                >
-                  {{ t('panel.restartNowBtn') }}
-                </el-button>
-                <el-button
-                  v-else-if="notInstalledBuiltin(row)"
-                  size="small"
-                  type="primary"
-                  round
-                  :loading="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
-                  @click="installBuiltinRow(row)"
-                >
-                  {{ t('panel.installBtn') }}
-                </el-button>
-                <el-button
-                  v-else-if="row.hasUpdate && row.canAutoUpdate"
-                  size="small"
-                  type="primary"
-                  round
-                  :loading="updates.updating === row.name"
-                  @click="updates.perform(row)"
-                >
-                  {{ t('panel.updateBtn') }}
-                </el-button>
-                <el-button
-                  v-else-if="row.isContainer && row.canRollback"
-                  size="small"
-                  round
-                  type="warning"
-                  plain
-                  @click="rollbackNow(row)"
-                >
-                  {{ t('panel.rollbackBtn') }}
-                </el-button>
-                <el-tooltip
-                  v-else-if="row.hasUpdate"
-                  :content="t('panel.manualTip')"
-                  placement="top"
-                >
-                  <el-button size="small" round disabled>{{ t('panel.manualBtn') }}</el-button>
-                </el-tooltip>
-                <el-button
-                  v-else-if="row.pageId"
-                  size="small"
-                  round
-                  :loading="resetting === row.name"
-                  @click="resetBuiltinRow(row)"
-                >
-                  {{ t('panel.resetBtn') }}
-                </el-button>
-                <!-- B3: a built-in runtime can always be re-provisioned at an exact version. -->
-                <div v-if="builtinKind(row)" class="cell-sub">
+                <div class="act-cell">
                   <el-button
+                    v-if="row.pendingRestart"
                     size="small"
-                    text
+                    type="primary"
+                    round
+                    @click="relaunchNow"
+                  >
+                    {{ t('panel.restartNowBtn') }}
+                  </el-button>
+                  <el-button
+                    v-else-if="notInstalledBuiltin(row)"
+                    size="small"
+                    type="primary"
+                    round
+                    :loading="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
+                    @click="installBuiltinRow(row)"
+                  >
+                    {{ t('panel.installBtn') }}
+                  </el-button>
+                  <el-button
+                    v-else-if="row.hasUpdate && row.canAutoUpdate"
+                    size="small"
+                    type="primary"
+                    round
+                    :loading="updates.updating === row.name"
+                    @click="updates.perform(row)"
+                  >
+                    {{ t('panel.updateBtn') }}
+                  </el-button>
+                  <el-button
+                    v-else-if="row.isContainer && row.canRollback"
+                    size="small"
+                    round
+                    type="warning"
+                    plain
+                    @click="rollbackNow(row)"
+                  >
+                    {{ t('panel.rollbackBtn') }}
+                  </el-button>
+                  <el-tooltip
+                    v-else-if="row.hasUpdate"
+                    :content="t('panel.manualTip')"
+                    placement="top"
+                  >
+                    <el-button size="small" round disabled>{{ t('panel.manualBtn') }}</el-button>
+                  </el-tooltip>
+                  <el-button
+                    v-else-if="row.pageId"
+                    size="small"
+                    round
+                    :loading="resetting === row.name"
+                    @click="resetBuiltinRow(row)"
+                  >
+                    {{ t('panel.resetBtn') }}
+                  </el-button>
+                  <!-- B3: a built-in runtime can always be re-provisioned at an exact version. -->
+                  <el-button
+                    v-if="builtinKind(row)"
+                    size="small"
+                    round
                     :disabled="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
                     @click="provisionPinned(row)"
                   >
@@ -1329,6 +1343,20 @@ async function doImportSnapshot(): Promise<void> {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Update-table action cell: the primary button and the 指定版本 text link share one
+   right-aligned row (vertically centered against the status tag) instead of stacking —
+   the old two-line layout left the link floating alone on rows without a button. */
+.el-table :deep(.act-cell) {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  white-space: nowrap;
+}
+.el-table :deep(.act-cell .el-button + .el-button) {
+  margin-left: 0;
 }
 
 .upd-progress {

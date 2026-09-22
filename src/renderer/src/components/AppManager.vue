@@ -187,11 +187,6 @@ const statusText = computed(() => {
 const statusClass = computed(() => `st-${page.value?.status || 'stopped'}`)
 
 /* ---- C2: the same page in its own window ---- */
-const canPopout = computed(() => {
-  const p = page.value
-  return Boolean(p && !p.external && p.kind !== 'terminal')
-})
-
 function popout(): void {
   const p = page.value
   if (!p) return
@@ -257,8 +252,8 @@ onMounted(() => {
         >
           {{ t('pageMgr.actionTerminal') }}
         </el-button>
-        <!-- C2: the page in its own window; a terminal row has nothing to show there. -->
-        <el-button v-if="canPopout" size="small" :title="t('pageMgr.popoutTip')" @click="popout">
+        <!-- C2: the page in its own window; a CLI page starts a second, independent session there. -->
+        <el-button size="small" :title="t('pageMgr.popoutTip')" @click="popout">
           {{ t('pageMgr.actionPopout') }}
         </el-button>
       </div>

@@ -10,6 +10,8 @@ import {
   type ImportOptions,
   type InstallProgress,
   type ListEventsArgs,
+  type McpCallToolArgs,
+  type McpServerSpec,
   type PageProgress,
   type ReadLogsArgs,
   type UpdateCheckResult,
@@ -53,6 +55,8 @@ const api = {
     ipcRenderer.invoke(IPC.PreflightImport, source, isDir),
   chooseDirectory: (title?: string) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id: string) => ipcRenderer.invoke(IPC.RemovePage, id),
+  setPageDisabled: (id: string, disabled: boolean) =>
+    ipcRenderer.invoke(IPC.SetPageDisabled, id, disabled),
   resetBuiltinPage: (id: string) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),
   setPagePort: (id: string, port?: number) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
   openExternal: (url: string) => ipcRenderer.invoke(IPC.OpenPageExternal, url),
@@ -216,6 +220,21 @@ const api = {
     const listener = (_e: Electron.IpcRendererEvent, metrics: PageMetrics[]): void => cb(metrics)
     ipcRenderer.on(IPC.OnPageMetrics, listener)
     return () => ipcRenderer.removeListener(IPC.OnPageMetrics, listener)
+  },
+  // MCP Client Hub: registry CRUD + connect lifecycle + tool catalog/calls.
+  mcpListServers: () => ipcRenderer.invoke(IPC.McpListServers),
+  mcpSaveServer: (spec: McpServerSpec) => ipcRenderer.invoke(IPC.McpSaveServer, spec),
+  mcpRemoveServer: (id: string) => ipcRenderer.invoke(IPC.McpRemoveServer, id),
+  mcpConnect: (id: string) => ipcRenderer.invoke(IPC.McpConnect, id),
+  mcpDisconnect: (id: string) => ipcRenderer.invoke(IPC.McpDisconnect, id),
+  mcpListTools: (serverId?: string) => ipcRenderer.invoke(IPC.McpListTools, serverId),
+  mcpCallTool: (args: McpCallToolArgs) => ipcRenderer.invoke(IPC.McpCallTool, args),
+  mcpBridgeInfo: () => ipcRenderer.invoke(IPC.McpBridgeInfo),
+  mcpPackagesStatus: () => ipcRenderer.invoke(IPC.McpPackagesStatus),
+  onMcpStateChanged: (cb: (states: unknown[]) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, states: unknown[]): void => cb(states)
+    ipcRenderer.on(IPC.OnMcpStateChanged, listener)
+    return () => ipcRenderer.removeListener(IPC.OnMcpStateChanged, listener)
   }
 }
 

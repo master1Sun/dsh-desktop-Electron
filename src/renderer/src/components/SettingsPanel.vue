@@ -23,6 +23,7 @@ import type {
 } from '../../../shared/types'
 import {
   GLASS_BLUR_MAX_PX,
+  GLASS_FROST_MAX_PCT,
   NPM_REGISTRY_DEFAULT,
   REGISTRY_CANDIDATES,
   DEFAULT_KEYBINDINGS,
@@ -207,6 +208,15 @@ async function saveKeybinding(action: KeybindingAction, accel: string): Promise<
   await patch({ keybindings: next }, t('settings.keysSaved'))
 }
 
+/** Drop one row's override so it falls back to its built-in default — the row-level
+    counterpart of the header's whole-table reset. Deleting the key (not writing '')
+    matters: '' persists as "explicitly unbound". */
+async function restoreKeybinding(action: KeybindingAction): Promise<void> {
+  const next = { ...(settingsStore.settings.keybindings || {}) }
+  delete next[action]
+  await patch({ keybindings: next }, t('settings.keysResetDone'))
+}
+
 /**
  * Capture-mode keydown. The recorder owns the key, so both the global handler in App.vue and the
  * focused hosted page must be kept from also acting on it — hence preventDefault + stop.
@@ -336,14 +346,21 @@ const viewValue = computed({
 
 const viewOptions = computed(() => {
   type Option = { value: string; label: string; disabled?: boolean }
+  const dv = settingsStore.settings.defaultView
   const plain: Option[] = [
     { value: 'none', label: t('settings.nonePage') },
     // Not gated on `status === 'running'` anymore: the container now auto-starts the
     // configured default page on launch, so any page can be picked.
-    ...pagesStore.pages.map<Option>((p) => ({
-      value: `page:${p.id}`,
-      label: `${p.name}${p.external ? t('settings.tagExternal') : p.kind === 'dsh' ? t('settings.tagDsh') : p.kind === 'terminal' ? t('settings.tagTerminal') : p.containerPort || p.port ? ` :${p.containerPort || p.port}` : ''}`
-    }))
+    // Disabled pages leave the picker entirely — except the one already saved as the
+    // default, which stays as a greyed row so the select doesn't show a blank current
+    // value; re-enabling the page hands the choice back untouched.
+    ...pagesStore.pages
+      .filter((p) => !p.disabled || (dv.kind === 'page' && dv.pageId === p.id))
+      .map<Option>((p) => ({
+        value: `page:${p.id}`,
+        disabled: p.disabled || undefined,
+        label: `${p.name}${p.disabled ? ` ${t('pageMgr.disabledTag')}` : p.external ? t('settings.tagExternal') : p.kind === 'dsh' ? t('settings.tagDsh') : p.kind === 'terminal' ? t('settings.tagTerminal') : p.containerPort || p.port ? ` :${p.containerPort || p.port}` : ''}`
+      }))
   ]
   // Saved external addresses are default-view candidates too — one row per site, keyed by
   // its URL (the persisted DefaultView only carries the url, not the site id).
@@ -351,7 +368,6 @@ const viewOptions = computed(() => {
   const extOptions: Option[] = sites.map((s) => ({ value: `ext:${s.url}`, label: s.name }))
   // A saved default whose site was since deleted still needs a matching option, or the
   // select would show a blank current value — keep the raw url as a fallback row.
-  const dv = settingsStore.settings.defaultView
   const orphanUrl = dv.kind === 'external' ? (dv.url || '').trim() : ''
   if (orphanUrl && !sites.some((s) => s.url === orphanUrl)) {
     extOptions.push({ value: `ext:${orphanUrl}`, label: orphanUrl })
@@ -396,6 +412,11 @@ function onLocaleChange(next: 'zh' | 'en'): void {
 const FROST_BLUR_MAX_PX = GLASS_BLUR_MAX_PX // frost 100 → the shared blur ceiling (25px)
 const FROST_ALPHA_TOP = 96 // frost 0 → 96% opaque (near-solid)
 const FROST_ALPHA_BOTTOM = 8 // frost 100 → 8% opaque (very transparent)
+/** UI cap: the slider tops out at 40 (of the 0-100 frost scale) ≈ 10px blur / 61% opaque —
+    past that the frosting reads as a smudge, so the scale itself stops here. Shared with
+    App.vue's render clamps so stale settings can't outlive the ceiling either. Anything the
+    user drags or a stale setting carries above this level clamps on display. */
+const FROST_MAX = GLASS_FROST_MAX_PCT
 function blurFromFrost(f: number): number {
   return Math.round((f / 100) * FROST_BLUR_MAX_PX)
 }
@@ -405,7 +426,7 @@ function alphaFromFrost(f: number): number {
 /** Derive the displayed frost level from the persisted blur (opacity is redundant now). */
 function frostFromSettings(): number {
   const blur = settingsStore.settings.glassBlur ?? 30
-  return Math.min(100, Math.max(0, Math.round((blur / FROST_BLUR_MAX_PX) * 100)))
+  return Math.min(FROST_MAX, Math.max(0, Math.round((blur / FROST_BLUR_MAX_PX) * 100)))
 }
 const frostDraft = ref(frostFromSettings())
 watch(
@@ -684,7 +705,7 @@ onMounted(loadWebData)
               <el-slider
                 v-model="frostDraft"
                 :min="0"
-                :max="100"
+                :max="FROST_MAX"
                 :step="1"
                 class="set-slider"
                 @input="previewFrost"
@@ -933,10 +954,24 @@ onMounted(loadWebData)
             @blur="recording = null"
             @keydown="onRecordKeydown(row.action, $event)"
           />
+          <!-- A customized row gets "restore default" back; a stock row keeps "clear"
+               (unbind). The old clear-on-custom rows left the action unbound with no way
+               back to its default short of the whole-table reset. -->
           <el-button
+            v-if="row.custom"
             size="small"
             text
-            :disabled="!row.text && !row.custom"
+            type="primary"
+            :title="t('settings.keysReset')"
+            @click="restoreKeybinding(row.action)"
+          >
+            {{ t('settings.keysReset') }}
+          </el-button>
+          <el-button
+            v-else
+            size="small"
+            text
+            :disabled="!row.text"
             @click="saveKeybinding(row.action, '')"
           >
             {{ t('settings.keysClear') }}

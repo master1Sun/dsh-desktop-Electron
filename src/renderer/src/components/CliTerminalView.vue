@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import type { PageState } from '../stores/pages'
+import { useIsLight } from '../composables/useTheme'
 import { t } from '../i18n'
 
 const props = defineProps<{ page: PageState | null }>()
@@ -55,10 +56,11 @@ function queueWrite(data: string): void {
   requestAnimationFrame(flushWrite)
 }
 
-/** 终端配色跟随应用白天/黑夜主题（与内嵌终端抽屉一致）。 */
+/** 终端配色跟随应用白天/黑夜主题（与内嵌终端抽屉一致）。isLight 是 html.light 类的
+    响应式镜像：直接 watch DOM 属性永远不会触发，主题切换靠它驱动下面的 watch。 */
+const { isLight } = useIsLight()
 function themeColors(): { bg: string; fg: string } {
-  const light = document.documentElement.classList.contains('light')
-  return light ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
+  return isLight.value ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
 }
 
 function ensureTerm(): void {
@@ -180,7 +182,7 @@ watch(
 )
 
 watch(
-  () => document.documentElement.className,
+  isLight,
   () => {
     if (!term) return
     const c = themeColors()
@@ -219,19 +221,61 @@ onBeforeUnmount(stopPty)
 
 <style scoped>
 .cli-term {
-  position: relative;
-  flex: 1;
-  /* .content 是块级容器，必须显式撑满高度，否则塌缩到 xterm 初始行数、下方露出页面底色 */
-  height: 100%;
-  min-height: 0;
+  /* 覆盖层而非流内块：.content 里 HomeView(.workbench, 100% 高) 常驻挂载，
+     若终端也走文档流会与其上下堆叠成 200%，出现滚动条、下拉露出内置页面。
+     绝对定位铺满内容区，z-index 压过 market-layer(10)；webview 保持挂载不销毁。 */
+  position: absolute;
+  inset: 0;
+  z-index: 20;
   display: flex;
-  background: var(--surface);
+  /* 卡片四周的留白层：暗色下 #121212，与卡片内的 xterm 黑(#000) 拉开对比，
+     间距才能被看见。 */
+  padding: 12px;
+  background: var(--surface-2);
 }
 
 .cli-term-surface {
   flex: 1;
   min-width: 0;
-  padding: 6px 4px 6px 10px;
+  min-height: 0;
+  /* 终端本体是一张带边框 + 圆角的卡片：fit() 按父元素 content-box（已扣除
+     padding/border）排行数，所以卡片内边距与边框都成为内容与边缘的间距，
+     底部最后一行不再紧贴窗口底边。 */
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  /* 卡片底色跟 xterm 主题底同色（themeColors：light=#fff / dark=#000），
+     否则内边距那一圈会和终端白底/黑底对不上。 */
+  background: #fff;
+}
+
+html.dark .cli-term-surface {
+  background: #000;
+}
+
+/* xterm 的 .xterm-viewport 用原生 overflow-y: scroll，默认那条又宽又亮、
+   还会压在卡片圆角上。收成细、半透明的悬浮式滞条，颜色沿用全局 thumb，
+   与主题一致；轨道透明，不遮挡终端内容。 */
+.cli-term-surface :deep(.xterm-viewport) {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-dim) 40%, transparent) transparent;
+}
+.cli-term-surface :deep(.xterm-viewport::-webkit-scrollbar) {
+  width: 8px;
+}
+.cli-term-surface :deep(.xterm-viewport::-webkit-scrollbar-track) {
+  background: transparent;
+}
+.cli-term-surface :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
+  background: color-mix(in srgb, var(--text-dim) 35%, transparent);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+}
+.cli-term-surface :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) {
+  background: color-mix(in srgb, var(--text-dim) 60%, transparent);
+  background-clip: content-box;
 }
 
 .cli-term-overlay {

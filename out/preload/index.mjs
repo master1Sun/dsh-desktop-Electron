@@ -15,6 +15,8 @@ const IPC = {
   PreflightImport: "container:import-preflight",
   ChooseDirectory: "container:choose-directory",
   RemovePage: "container:remove-page",
+  /** switch a built-in dsh/openclaw page off/on (disabled = hidden from switcher, never starts) */
+  SetPageDisabled: "container:set-page-disabled",
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
   ResetBuiltinPage: "container:reset-builtin-page",
   SetPagePort: "container:set-page-port",
@@ -134,7 +136,27 @@ const IPC = {
   CheckPortFree: "container:check-port-free",
   /** broadcast: a rebindable shortcut was pressed *inside* a hosted webview, so the shell window
    *  that owns the action runs it (HotkeySignal). The guest consumed nothing back. */
-  OnHotkey: "container:hotkey"
+  OnHotkey: "container:hotkey",
+  /** MCP hub: live state of every registered server → McpServerState[] */
+  McpListServers: "container:mcp-list-servers",
+  /** MCP hub: add or update one spec (id wins over an existing row) → McpServerState[] */
+  McpSaveServer: "container:mcp-save-server",
+  /** MCP hub: disconnect (when live) and drop one server spec */
+  McpRemoveServer: "container:mcp-remove-server",
+  /** MCP hub: open the stdio connection for one server */
+  McpConnect: "container:mcp-connect",
+  /** MCP hub: close the stdio connection for one server */
+  McpDisconnect: "container:mcp-disconnect",
+  /** MCP hub: aggregated tool catalog, optionally for one server → McpToolInfo[] */
+  McpListTools: "container:mcp-list-tools",
+  /** MCP hub: invoke one tool and await its result (McpCallToolArgs → McpCallToolResult) */
+  McpCallTool: "container:mcp-call-tool",
+  /** broadcast: hub server states changed (McpServerState[]) */
+  OnMcpStateChanged: "container:mcp-state-changed",
+  /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
+  McpBridgeInfo: "container:mcp-bridge-info",
+  /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
+  McpPackagesStatus: "container:mcp-packages-status"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
@@ -159,6 +181,7 @@ const api = {
   preflightImport: (source, isDir) => ipcRenderer.invoke(IPC.PreflightImport, source, isDir),
   chooseDirectory: (title) => ipcRenderer.invoke(IPC.ChooseDirectory, title),
   removePage: (id) => ipcRenderer.invoke(IPC.RemovePage, id),
+  setPageDisabled: (id, disabled) => ipcRenderer.invoke(IPC.SetPageDisabled, id, disabled),
   resetBuiltinPage: (id) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),
   setPagePort: (id, port) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
   openExternal: (url) => ipcRenderer.invoke(IPC.OpenPageExternal, url),
@@ -310,6 +333,21 @@ const api = {
     const listener = (_e, metrics) => cb(metrics);
     ipcRenderer.on(IPC.OnPageMetrics, listener);
     return () => ipcRenderer.removeListener(IPC.OnPageMetrics, listener);
+  },
+  // MCP Client Hub: registry CRUD + connect lifecycle + tool catalog/calls.
+  mcpListServers: () => ipcRenderer.invoke(IPC.McpListServers),
+  mcpSaveServer: (spec) => ipcRenderer.invoke(IPC.McpSaveServer, spec),
+  mcpRemoveServer: (id) => ipcRenderer.invoke(IPC.McpRemoveServer, id),
+  mcpConnect: (id) => ipcRenderer.invoke(IPC.McpConnect, id),
+  mcpDisconnect: (id) => ipcRenderer.invoke(IPC.McpDisconnect, id),
+  mcpListTools: (serverId) => ipcRenderer.invoke(IPC.McpListTools, serverId),
+  mcpCallTool: (args) => ipcRenderer.invoke(IPC.McpCallTool, args),
+  mcpBridgeInfo: () => ipcRenderer.invoke(IPC.McpBridgeInfo),
+  mcpPackagesStatus: () => ipcRenderer.invoke(IPC.McpPackagesStatus),
+  onMcpStateChanged: (cb) => {
+    const listener = (_e, states) => cb(states);
+    ipcRenderer.on(IPC.OnMcpStateChanged, listener);
+    return () => ipcRenderer.removeListener(IPC.OnMcpStateChanged, listener);
   }
 };
 if (process.contextIsolated) {

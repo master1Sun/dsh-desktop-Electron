@@ -11,11 +11,12 @@ import {
   VideoPlay,
   VideoPause,
   Setting,
-  CopyDocument,
+  Share,
   Monitor,
   Document,
   SuccessFilled,
   CircleCloseFilled,
+  CircleCheck,
   WarningFilled,
   Loading,
   Minus
@@ -45,6 +46,24 @@ const activeTab = ref('install')
  */
 function runtimeMissing(row: PageState): boolean {
   return row.runtimeMissing === true
+}
+
+/** The disable switch is for the built-in dsh/openclaw rows only — an imported page is
+    removed outright, there's no reason to park it (and no imported row can ever be
+    disabled in the first place). */
+function canToggleDisable(row: PageState): boolean {
+  return row.builtin === true
+}
+
+/** Flip the settings-backed disabled flag; main stops a running page as it disables it. */
+async function toggleDisabled(row: PageState): Promise<void> {
+  const next = !row.disabled
+  try {
+    await pagesStore.setDisabled(row.id, next)
+    ElMessage.success(next ? t('pageMgr.msgDisabled') : t('pageMgr.msgEnabled'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
 }
 
 /** terminal-kind rows open a system console instead of spawning a server */
@@ -625,11 +644,10 @@ const trendRange = computed(() => {
 })
 const trendMinutes = computed(() => Math.max(1, Math.round((configHistory.value.length * 5) / 60)))
 
-/** C2: hand the row to the main process, which opens (or focuses) its own window for it. */
-function canPopout(row: PageState): boolean {
-  return !row.external && row.kind !== 'terminal'
-}
-
+/**
+ * C2: hand the row to the main process, which opens (or focuses) its own window for it. Every kind
+ * has a use now: an external page hosts its own URL, a CLI page runs a second, independent session.
+ */
 async function popoutRow(row: PageState): Promise<void> {
   try {
     const res = await window.container.openPageWindow?.(row.id)
@@ -820,12 +838,21 @@ function hasDownDep(row: PageState): boolean {
               <template #default="{ row }">
                 <div class="cell-name">
                   <!-- A missing runtime never "starts": keep the dot grey instead of implying
-                   progress (the amber 启动中 dot used to spin forever on these rows). -->
-                  <span class="status-dot" :class="runtimeMissing(row) ? 'stopped' : row.status" />
+                   progress (the amber 启动中 dot used to spin forever on these rows). A disabled
+                   page is stopped by definition — its dot must not echo a stale status. -->
+                  <span
+                    class="status-dot"
+                    :class="
+                      row.disabled || runtimeMissing(row) ? 'stopped' : row.status
+                    "
+                  />
                   <!-- D1: a manifest-shipped icon when the page provides one; the plain name
                        remains the fallback (no letter glyph to fight the status dot with). -->
                   <img v-if="row.iconUrl" class="cell-icon" :src="row.iconUrl" alt="" />
                   {{ row.name }}
+                  <span v-if="row.disabled" class="disabled-tag">
+                    {{ t('pageMgr.disabledTag') }}
+                  </span>
                 </div>
                 <div class="cell-sub">{{ row.description || row.dir }}</div>
                 <!-- #16 health + dependency / #20 resource badges (running rows only) -->
@@ -977,31 +1004,45 @@ function hasDownDep(row: PageState): boolean {
             </el-table-column>
             <el-table-column
               :label="t('pageMgr.colAction')"
-              width="190"
+              width="248"
               align="right"
               class-name="col-actions"
             >
               <template #default="{ row }">
-                <!-- Icon-only actions (with tooltips): English labels used to overflow the fixed
-                     360px column and clip, so the text buttons became glyphs. -->
+                <!-- Icon-only actions (with tooltips), color-coded so each glyph reads at a
+                     glance: green=start / amber=stop / blue=config & popout / red=remove.
+                     No `:loading` here — it used to swap the glyph for a spinner and lock the
+                     row; a booting service is now stoppable straight from this button. -->
                 <el-button
-                  v-if="!row.external && (row.kind === 'terminal' || row.containerPort || row.port)"
+                  v-if="
+                    !row.external &&
+                    !row.disabled &&
+                    (row.kind === 'terminal' || row.containerPort || row.port)
+                  "
                   size="small"
                   text
-                  :title="
-                    row.status === 'running' ? t('pageMgr.actionStop') : t('pageMgr.actionStart')
+                  :type="
+                    row.status === 'running' || row.status === 'starting'
+                      ? 'warning'
+                      : 'success'
                   "
-                  :loading="pagesStore.busy[row.id]"
+                  :title="
+                    row.status === 'running' || row.status === 'starting'
+                      ? t('pageMgr.actionStop')
+                      : t('pageMgr.actionStart')
+                  "
                   @click="
                     row.status === 'running'
                       ? pagesStore.stop(row.id)
-                      : runtimeMissing(row)
-                        ? guideForMissing(row)
-                        : runRow(row)
+                      : row.status === 'starting'
+                        ? pagesStore.cancel(row.id)
+                        : runtimeMissing(row)
+                          ? guideForMissing(row)
+                          : runRow(row)
                   "
                 >
                   <el-icon>
-                    <VideoPause v-if="row.status === 'running'" />
+                    <VideoPause v-if="row.status === 'running' || row.status === 'starting'" />
                     <VideoPlay v-else />
                   </el-icon>
                 </el-button>
@@ -1009,25 +1050,29 @@ function hasDownDep(row: PageState): boolean {
                   v-if="!row.external"
                   size="small"
                   text
+                  type="primary"
                   :title="t('pageMgr.actionConfig')"
                   @click="openConfig(row)"
                 >
                   <el-icon><Setting /></el-icon>
                 </el-button>
-                <!-- C2: a hosted http page only; a CLI page owns a full-surface terminal and an
-                     external site has no page state to detach. -->
+                <!-- C2: every row is detachable — see popoutRow() for what each kind shows there.
+                     Share (box + outgoing arrow) instead of CopyDocument: the old glyph read as
+                     "copy", not "detach into its own window". -->
                 <el-button
-                  v-if="canPopout(row)"
+                  v-if="!row.disabled"
                   size="small"
                   text
+                  type="primary"
                   :title="t('pageMgr.popoutTip')"
                   @click="popoutRow(row)"
                 >
-                  <el-icon><CopyDocument /></el-icon>
+                  <el-icon><Share /></el-icon>
                 </el-button>
                 <el-button
                   size="small"
                   text
+                  type="primary"
                   :title="t('pageMgr.actionTerminal')"
                   @click="openTerminal(row)"
                 >
@@ -1036,18 +1081,31 @@ function hasDownDep(row: PageState): boolean {
                 <el-button
                   size="small"
                   text
+                  type="primary"
                   :title="t('pageMgr.actionLogs')"
                   @click="showLogs(row)"
                 >
                   <el-icon><Document /></el-icon>
                 </el-button>
-                <!-- Built-in pages can't be removed: keep the slot as a dimmed icon + tooltip so
-                     the row width matches the removable rows in either language. -->
-                <span v-if="row.builtin" class="builtin-tag" :title="t('pageMgr.builtinTip')">
-                  <el-icon><Delete /></el-icon>
-                </span>
+                <!-- The built-in's removal substitute: switch it off (hidden from the switcher,
+                     never started) instead — reversible, and the files/entry stay intact.
+                     Filled ⊗ (CircleCloseFilled) reads as the standard "forbidden" mark; the
+                     outline variant looked like a plain close button. -->
                 <el-button
-                  v-else
+                  v-if="canToggleDisable(row)"
+                  size="small"
+                  text
+                  :type="row.disabled ? 'success' : 'warning'"
+                  :title="row.disabled ? t('pageMgr.enableTip') : t('pageMgr.disableTip')"
+                  @click="toggleDisabled(row)"
+                >
+                  <el-icon>
+                    <CircleCheck v-if="row.disabled" />
+                    <CircleCloseFilled v-else />
+                  </el-icon>
+                </el-button>
+                <el-button
+                  v-if="!row.builtin"
                   size="small"
                   text
                   type="danger"
@@ -1232,16 +1290,18 @@ function hasDownDep(row: PageState): boolean {
 </template>
 
 <style scoped>
-/* Built-in page's disabled delete glyph: a span, not an el-button, so match the sibling
-   icon buttons' height + middle alignment to keep the action row on one line. */
-.builtin-tag {
-  display: inline-flex;
-  align-items: center;
-  height: 24px;
-  vertical-align: middle;
-  color: var(--text-dim);
-  cursor: not-allowed;
+/* Next to a disabled built-in's name: the same quiet pill language as the switcher's
+   未安装 tag, so a switched-off row reads as "deliberately off", not "broken". */
+.disabled-tag {
+  flex: none;
   margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
 }
 .hint {
   color: var(--text-dim);
@@ -1441,17 +1501,46 @@ function hasDownDep(row: PageState): boolean {
   border-radius: 5px;
   font-size: 11.5px;
 }
-/* Icon-only action column: the glyphs sit on one line and keep a tight, even rhythm.
-   The 6 buttons overflow the cell without an explicit clip, which el-table otherwise
-   renders as a trailing "…" — so free the cell from ellipsis handling here. */
+/* Icon-only action column: lay the buttons out on one flex line with an even rhythm.
+   The cell keeps `overflow: visible` so the enlarged glyphs never trip el-table's
+   trailing "…" ellipsis handling. */
 .installed :deep(.col-actions .cell) {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
   white-space: nowrap;
   overflow: visible;
   text-overflow: clip;
 }
-/* Trim icon-only buttons so all six fit without the ellipsis trigger. */
+/* The flex gap owns the rhythm, so drop Element Plus's fixed sibling margin. */
+.installed :deep(.col-actions .el-button + .el-button) {
+  margin-left: 0;
+}
+/* Roomier hit area + bigger glyphs: the actions used to render as faint 14px marks
+   that were hard to tell apart at a glance. Padding stays tight — a built-in row packs
+   seven slots, and the chips + glow must fit the fixed column without clipping. */
 .installed :deep(.col-actions .el-button.is-text) {
-  padding: 4px;
+  padding: 4px 5px;
+  height: auto;
+}
+/* Highlight chip: every action sits on a soft tile tinted with its own semantic color
+   (currentColor mixes down to a pale wash), so start/stop/remove/disable read as
+   highlighted buttons instead of bare glyphs — and the hover state deepens the tile.
+   The neon glow used to come only from glass.css's `.el-button--primary` shadow, so
+   success/warning/danger rows looked flat next to the primary ones — cast it from
+   currentColor instead and every semantic type glows in its own hue. */
+.installed :deep(.col-actions .el-button.is-text) {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px color-mix(in srgb, currentColor 35%, transparent);
+}
+.installed :deep(.col-actions .el-button.is-text:hover) {
+  background: color-mix(in srgb, currentColor 26%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, currentColor 55%, transparent);
+}
+.installed :deep(.col-actions .el-icon) {
+  font-size: 18px;
 }
 /* The 启动中 status glyph reads as in-progress only if it turns (standalone el-icon has no
    built-in animation, unlike el-button's loading slot). */

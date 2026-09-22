@@ -45,6 +45,7 @@ declare module 'vue' {
     EmptyState: typeof import('./src/components/EmptyState.vue')['default']
     ExternalSitesManager: typeof import('./src/components/ExternalSitesManager.vue')['default']
     LogViewer: typeof import('./src/components/LogViewer.vue')['default']
+    McpManager: typeof import('./src/components/McpManager.vue')['default']
     MenuBar: typeof import('./src/components/MenuBar.vue')['default']
     MenuPanelContent: typeof import('./src/components/MenuPanelContent.vue')['default']
     OpenclawManager: typeof import('./src/components/OpenclawManager.vue')['default']

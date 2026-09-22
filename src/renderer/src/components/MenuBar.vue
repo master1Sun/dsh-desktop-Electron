@@ -16,6 +16,7 @@ export type PanelKind =
   | 'external'
   | 'dsh'
   | 'openclaw'
+  | 'mcp'
   | 'settings'
   | 'help'
   | 'apps'
@@ -121,6 +122,7 @@ const groups = computed<MenuGroup[]>(() => {
       actions: [
         { id: 'dsh', title: t('menu.appDsh'), panel: 'dsh' as string },
         { id: 'openclaw', title: t('menu.appOpenclaw'), panel: 'openclaw' as string },
+        { id: 'mcp', title: t('menu.appMcp'), panel: 'mcp' as string },
         { id: 'external', title: t('menu.externalAddress'), panel: 'external' as string },
         // Dynamic agent apps (container.json `manageAsApp`) — one settings row each.
         ...props.pages
@@ -173,6 +175,7 @@ const pagesById = (id: string): PageState | undefined => props.pages.find((p) =>
 const childPanelLabels = computed<Record<string, string>>(() => ({
   dsh: t('menu.appDsh'),
   openclaw: t('menu.appOpenclaw'),
+  mcp: t('menu.appMcp'),
   external: t('menu.externalAddress'),
   // Reached through the 系统 drop list, so these panels are "children" too.
   settings: t('menu.settings'),
@@ -189,9 +192,11 @@ const panelLabel = computed(() => {
 /**
  * The page switcher also lists saved external sites, so a newly added address is
  * switchable/displayable from 「选择页面」 like any hosted page (embedded in the webview).
+ * Disabled built-ins (dsh-web / openclaw switched off in the Pages panel) drop out entirely —
+ * the Pages panel stays the only surface that can bring them back.
  */
 const switcherPages = computed<PageState[]>(() => [
-  ...props.pages,
+  ...props.pages.filter((p) => !p.disabled),
   ...props.externalSites.map((s) => ({
     id: s.id,
     name: s.name,
@@ -204,11 +209,23 @@ const switcherPages = computed<PageState[]>(() => [
   }))
 ])
 
+/**
+ * C2: the page the 独立窗口 button detaches — whatever is on screen. The lookup is the switcher's
+ * list rather than the registry pages alone because a saved 外部站点 only lives there; a CLI page is
+ * detachable too and gets a second, independent run of its command. It used to sit on every
+ * switcher row; since it always acted on the page on screen, it shares the bar with the other view
+ * controls (双屏) instead of repeating per row. A stopped page still qualifies: its own window
+ * offers the start button.
+ */
+const popoutTarget = computed<PageState | null>(
+  () => switcherPages.value.find((x) => x.id === props.activePageId) || null
+)
+
 /* ---- group dropdown lists. Only THESE dismiss on click-away; the floating panels
        carry a ✕ and Esc closes them too. The page switcher owns its own open state. ---- */
 /** Groups whose dropdown opens another panel: highlight the parent while any child shows. */
 const childKinds: Partial<Record<PanelKind, string[]>> = {
-  view: ['external', 'dsh', 'openclaw'],
+  view: ['external', 'dsh', 'openclaw', 'mcp'],
   system: ['settings', 'pages'],
   help: ['help']
 }
@@ -342,7 +359,6 @@ onBeforeUnmount(() => {
       @select-page="(id) => emit('select-page', id)"
       @start-page="(id) => emit('start-page', id)"
       @open-terminal="(id) => emit('open-terminal', id)"
-      @popout-page="(id) => emit('popout-page', id)"
     />
 
     <nav class="groups">
@@ -416,6 +432,34 @@ onBeforeUnmount(() => {
     <!-- 双屏模式 controls: docked on the menu row, just left of the window chrome, so they
          never overlay the guest content. -->
     <div class="dual-actions">
+      <!-- C2: pop the page on screen out into its own window (shared session). Hidden when nothing
+           is on screen, and disabled in 双屏模式 — the panes already are the split, and pulling one
+           out of a layout the user just assembled is not what the button should mean there. -->
+      <button
+        v-if="popoutTarget"
+        class="dual-btn"
+        type="button"
+        :disabled="dualStore.on"
+        :title="
+          dualStore.on
+            ? t('pageMgr.popoutInDual')
+            : t('palette.cmdPopoutPage', { name: popoutTarget.name })
+        "
+        :aria-label="t('palette.cmdPopoutPage', { name: popoutTarget.name })"
+        @click="emit('popout-page', popoutTarget.id)"
+      >
+        <!-- A window in front of the one it came away from: the detach glyph from the switcher rows. -->
+        <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M2.5 5.5 h6.5 v7.5 H2.5 Z M9 2.5 h4.5 v6.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
       <button
         class="dual-btn"
         type="button"
@@ -635,6 +679,7 @@ onBeforeUnmount(() => {
           <slot v-else-if="props.current === 'external'" name="external" />
           <slot v-else-if="props.current === 'dsh'" name="dsh" />
           <slot v-else-if="props.current === 'openclaw'" name="openclaw" />
+          <slot v-else-if="props.current === 'mcp'" name="mcp" />
           <slot v-else-if="props.current === 'settings'" name="settings" />
           <slot v-else-if="props.current === 'help'" name="help" />
         </div>
@@ -784,7 +829,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   background: none;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 9999px;
   color: var(--text);
   cursor: pointer;
   font-size: 13px;
@@ -820,7 +865,7 @@ onBeforeUnmount(() => {
   color: var(--text);
   background: none;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 9999px;
   padding: 0;
   cursor: pointer;
   white-space: nowrap;
@@ -836,6 +881,18 @@ onBeforeUnmount(() => {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.dual-btn:disabled {
+  color: var(--text-dim);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dual-btn:disabled:hover {
+  background: none;
+  border-color: var(--border);
+  color: var(--text-dim);
 }
 
 .dual-picker {

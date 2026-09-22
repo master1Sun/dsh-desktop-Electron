@@ -321,6 +321,10 @@ describe('shell chrome theme + layout', () => {
       b.textContent?.includes('取消')
     )
     await click(cancel ?? null)
+    // display:none lands only when the dialog's leave transition ends (rAF-driven);
+    // the click helper's 30 ms budget is tight under full-suite load — give it room.
+    await new Promise((r) => setTimeout(r, 150))
+    await nextTick()
     expect((document.querySelector('.el-overlay') as HTMLElement | null)?.style.display).toBe(
       'none'
     )

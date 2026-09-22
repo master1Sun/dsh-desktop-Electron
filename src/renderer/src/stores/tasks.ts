@@ -152,6 +152,13 @@ export const useTasksStore = defineStore('tasks', () => {
   /** True while a specific built-in runtime install is in flight — drives the button spinner. */
   const busyBuiltin = (kind: BuiltinKind): boolean => `builtin:${kind}` in tasks
 
+  /** Top-bar label per built-in kind — keyed off BuiltinKind so a new kind can't silently miss one. */
+  const BUILTIN_LABELS: Record<BuiltinKind, string> = {
+    dsh: 'topbar.dsh',
+    openclaw: 'topbar.openclaw',
+    mcp: 'panel.mcpPkgName'
+  }
+
   /**
    * Install/upgrade a built-in agent runtime through the main-process bundled-npm path.
    * Brackets an indeterminate top-bar task (npm has no byte progress; the *update-check* row's
@@ -165,7 +172,7 @@ export const useTasksStore = defineStore('tasks', () => {
   async function installBuiltin(kind: BuiltinKind, version?: string): Promise<UpdateOutcome | null> {
     const id = 'builtin:' + kind
     if (tasks[id]) return null
-    const label = kind === 'dsh' ? t('topbar.dsh') : t('topbar.openclaw')
+    const label = t(BUILTIN_LABELS[kind])
     upsert(id, { label, percent: null, message: t('topbar.installing') })
     try {
       const res = await window.container.provisionBuiltin(kind, version)

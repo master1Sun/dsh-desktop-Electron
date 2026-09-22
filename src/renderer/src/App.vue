@@ -5,7 +5,8 @@ import MenuBar, { type PanelKind } from './components/MenuBar.vue'
 import {
   appPanelKey,
   DEFAULT_KEYBINDINGS,
-  GLASS_BLUR_MAX_PX,
+  GLASS_FROST_MAX_BLUR_PX,
+  GLASS_FROST_MIN_ALPHA_PCT,
   KEYBINDING_ACTIONS,
   type KeybindingAction
 } from '@shared/types'
@@ -58,7 +59,29 @@ const popoutPageId = (() => {
   }
 })()
 const isPopout = computed(() => Boolean(popoutPageId))
-const popoutPage = computed(() => pagesStore.pages.find((p) => p.id === popoutPageId) || null)
+/**
+ * What this detached window hosts. Normally a registry page, but a saved 外部站点 is not a page
+ * (it lives in settings), so it is answered with a synthetic one: same name for the caption, and
+ * `status: 'running'` because there is no process to wait for.
+ */
+const popoutPage = computed<PageState | null>(() => {
+  const p = pagesStore.pages.find((x) => x.id === popoutPageId)
+  if (p) return p
+  const site = settingsStore.settings.externalSites.find((s) => s.id === popoutPageId)
+  return site
+    ? {
+        id: site.id,
+        name: site.name,
+        dir: '',
+        port: 0,
+        startCommand: '',
+        external: true,
+        externalUrl: site.url,
+        url: site.url,
+        status: 'running'
+      }
+    : null
+})
 
 function closePopout(): void {
   window.container?.closeWindow?.().catch(() => undefined)
@@ -102,6 +125,7 @@ const PANEL_COMMANDS: { kind: PanelKind; label: string }[] = [
   { kind: 'external', label: t('palette.panelExternal') },
   { kind: 'dsh', label: t('palette.panelDsh') },
   { kind: 'openclaw', label: t('palette.panelOpenclaw') },
+  { kind: 'mcp', label: t('palette.panelMcp') },
   { kind: 'settings', label: t('palette.panelSettings') },
   { kind: 'help', label: t('palette.panelHelp') }
 ]
@@ -325,6 +349,10 @@ const externalView = ref(false)
 
 const pageUrl = (p: PageState): string => p.launchUrl || p.url || ''
 
+/** The address a window should host for a page: an external page keeps it in `externalUrl`. */
+const popoutUrl = (p: PageState): string =>
+  p.external ? p.externalUrl || pageUrl(p) : pageUrl(p)
+
 /**
  * Pages the dual-pane secondary screen can show: every running web page (with a live URL)
  * plus the configured external sites. CLI/terminal pages are excluded (they own the full
@@ -346,13 +374,21 @@ const secondaryChoices = computed<{ id: string; label: string; url: string }[]>(
 /** A detached window can only offer 启动该页面 for a hosted page that is down and not booting. */
 const popoutStartable = computed(() => {
   const p = popoutPage.value
-  return Boolean(p) && p?.kind !== 'terminal' && p?.status !== 'running' && p?.status !== 'starting'
+  return (
+    Boolean(p) &&
+    !p?.external &&
+    p?.kind !== 'terminal' &&
+    p?.status !== 'running' &&
+    p?.status !== 'starting'
+  )
 })
 
 /** Caption-bar sub-line: why the page isn't on screen right now ('' when it is). */
 const popoutSub = computed(() => {
   const p = popoutPage.value
   if (!p) return t('app.popoutLoadFail')
+  // An external address has no process: it is either hostable or it isn't.
+  if (p.external) return popoutUrl(p) ? '' : t('app.popoutLoadFail')
   if (p.status === 'running' && !pageUrl(p)) return t('app.popoutLoadFail')
   return p.status === 'running' ? '' : t('app.popoutStopped')
 })
@@ -451,7 +487,9 @@ async function restoreDefaultView(): Promise<boolean> {
     return true
   }
   const page = pagesStore.pages.find((p) => p.id === dv.pageId)
-  if (!page) return false
+  // A default view that names a since-disabled built-in rests on the workbench: the page left
+  // the switcher, and silently re-enabling it here would contradict the user's switch.
+  if (!page || page.disabled) return false
   // The default view can name a hosted page whose runtime the slim installer never shipped.
   // Without this the launch would spawn a doomed process and toast an error every single start
   // (the async runtimes probe isn't awaited here, so the store flags could still be stale) —
@@ -560,6 +598,16 @@ function backToWorkbench(): void {
   activePageId.value = null
   webviewLoading.value = false
 }
+
+// A page disabled from the Pages panel while it is on screen: pull the view back to the
+// workbench. Its switcher row is gone, so leaving it up would strand the user on a surface
+// they can no longer navigate away from (and the next default-view restore skips it anyway).
+watch(
+  () => pagesStore.pages.find((p) => p.id === activePageId.value)?.disabled,
+  (off) => {
+    if (off) backToWorkbench()
+  }
+)
 
 /**
  * A hosted dsh/openclaw page cannot run until its runtime is installed — the slim installer
@@ -748,8 +796,9 @@ function applyAccent(hex?: string): void {
 /** #25: frosted-blur strength — write the base token the glass surfaces scale off.
     Set the px token (used by blur()) and its unitless mirror --glass-blur-n (used by the
     tint/saturate ratios) together so they never drift.
-    Clamped to the shared ceiling instead of rewritten: configs saved while the slider still
-    went up to 60px keep their value on disk, they just never render past GLASS_BLUR_MAX_PX. */
+    Clamped to the frost slider's ceiling instead of rewritten: configs saved while the
+    slider still went to 100% (or 60px) keep their value on disk, they just never render
+    past GLASS_FROST_MAX_BLUR_PX. */
 function applyGlassBlur(px?: number): void {
   const root = document.documentElement
   if (typeof px !== 'number') {
@@ -757,7 +806,7 @@ function applyGlassBlur(px?: number): void {
     root.style.removeProperty('--glass-blur-n')
     return
   }
-  const clamped = Math.min(Math.max(Math.round(px), 0), GLASS_BLUR_MAX_PX)
+  const clamped = Math.min(Math.max(Math.round(px), 0), GLASS_FROST_MAX_BLUR_PX)
   root.style.setProperty('--glass-blur', `${clamped}px`)
   root.style.setProperty('--glass-blur-n', `${clamped}`)
 }
@@ -765,14 +814,16 @@ function applyGlassBlur(px?: number): void {
 /** #25: background transparency — the frosted-surface opacity. A percentage (0–100, full
  range: 0 = fully transparent, 100 = fully opaque) is written onto --glass-tint-a, overriding
  the blur-coupled stylesheet default so blur and transparency are independent axes. Undefined
- removes the override and falls back to that coupling. */
+ removes the override and falls back to that coupling. Floored at the frost ceiling's opacity
+ (GLASS_FROST_MIN_ALPHA_PCT): since the single 毛玻璃 slider merged both axes, a stale
+ near-transparent value saved under the old 100% range must not outlive the cap either. */
 function applyGlassAlpha(pct?: number): void {
   const root = document.documentElement
   if (typeof pct !== 'number') {
     root.style.removeProperty('--glass-tint-a')
     return
   }
-  const alpha = Math.min(1, Math.max(0, pct / 100))
+  const alpha = Math.min(1, Math.max(Math.max(pct, GLASS_FROST_MIN_ALPHA_PCT) / 100, 0))
   root.style.setProperty('--glass-tint-a', alpha.toFixed(3))
 }
 
@@ -899,13 +950,23 @@ function openHelpTab(tab: string): void {
 }
 
 /**
- * C2: hand the active page to the main process, which opens (or focuses) its own window. Only
- * hosted http pages qualify — a CLI page owns a full-surface terminal, an external site has no
- * page state to pop out.
+ * C2: hand the page to the main process, which opens (or focuses) its own window. Every kind works
+ * now: a hosted page keeps its URL, an external one (page or saved 外部站点) just hosts its
+ * address, and a CLI page gets a second, independent run of its command.
  */
 async function popoutPageIdAction(id: string): Promise<void> {
+  // 双屏模式 owns the whole content area: pulling a page out of a layout the user just assembled
+  // is not what the mode means, so the palette command and the shortcut refuse it here too (the
+  // top-bar button is merely disabled up front). 页面管理 / 应用 panels are a separate context.
+  if (dualStore.on) {
+    ElMessage.warning(t('pageMgr.popoutInDual'))
+    return
+  }
   const page = pagesStore.pages.find((p) => p.id === id)
-  if (!page || page.external || page.kind === 'terminal') {
+  // A saved site is not a page at all — the main process resolves it from settings, so only an id
+  // that means nothing here (a site deleted since the list was drawn) is refused.
+  const isSite = !page && settingsStore.settings.externalSites.some((s) => s.id === id)
+  if (!page && !isSite) {
     ElMessage.warning(t('pageMgr.popoutDisabled'))
     return
   }
@@ -990,7 +1051,18 @@ async function initPopout(): Promise<void> {
   const page = popoutPage.value
   if (!page) return
   activePageId.value = page.id
-  if (page.kind === 'terminal' || page.status !== 'running') return
+  // A CLI page: the full-surface terminal mounts off activePageId and starts its own session, so
+  // a detached CLI window is a second, independent run of that command — the main window's keeps
+  // running untouched.
+  if (page.kind === 'terminal') return
+  // External (a page declared so, or a saved 外部站点): aim the one webview at its address.
+  // embedOnly because this window *is* the embedded view — 设置 ▸ 提醒告警 sending external
+  // addresses to the system browser must not bounce a detached page window out of itself.
+  if (page.external) {
+    previewExternalUrl(popoutUrl(page), page.id, true)
+    return
+  }
+  if (page.status !== 'running') return
   showInWebview(page)
 }
 
@@ -1142,6 +1214,10 @@ watch(
 )
 
 const runningCount = computed(() => pagesStore.runningPages.length)
+/** Badge denominator: every page container installed — disabled rows included (they are
+    still the app's pages, just parked) — while external addresses don't count (no process
+    to start). Numerator is how many of them are running: 已启动/容器总数. */
+const pageContainerCount = computed(() => pagesStore.installablePages.length)
 /** The top-bar reload/devtools buttons act on the live webview; disable them on the market
     screen and while a CLI page owns the content area (the terminal has its own restart). */
 const canOperate = computed(() => Boolean(webviewSrc.value) && !activeTerminalPage.value)
@@ -1180,7 +1256,7 @@ const showNav = computed(() =>
         v-if="!isPopout"
         :current="activePanel"
         :running-count="runningCount"
-        :total-count="pagesStore.pages.length"
+        :total-count="pageContainerCount"
         :outdated-count="updatesStore.outdated.length"
         :is-dark="isDark"
         :theme-mode="themeMode"
@@ -1216,7 +1292,7 @@ const showNav = computed(() =>
             panel="settings"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
-            :total-count="pagesStore.pages.length"
+            :total-count="pageContainerCount"
             @apply-theme="applyTheme"
             @preview-site="previewExternalUrl"
           />
@@ -1227,7 +1303,7 @@ const showNav = computed(() =>
             panel="pages"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
-            :total-count="pagesStore.pages.length"
+            :total-count="pageContainerCount"
             @close="activePanel = null"
           />
         </template>
@@ -1237,7 +1313,7 @@ const showNav = computed(() =>
             panel="external"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
-            :total-count="pagesStore.pages.length"
+            :total-count="pageContainerCount"
             @preview-site="previewExternalUrl"
           />
         </template>
@@ -1247,7 +1323,7 @@ const showNav = computed(() =>
             panel="dsh"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
-            :total-count="pagesStore.pages.length"
+            :total-count="pageContainerCount"
           />
         </template>
         <template #openclaw>
@@ -1256,7 +1332,16 @@ const showNav = computed(() =>
             panel="openclaw"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
-            :total-count="pagesStore.pages.length"
+            :total-count="pageContainerCount"
+          />
+        </template>
+        <template #mcp>
+          <MenuPanelContent
+            v-if="activePanel === 'mcp'"
+            panel="mcp"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pageContainerCount"
           />
         </template>
         <template #app="{ pageId }">
@@ -1265,7 +1350,7 @@ const showNav = computed(() =>
             :panel="appPanelKey(pageId)"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
-            :total-count="pagesStore.pages.length"
+            :total-count="pageContainerCount"
             @open-page="openPage"
             @open-terminal="openPage"
           />
@@ -1276,7 +1361,7 @@ const showNav = computed(() =>
             panel="help"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
-            :total-count="pagesStore.pages.length"
+            :total-count="pageContainerCount"
             :initial-tab="panelTab ?? undefined"
             @check-updates="updatesStore.check(true)"
           />
@@ -1402,6 +1487,9 @@ const showNav = computed(() =>
 .content {
   flex: 1;
   min-height: 0;
+  /* CLI 终端页是 .content 内的绝对定位覆盖层；子层自带滚动，这里禁掉文档溢出，
+     避免 workbench/终端叠加时出现窗口级滚动条。 */
+  overflow: hidden;
   /* Lift the webview above the fixed aurora (z-index:0) so the ambient blobs never
      tint the embedded page; glass chrome (menubar / panels) still sits above it. */
   position: relative;
@@ -1479,7 +1567,7 @@ const showNav = computed(() =>
   cursor: pointer;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 9999px;
 }
 .popout-btn:hover {
   color: var(--text);

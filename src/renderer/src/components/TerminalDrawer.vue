@@ -7,6 +7,7 @@ import '@xterm/xterm/css/xterm.css'
 import { Close, Cpu, Minus, Plus, Refresh } from '@element-plus/icons-vue'
 import { useTerminalStore } from '../stores/terminal'
 import { useSettingsStore } from '../stores/settings'
+import { useIsLight } from '../composables/useTheme'
 import { t } from '../i18n'
 
 /**
@@ -149,9 +150,11 @@ function onWindowResize(): void {
   }
 }
 
+// isLight 是 html.light 类的响应式镜像：watch DOM 属性本身永远不会触发，
+// 主题切换靠它驱动下面的重新上色。
+const { isLight } = useIsLight()
 function themeColors(): { bg: string; fg: string } {
-  const light = document.documentElement.classList.contains('light')
-  return light ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
+  return isLight.value ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
 }
 
 function ensureTerm(): void {
@@ -257,7 +260,7 @@ watch(minimized, async (m) => {
 
 // Re-apply colors when the shell chrome flips between light/dark.
 watch(
-  () => document.documentElement.className,
+  isLight,
   () => {
     if (!term) return
     const c = themeColors()

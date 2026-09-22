@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { copyFile, readdir, stat } from 'node:fs/promises'
-import { dirname, join, sep } from 'node:path'
+import { dirname, join, sep, basename } from 'node:path'
 import { simpleGit } from 'simple-git'
+import { logPageLine } from '../shell/logger'
 import { readPageMeta, BUILTIN_PAGE_IDS, type ContainerManifest } from './pages'
 import {
   classifyProject,
@@ -118,42 +119,57 @@ export async function installDeps(dir: string, onMessage?: (line: string) => voi
     [cli, ...args, '--no-audit', '--no-fund'],
     dir,
     `npm ${args.join(' ')}`,
-    onMessage
+    onMessage,
+    // the import target folder *is* the page id — mirror npm's output into its log file
+    basename(dir)
   )
 }
 
-/** Spawn a long-running helper (npm install), tailing output to `onMessage` and failing on a non-zero exit. */
+/** Spawn a long-running helper (npm install), tailing output to `onMessage` and failing on a non-zero exit.
+    With `logTo` (a page id) every raw chunk also lands in `logs/pages/<id>.log` and the start/finish
+    lines in main.log — without this an import (codex & friends) is invisible to the in-app log viewer. */
 function runStream(
   cmd: string,
   args: string[],
   cwd: string,
   caption: string,
   onMessage?: (line: string) => void,
+  logTo?: string,
   timeoutMs = 15 * 60_000
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd, env: bundledEnv(), windowsHide: true, shell: false })
+    console.log(`[install] ${caption} started in ${cwd}`)
     let tail = ''
     const onData = (d: unknown): void => {
-      tail += String(d)
+      const text = String(d)
+      if (logTo) logPageLine(logTo, text)
+      tail += text
       if (tail.length > 8000) tail = tail.slice(-8000)
-      const lines = String(d).split(/\r?\n/).filter((l) => l.trim())
+      const lines = text.split(/\r?\n/).filter((l) => l.trim())
       if (lines.length) onMessage?.(lines[lines.length - 1].trim())
     }
     child.stdout?.on('data', onData)
     child.stderr?.on('data', onData)
     const timer = setTimeout(() => {
       child.kill('SIGKILL')
+      console.error(`[install] ${caption} timed out after ${Math.round(timeoutMs / 60000)}min`)
       reject(new Error(m('install.timeout', { cmd: caption })))
     }, timeoutMs)
     child.on('error', (err) => {
       clearTimeout(timer)
+      console.error(`[install] ${caption} spawn failed:`, err)
       reject(err)
     })
     child.on('close', (code) => {
       clearTimeout(timer)
-      if (code === 0) resolve()
-      else reject(new Error(m('install.depsFail', { cmd: caption, tail: tail.slice(-500) })))
+      if (code === 0) {
+        console.log(`[install] ${caption} finished`)
+        resolve()
+      } else {
+        console.error(`[install] ${caption} failed (exit ${code}): ${tail.slice(-500)}`)
+        reject(new Error(m('install.depsFail', { cmd: caption, tail: tail.slice(-500) })))
+      }
     })
   })
 }
@@ -338,7 +354,9 @@ export async function installFromNpm(
       [cli, 'install', specLabel, '--no-audit', '--no-fund'],
       target,
       `npm install ${specLabel}`,
-      (line) => emit({ phase: 'installing', message: line })
+      (line) => emit({ phase: 'installing', message: line }),
+      // mirror the npm install into the new page's own log file, like a hosted page's output
+      dirName
     )
   } catch (err) {
     // Nothing usable landed (bad name, unpublished version, registry offline) — remove the empty

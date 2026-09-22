@@ -1,4 +1,5 @@
 import { ipcMain, shell, BrowserWindow, webContents, nativeTheme, dialog, app } from 'electron'
+import type { WebContents } from 'electron'
 import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -11,6 +12,7 @@ import {
   type DshReleaseChannel,
   type DshTokenResult,
   type DshUpdateChannel,
+  type ExternalSite,
   type HotkeySignal,
   type ImportOptions,
   type ImportPreflight,
@@ -77,7 +79,7 @@ import {
   getUpdateHistory,
   resetBranchProbe
 } from '../update/asar-updates'
-import { logsDir, listLogFiles, readLogTail, startLogStream } from './logger'
+import { logsDir, listLogFiles, readLogTail, startLogStream, logPageLine } from './logger'
 import { exportDiagnostics } from '../runtime/diagnostics'
 import { exportSnapshot, importSnapshot } from '../runtime/snapshot'
 import { runNetworkProbe, probeRegistries } from '../runtime/net-probe'
@@ -112,6 +114,26 @@ import {
   ensureDefaultOpenclawPage,
   ensureBuiltinPages
 } from '../runtime/openclaw'
+import {
+  listServers as mcpListServers,
+  saveServer as mcpSaveServer,
+  removeServer as mcpRemoveServer,
+  connect as mcpConnect,
+  disconnect as mcpDisconnect,
+  listTools as mcpListTools,
+  callTool as mcpCallTool,
+  refreshBuiltinPackages,
+  hubEvents
+} from '../runtime/mcp-hub'
+import { bridgeCatalogFile, bridgeConfigFile, bridgeDir } from '../runtime/mcp-bridge'
+import { mcpPackagesStatus } from '../runtime/mcp-packages'
+import type {
+  McpCallToolArgs,
+  McpCallToolResult,
+  McpServerSpec,
+  McpServerState,
+  McpToolInfo
+} from '../../shared/types'
 import { m, notifyLocaleChanged, invalidateLocaleCache } from './i18n'
 
 /** Periodic silent update-check timer; module-level so a dev-HMR re-register resets it instead of stacking. */
@@ -127,11 +149,25 @@ const memRestarted = new Set<string>()
  *  memory figure sampled at t+3s would just loop. */
 const MEM_RESTART_MIN_UPTIME_MS = 10 * 60_000
 
+/**
+ * The saved 外部站点 behind an id, or null when the id is not one. A site is not a registry page —
+ * it is a name + URL in settings — so this is the whole main-process side of the record: the
+ * existence check behind the pop-out guard and the window caption. The detached window re-reads the
+ * same list by id to know which address to host, so only the id travels in the query.
+ */
+function savedSite(pageId: string): ExternalSite | null {
+  return getSettings().externalSites?.find((s) => s.id === pageId) || null
+}
+
 /** Detached page windows, one per page id; opening the same page twice focuses the first. */
 const popoutWindows = new Map<string, BrowserWindow>()
 let popoutSaveTimer: NodeJS.Timeout | null = null
 /** The app.on('web-contents-created') guest-key listener is process-wide, so wire it once. */
 let guestKeysWired = false
+/** Same for the guest dark-scheme listener. */
+let guestSchemeWired = false
+/** Per guest: the key of the CSS we injected, so a theme flip can take it back out. */
+const guestSchemeCss = new WeakMap<WebContents, string>()
 
 /**
  * The preload file for a shell window. electron-vite emits `.mjs` for the dev preload and the
@@ -193,7 +229,7 @@ function openPageWindow(registry: PageRegistry, pageId: string): BrowserWindow {
     minHeight: 480,
     show: false,
     autoHideMenuBar: true,
-    title: state?.name || pageId,
+    title: state?.name || savedSite(pageId)?.name || pageId,
     backgroundColor: '#000000',
     // same frameless contract as the main shell: the renderer draws its own title strip
     frame: false,
@@ -304,6 +340,64 @@ function wireGuestShortcuts(registry: PageRegistry): void {
   })
 }
 
+/**
+ * A hosted page that paints itself dark but never declares `color-scheme` still gets Chromium's
+ * LIGHT native scrollbar and form controls: `nativeTheme.themeSource` only drives the
+ * `prefers-color-scheme` media query, which such a page never reads, and the shell cannot style a
+ * guest document from outside. So after a guest loads we ask it whether its own canvas is dark and
+ * its scheme is still `normal`, and if so inject the one declaration it forgot. A page that already
+ * opted in, that paints no canvas, or that is simply light is left exactly as it is.
+ */
+const GUEST_DARK_PROBE = `(() => {
+  const de = document.documentElement
+  if (!de) return false
+  const root = getComputedStyle(de)
+  if ((root.colorScheme || 'normal').indexOf('dark') >= 0) return false
+  const rgba = (c) => {
+    const m = String(c).match(/rgba?\\(([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)(?:[,\\s/]+([\\d.]+))?\\)/)
+    return m ? { r: +m[1], g: +m[2], b: +m[3], a: m[4] === undefined ? 1 : +m[4] } : null
+  }
+  const body = document.body ? rgba(getComputedStyle(document.body).backgroundColor) : null
+  const bg = (body && body.a ? body : rgba(root.backgroundColor)) || null
+  if (!bg || bg.a === 0) return false
+  return 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b < 110
+})()`
+const GUEST_DARK_CSS = ':root{color-scheme:dark}'
+
+async function backfillGuestScheme(contents: WebContents): Promise<void> {
+  if (contents.isDestroyed()) return
+  const prev = guestSchemeCss.get(contents)
+  if (prev) {
+    guestSchemeCss.delete(contents)
+    await contents.removeInsertedCSS(prev).catch(() => undefined)
+  }
+  if (!nativeTheme.shouldUseDarkColors) return
+  try {
+    if ((await contents.executeJavaScript(GUEST_DARK_PROBE, false)) !== true) return
+    guestSchemeCss.set(contents, await contents.insertCSS(GUEST_DARK_CSS, { cssOrigin: 'user' }))
+  } catch {
+    /* a guest that refuses the probe keeps its own scrollbar */
+  }
+}
+
+function wireGuestScheme(): void {
+  if (guestSchemeWired) return
+  guestSchemeWired = true
+  app.on('web-contents-created', (_e, contents) => {
+    if (contents.getType() !== 'webview') return
+    // insertCSS lives in the document, so a new load has to be probed again; an SPA route change
+    // keeps the same document and needs nothing.
+    contents.on('dom-ready', () => void backfillGuestScheme(contents))
+    contents.once('destroyed', () => guestSchemeCss.delete(contents))
+  })
+  // A theme flip repaints the guests that are already open, not just the next navigation.
+  nativeTheme.on('updated', () => {
+    for (const c of webContents.getAllWebContents()) {
+      if (!c.isDestroyed() && c.getType() === 'webview') void backfillGuestScheme(c)
+    }
+  })
+}
+
 export function registerIpc(registry: PageRegistry): void {
   const ok = <T>(data?: T): IpcResult<T> => ({ ok: true, data })
   // Generic so a handler annotated `IpcResult<Foo>` can still `return fail(err)` and keep its type.
@@ -350,6 +444,8 @@ export function registerIpc(registry: PageRegistry): void {
   })
   // Make container shortcuts work while focus is inside a hosted page (see wireGuestShortcuts).
   wireGuestShortcuts(registry)
+  // Give dark-hosted pages the `color-scheme` they forgot, so their scrollbar stops being white.
+  wireGuestScheme()
 
   // Electron's renderer matchMedia is unreliable on Windows, so the OS dark/light
   // state is sourced from nativeTheme here and pushed to every window.
@@ -451,6 +547,9 @@ export function registerIpc(registry: PageRegistry): void {
       try {
         const res = await provisionBuiltin(kind, version)
         clearUpdateCache()
+        // A fresh MCP package download changes what the built-in rows launch — rebuild them
+        // (npx fallback → bundled node + local entry) and re-export the agent bridge.
+        if (kind === 'mcp') refreshBuiltinPackages()
         // Provisioning clears the `runtimeMissing` badge on the hosted page. Nudge every window to
         // re-list (onStateChanged -> pagesStore.refresh -> ListPages re-probes presence) so the row
         // becomes startable now, without the renderer having to await an install-status IPC itself.
@@ -648,6 +747,31 @@ export function registerIpc(registry: PageRegistry): void {
     }
   })
 
+  // Switch a page off/on. Disabled = hidden from the page switcher and never (auto)started;
+  // the registry entry and its files stay intact, so re-enabling is instant. Any managed page
+  // qualifies — built-in dsh/openclaw as well as imported web/CLI rows. External addresses are
+  // excluded: they live in (and can be removed from) the 外部地址 manager instead.
+  // autoStartPages is left untouched on purpose: re-enabling should restore the page's
+  // previous launch behavior, not a defaulted-off one.
+  ipcMain.handle(IPC.SetPageDisabled, (_e, id: string, disabled: boolean): IpcResult => {
+    try {
+      const state = registry.get(id)
+      if (!state) return fail(new Error(m('page.unknown', { id })))
+      if (state.external) return fail(new Error(m('page.disableExternal')))
+      const s = getSettings()
+      const set = new Set(s.disabledPages || [])
+      if (disabled) set.add(id)
+      else set.delete(id)
+      updateSettings({ disabledPages: [...set] })
+      if (disabled && (state.status === 'running' || state.status === 'starting'))
+        registry.stop(id) // the status transition broadcasts the fresh list itself
+      else registry.announceChange()
+      return ok(registry.get(id))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
   ipcMain.handle(IPC.RemovePage, (_e, id: string): IpcResult => {
     try {
       registry.stop(id)
@@ -715,14 +839,14 @@ export function registerIpc(registry: PageRegistry): void {
     }
   })
 
-  // Pull a page into its own window. A terminal-kind page is refused: it has no URL to host,
-  // its UI is the container's terminal drawer.
+  // Pull a page into its own window. Every kind qualifies now: a CLI page starts a second,
+  // independent session there (PTY output only ever reaches the window that spawned it, so the two
+  // runs cannot share a surface), and a saved 外部站点 is not a page at all — only its name and URL
+  // matter, which the detached window resolves from settings itself.
   ipcMain.handle(IPC.OpenPageWindow, (_e, pageId: string): IpcResult => {
     try {
-      const state = registry.get(pageId)
-      if (!state) return fail(new Error(m('page.unknown', { id: pageId })))
-      if (state.kind === 'terminal') {
-        return fail(new Error(m('page.cliNeedsTerminal', { name: state.name })))
+      if (!registry.get(pageId) && !savedSite(pageId)) {
+        return fail(new Error(m('page.unknown', { id: pageId })))
       }
       openPageWindow(registry, pageId)
       return ok(true)
@@ -1053,6 +1177,11 @@ export function registerIpc(registry: PageRegistry): void {
           registry.reconcile()
           notifyLocaleChanged()
           registry.emitChanged()
+          // The update table's row names (container / DSH core / MCP group) are main-process
+          // strings baked into the cached snapshot — page rows re-resolve via reconcile, but
+          // these only refresh on the next check. Re-run the (forced) survey now so its
+          // broadcast rewrites the renderer's cache in the new language.
+          runSurvey()
         }
         return ok(getSettings())
       } catch (err) {
@@ -1170,6 +1299,24 @@ export function registerIpc(registry: PageRegistry): void {
 
   // ---- built-in terminal (embedded PTY) ----
   const ptyManager = new PtyManager()
+  /**
+   * pageId → the PTY session running that CLI page. The registry's stop() can only
+   * kill `e.proc`, which terminal pages never have — it reaches the real process
+   * through this hook instead. A kill is recorded as intentional so the exit event
+   * reads as a clean stop (code 0), not a red error dot from a signal-kill code.
+   */
+  const cliPtyByPage = new Map<string, string>()
+  const intentionalKills = new Set<string>()
+  registry.onKillTerminal = (id): void => {
+    const sid = cliPtyByPage.get(id)
+    if (!sid || !ptyManager.get(sid)) {
+      // Nothing alive to kill — flip the status now rather than await an exit that never comes.
+      registry.reportTerminal(id, 'exit', 0)
+      return
+    }
+    intentionalKills.add(sid)
+    ptyManager.kill(sid)
+  }
 
   /** How a CLI page (no web surface) should run inside the embedded terminal. */
   ipcMain.handle(IPC.PageRunSpec, (_e, id: string): IpcResult => {
@@ -1212,6 +1359,16 @@ export function registerIpc(registry: PageRegistry): void {
     return page.dir
   }
 
+  /** Make PTY bytes log-friendly: drop ANSI escape sequences (CSI / OSC / two-char) and
+      turn carriage returns — bare ones are TUI row redraws — into line breaks, so the
+      plain-text viewer gets one readable line per rendered line instead of escape noise. */
+  const ptyTextForLog = (chunk: string): string =>
+    chunk
+      .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+      .replace(/\x1b[@-Z\\-_]/g, '')
+      .replace(/\r\n?/g, '\n')
+
   ipcMain.handle(
     IPC.PtyStart,
     async (
@@ -1230,6 +1387,16 @@ export function registerIpc(registry: PageRegistry): void {
         const session = ptyManager.get(info.id)
         if (session) {
           const sender = e.sender
+          // A CLI page (codex & friends) runs its whole life inside this PTY — the
+          // registry never spawns terminal-kind pages. Mirror the lifecycle onto the
+          // page (traffic lights) and the output into logs/pages/<id>.log (viewer +
+          // live stream). Shell tabs share this handler but pass no command; skip them.
+          const boundPage = opts?.command ? registry.get(target) : undefined
+          const cliId = boundPage?.kind === 'terminal' ? boundPage.id : null
+          if (cliId) {
+            cliPtyByPage.set(cliId, info.id)
+            registry.reportTerminal(cliId, 'running')
+          }
           // Coalesce output before it crosses the process boundary. A full-screen TUI
           // repaints in hundreds of tiny chunks per second; sending each one as its own
           // IPC message floods the renderer's event loop until the window stops
@@ -1249,12 +1416,22 @@ export function registerIpc(registry: PageRegistry): void {
             if (!sender.isDestroyed()) sender.send(IPC.OnPtyData, { id: info.id, data })
           }
           session.on('data', (chunk) => {
-            buf += String(chunk)
+            const text = String(chunk)
+            if (cliId) logPageLine(cliId, ptyTextForLog(text))
+            buf += text
             if (buf.length >= FLUSH_MAX) flush()
             else if (!timer) timer = setTimeout(flush, FLUSH_MS)
           })
           session.on('exit', (code) => {
             flush()
+            // Always consume the mark — a shell-tab session that was killed would otherwise
+            // leak its id. A user-initiated stop's signal-kill code (often 1) reads as
+            // 已停止, not a crash.
+            const intentional = intentionalKills.delete(info.id)
+            if (cliId) {
+              if (cliPtyByPage.get(cliId) === info.id) cliPtyByPage.delete(cliId)
+              registry.reportTerminal(cliId, 'exit', intentional ? 0 : Number(code))
+            }
             if (!sender.isDestroyed())
               sender.send(IPC.OnPtyExit, { id: info.id, code: Number(code) })
           })
@@ -1286,6 +1463,9 @@ export function registerIpc(registry: PageRegistry): void {
 
   ipcMain.handle(IPC.PtyKill, (_e, id: string): IpcResult => {
     try {
+      // Renderer-initiated kills (leaving a CLI surface, re-running it) are stops too:
+      // mark them so the page's exit lands as 已停止, not a signal-code 启动失败.
+      intentionalKills.add(id)
       ptyManager.kill(id)
       return ok(true)
     } catch (err) {
@@ -1459,4 +1639,96 @@ export function registerIpc(registry: PageRegistry): void {
       }
     }
   )
+
+  /* ---- MCP Client Hub ----
+   * The hub lives independent of the page registry: servers are spawned on
+   * demand, their state arrives via hubEvents, and every handler below is a
+   * thin pass-through so the panel can manage the whole registry. */
+  hubEvents.removeAllListeners('changed') // dev-HMR: one broadcaster wins
+  hubEvents.on('changed', (states: McpServerState[]) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnMcpStateChanged, states)
+    }
+  })
+
+  ipcMain.handle(IPC.McpListServers, (): IpcResult<McpServerState[]> => {
+    try {
+      return ok(mcpListServers())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.McpSaveServer, async (_e, spec: McpServerSpec): Promise<IpcResult<McpServerState[]>> => {
+    try {
+      return ok(await mcpSaveServer(spec))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.McpRemoveServer, async (_e, id: string): Promise<IpcResult<McpServerState[]>> => {
+    try {
+      return ok(await mcpRemoveServer(id))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // Connect failures surface as IpcResult errors *and* as a state broadcast, so the
+  // row flips to 失败 even when the panel's own await swallows the rejection.
+  ipcMain.handle(IPC.McpConnect, async (_e, id: string): Promise<IpcResult> => {
+    try {
+      await mcpConnect(id)
+      return ok()
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.McpDisconnect, async (_e, id: string): Promise<IpcResult> => {
+    try {
+      await mcpDisconnect(id)
+      return ok()
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.McpListTools, (_e, serverId?: string): IpcResult<McpToolInfo[]> => {
+    try {
+      return ok(mcpListTools(serverId))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(
+    IPC.McpCallTool,
+    async (_e, args: McpCallToolArgs): Promise<IpcResult<McpCallToolResult>> => {
+      try {
+        return ok(await mcpCallTool(args))
+      } catch (err) {
+        return fail(err)
+      }
+    }
+  )
+
+  /** Where the agent-facing bridge exports live, for the panel's footer hint. */
+  ipcMain.handle(IPC.McpBridgeInfo, (): IpcResult => {
+    try {
+      return ok({ dir: bridgeDir(), catalogFile: bridgeCatalogFile(), configFile: bridgeConfigFile() })
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  /** Built-in MCP packages: on-disk provisioning state, so the panel can offer a download. */
+  ipcMain.handle(IPC.McpPackagesStatus, (): IpcResult => {
+    try {
+      return ok(mcpPackagesStatus())
+    } catch (err) {
+      return fail(err)
+    }
+  })
 }

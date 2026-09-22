@@ -12,6 +12,8 @@ import { logPageLine } from '../shell/logger'
 import { logEvent } from '../shell/events'
 import { findPortHolder } from './port-holder'
 import { notifyEvent } from '../shell/notifications'
+import { bridgeEnvVars, buildCatalog, detectMcpAgent, exportBridgeFiles, syncCodexConfig } from './mcp-bridge'
+import { listServers, listTools } from './mcp-hub'
 // aliased: `m` is already a local identifier in this file (regex match / map callback)
 import { m as msg, resolveText } from '../shell/i18n'
 import {
@@ -669,7 +671,22 @@ export function buildPageEnv(meta: PageMeta): Record<string, string> {
   // The user's free-form KEY=VALUE rows win last: they are deliberate overrides, and a
   // declared dir var they clash with is exactly the case they exist for. Sanitizing lives in
   // store.ts so every consumer reads the same rule (see resolvePageCustomEnvs).
-  return { ...out, ...resolvePageCustomEnvs(meta.id) }
+  const merged = { ...out, ...resolvePageCustomEnvs(meta.id) }
+  // MCP downstream bridge: every spawnable page learns where the hub's catalog lives,
+  // and a codex page gets the registry compiled into its own config.toml right now —
+  // the one moment we know the page is about to start and its CODEX_HOME is resolved.
+  if (detectMcpAgent(expandStartCommand(meta.startCommand || '')) === 'codex') {
+    try {
+      const states = listServers()
+      const tools = listTools()
+      exportBridgeFiles(states, tools)
+      syncCodexConfig(buildCatalog(states, tools).servers, merged.CODEX_HOME)
+    } catch (err) {
+      // best-effort: a read-only home must not fail the launch — codex starts without the hub
+      console.warn('[mcp-bridge] codex sync failed:', (err as Error).message)
+    }
+  }
+  return { ...bridgeEnvVars(), ...merged }
 }
 
 export function expandStartCommand(cmd: string): string {
@@ -679,6 +696,13 @@ export function expandStartCommand(cmd: string): string {
 export class PageRegistry extends EventEmitter {
   private entries = new Map<string, RuntimeEntry>()
   private quitting = false
+  /**
+   * Terminal-kind pages have no `e.proc` — their process is a PTY owned by the
+   * IPC layer's PtyManager. `registerIpc` wires this hook so {@link stop} can
+   * reach the real process; the status flip itself arrives later, through the
+   * PTY exit event calling {@link reportTerminal}.
+   */
+  onKillTerminal: ((id: string) => void) | null = null
   /**
    * Cached "is the on-demand CLI present" probe for the hosted runtimes, refreshed by
    * {@link refreshRuntimePresence} and read synchronously by {@link toState}. `loaded` is false
@@ -754,6 +778,9 @@ export class PageRegistry extends EventEmitter {
       lastError: e.lastError,
       url,
       launchUrl: withThemeParam(e.launchUrl || url, e.meta.kind),
+      // Settings-backed flag joined onto every list so the switcher, the Pages panel and the
+      // start guards all read the same synchronous source (no async status IPC lag).
+      disabled: getSettings().disabledPages?.includes(e.meta.id) || undefined,
       runtimeMissing:
         (e.meta.kind === 'dsh' || e.meta.kind === 'openclaw') && e.status !== 'running'
           ? !this.hasRuntime(e.meta.kind)
@@ -778,9 +805,53 @@ export class PageRegistry extends EventEmitter {
     return [...(this.entries.get(id)?.logs ?? [])]
   }
 
+  /**
+   * Terminal-kind CLIs are never spawned by the registry — the embedded terminal
+   * (PtyManager, wired from ipc.ts) owns their whole lifecycle, so it is the only
+   * source that can say "running". The PtyStart handler calls this on spawn and on
+   * exit to keep the switcher / Pages-panel traffic lights honest. The health
+   * watchdog stays out of it: its probes all short-circuit on the absent `e.proc`.
+   */
+  reportTerminal(id: string, phase: 'running' | 'exit', code?: number): void {
+    const e = this.entries.get(id)
+    if (!e || e.meta.kind !== 'terminal' || this.quitting) return
+    if (phase === 'running') {
+      if (e.status === 'running') return
+      e.startedAt = Date.now()
+      e.lastError = undefined
+      e.exitCode = undefined
+      e.logs.push(`[container] ${msg('page.logStarting', { name: e.meta.name, port: '-' })}`)
+      this.setStatus(e, 'running')
+      logEvent({
+        level: 'info',
+        kind: 'page.running',
+        pageId: id,
+        // no port for a CLI — fill the template's {port} slot rather than leaking a raw placeholder
+        meta: { port: '-', ms: 0 }
+      })
+      return
+    }
+    if (e.status !== 'running' && e.status !== 'starting') return
+    e.exitCode = code
+    const clean = code === 0
+    if (!clean) e.lastError = msg('page.processExited', { code: code ?? '' })
+    e.logs.push(`[container] ${msg('page.processExited', { code: code ?? '' })}`)
+    this.setStatus(e, clean ? 'stopped' : 'error')
+    logEvent({
+      level: clean ? 'info' : 'warn',
+      kind: 'page.exit',
+      pageId: id,
+      meta: { code: code ?? 'n/a' }
+    })
+  }
+
   async start(id: string, opts?: { fromCrashGuard?: boolean }): Promise<PageState> {
     const e = this.entries.get(id)
     if (!e) throw new Error(msg('page.unknown', { id }))
+    // A disabled page has no spawn path at all — the switcher hides it and auto-start skips
+    // it, but a stale window (or a scripted caller) must still not resurrect the process.
+    if (getSettings().disabledPages?.includes(id))
+      throw new Error(msg('page.disabled', { name: e.meta.name }))
     // Read via a local so the early-return guard doesn't narrow `e.status` for the rest of
     // the method — the retry path below must re-read it as a full PageStatus after an await.
     const initialStatus: PageStatus = e.status
@@ -1159,6 +1230,16 @@ export class PageRegistry extends EventEmitter {
     // An explicit stop owns the page again: drop any scheduled crash-retry so a
     // stopped page stays stopped even when the guard had a retry queued.
     this.clearRestartTimers(e)
+    // A CLI page's live process is the embedded terminal's PTY, invisible to this
+    // registry — hand the kill to the IPC-layer hook. No status change here: the
+    // PTY's exit event lands in reportTerminal and flips stopped/error there.
+    if (e.meta.kind === 'terminal') {
+      if (e.status === 'running' || e.status === 'starting') {
+        e.logs.push(msg('page.logStopping'))
+        this.onKillTerminal?.(id)
+      }
+      return
+    }
     if (!e?.proc) return
     const proc = e.proc
     e.logs.push(msg('page.logStopping'))
@@ -1422,6 +1503,8 @@ export class PageRegistry extends EventEmitter {
       ids.map(async (id): Promise<void> => {
         const entry = this.entries.get(id)
         if (!entry || entry.meta.kind === 'terminal') return
+        // A disabled builtin stays stopped until the user switches it back on in the Pages panel.
+        if (getSettings().disabledPages?.includes(id)) return
         // Skip quietly: the Pages list and the switcher already badge 未安装 and route the
         // user to the install guide, so a spawn attempt adds noise without informing anyone.
         if (!this.hasRuntime(entry.meta.kind)) {
@@ -1435,6 +1518,12 @@ export class PageRegistry extends EventEmitter {
         }
       })
     )
+  }
+
+  /** Broadcast the current list after a settings-only change (e.g. disabledPages flipped on a
+      stopped page, where no status transition fires emitChanged on its own). */
+  announceChange(): void {
+    this.emitChanged()
   }
 
   /** Stop every tracked page and resolve once all children have actually exited (or

@@ -17,6 +17,8 @@ import { dirname, join } from 'node:path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
 import { PageRegistry } from './runtime/pages'
+import { autoStartAll as mcpAutoStart, shutdownAll as mcpShutdown } from './runtime/mcp-hub'
+import { setMcpPackagesRoot } from './runtime/mcp-packages'
 import { registerIpc, flushPopoutBounds } from './shell/ipc'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './runtime/openclaw'
 import { pnpmBinDirs } from './runtime/dsh'
@@ -381,6 +383,12 @@ if (!gotLock) {
         .autoStart(settings.autoStartPages)
         .catch((err) => console.warn('[container] auto-start failed', err))
     }
+    // MCP hub auto-connects its autoStart rows off the first-frame path too: a slow or
+    // broken server must never delay the window, and per-row failures surface in the panel.
+    // The built-in packages folder is userData/mcp (downloaded on demand, never shipped
+    // in the installer) — mcp-packages stays electron-free and gets the root injected here.
+    setMcpPackagesRoot(join(app.getPath('userData'), 'mcp'))
+    mcpAutoStart().catch((err) => console.warn('[mcp-hub] auto-start failed', err))
 
     // Warm the pnpm-location probe (a cold `npm prefix -g` costs seconds) off the critical
     // path of the *first* dsh start; it's cached process-wide via pnpmBinDirs().
@@ -412,15 +420,16 @@ if (!gotLock) {
       shutdownDone = true // one-shot: never reset, re-entrant quits fall through to Electron
       e.preventDefault()
       const grace = new Promise<void>((resolve) => setTimeout(resolve, QUIT_FLUSH_MS))
-      Promise.race([registry.shutdownAll(), grace]).then(
-        () => app.exit(0),
-        (err) => {
-          // A throw here means the kill path itself broke — don't loop in the
-          // uncaughtException handler, log once and force the exit.
-          console.error('[container] shutdownAll failed, forcing exit:', err)
-          app.exit(0)
-        }
-      )
+      Promise.race([registry.shutdownAll(), grace])
+        .then(
+          () => mcpShutdown(),
+          (err) => {
+            // A throw here means the kill path itself broke — don't loop in the
+            // uncaughtException handler, log once and force the exit.
+            console.error('[container] shutdownAll failed, forcing exit:', err)
+          }
+        )
+        .finally(() => app.exit(0))
     }
   })
 }

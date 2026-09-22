@@ -215,7 +215,9 @@ export function readLogTail(key: string, tail = 400, filter?: string): LogReadRe
 const streamOffsets = new Map<string, number>()
 let streamWatchers: FSWatcher[] = []
 
-/** Emit complete lines appended to `file` since the last flush; skip history on first sight. */
+/** Emit complete lines appended to `file` since the last flush; a file never seeded is
+ *  new since the watch started, so ship it from byte 0 (its first lines must not be lost —
+ *  e.g. the `pages/<id>.log` an import or a first CLI run creates mid-session). */
 function flushFile(file: string, key: string, onLine: (ev: LogLineEvent) => void): void {
   let size = 0
   try {
@@ -224,12 +226,7 @@ function flushFile(file: string, key: string, onLine: (ev: LogLineEvent) => void
     return
   }
   let off = streamOffsets.get(file)
-  if (off === undefined) {
-    // First observation: baseline to the current end so the viewer's own initial
-    // readLogTail (not a replay of history) supplies everything before now.
-    streamOffsets.set(file, size)
-    return
-  }
+  if (off === undefined) off = 0 // brand-new file: stream it from the start, no baseline skip
   if (size < off) off = 0 // rotation / truncation
   if (size <= off) return
   const want = Math.min(size - off, 64 * 1024)
@@ -269,6 +266,23 @@ export function startLogStream(onLine: (ev: LogLineEvent) => void): void {
     mkdirSync(pagesDir, { recursive: true })
   } catch {
     /* pages dir creation is best-effort */
+  }
+  // Seed every already-existing file at its current end: the viewer's initial
+  // readLogTail covers that history, and only post-watch appends should stream.
+  const seed = (file: string): void => {
+    try {
+      streamOffsets.set(file, statSync(file).size)
+    } catch {
+      /* unreadable: flushFile will no-op on stat failure anyway */
+    }
+  }
+  seed(join(root, 'main.log'))
+  try {
+    for (const f of readdirSync(pagesDir)) {
+      if (f.endsWith('.log')) seed(join(pagesDir, f))
+    }
+  } catch {
+    /* pages dir just created or unreadable — nothing to seed */
   }
   const watchDir = (dir: string, resolve: (name: string) => string | null): void => {
     try {

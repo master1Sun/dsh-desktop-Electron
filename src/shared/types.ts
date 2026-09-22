@@ -26,6 +26,19 @@ export const DISPLAY_TIME_ZONE_LABEL = 'UTC+8'
 export const GLASS_BLUR_MAX_PX = 25
 
 /**
+ * UI ceiling of the 毛玻璃效果 slider, in frost percent. The frost scale stays 0–100
+ * internally (blur px and surface opacity derive from it), but the slider stops at 40:
+ * past that every glass surface smears into a smudge. Persisted settings from before the
+ * cap keep their value on disk; renderers clamp to the derived ceilings below.
+ */
+export const GLASS_FROST_MAX_PCT = 40
+/** Blur (px) the frost scale reaches at the slider ceiling (linear to GLASS_BLUR_MAX_PX). */
+export const GLASS_FROST_MAX_BLUR_PX = Math.round((GLASS_BLUR_MAX_PX * GLASS_FROST_MAX_PCT) / 100)
+/** Least opaque (max transparent) surface % the frost scale reaches at the slider ceiling
+ *  (same 96→8 mapping the settings slider uses: frost f ⇒ 96 − f/100 × 88). */
+export const GLASS_FROST_MIN_ALPHA_PCT = Math.round(96 - (GLASS_FROST_MAX_PCT / 100) * (96 - 8))
+
+/**
  * #26: the npm registries the 网络镜像 panel can probe and switch between. First entry is the
  * built-in default (what the container used before the setting existed), so an empty
  * `npmRegistry` and picking this row are the same thing.
@@ -197,6 +210,13 @@ export interface PageState extends PageMeta {
    */
   runtimeMissing?: boolean
   /**
+   * The user switched this built-in page (dsh-web / openclaw) off in the Pages panel:
+   * it leaves the page switcher, never auto-starts, and refuses manual starts while set.
+   * Only ever `true` for a built-in page; the flag lives in settings (`disabledPages`),
+   * joined onto the state by the registry so every renderer surface shares one source.
+   */
+  disabled?: boolean
+  /**
    * Set when a start failed because the declared port never came up and a *foreign*
    * process is LISTENING on it — the Pages panel offers a one-click kill-and-retry.
    */
@@ -275,6 +295,12 @@ export interface ContainerSettings {
    * default-open coupling, so an implicit add doesn't masquerade as a manual pin.
    */
   autoStartManual?: string[]
+  /**
+   * Built-in pages (dsh-web / openclaw) the user switched off. Unlike removal — impossible
+   * for a builtin — this only hides the page from the switcher and stops it from ever being
+   * (auto)started; the registry entry and its files stay intact and re-enable is one click.
+   */
+  disabledPages?: string[]
   lastExternalUrls: string[]
   /** user-saved named external URLs, managed + previewable from the top bar */
   externalSites: ExternalSite[]
@@ -703,6 +729,111 @@ export interface DownloadProgress {
   host?: string
 }
 
+/* ---- MCP Client Hub ----
+ * The container acts as the MCP *client* for a registry of stdio MCP servers:
+ * it spawns each server as a child process, aggregates their tools, and can
+ * invoke them. Specs are user-authored (panel / hand-edited store file), so
+ * everything except `id`/`command` is optional and validated in the main
+ * process before persistence. */
+
+/** On-demand provisioning state of one built-in MCP server's npm package (userData/mcp). */
+export interface McpPkgStatus {
+  /** built-in row id ('memory', 'filesystem', …) */
+  id: string
+  /** full npm package name the row launches */
+  pkg: string
+  /** launcher JS present on disk */
+  installed: boolean
+  version?: string
+}
+
+/** One registered upstream MCP server (stdio transport). */
+export interface McpServerSpec {
+  /** stable slug id; also the tool-namespace prefix. Immutable once created. */
+  id: string
+  /** display name shown in the panel (defaults to id) */
+  name: string
+  /** executable to spawn, e.g. "npx" / "node" / "python" (`.cmd` resolves on Windows via cross-spawn) */
+  command: string
+  /** argv passed to the command */
+  args?: string[]
+  /** extra env merged over the SDK's safe default env for the child process */
+  env?: Record<string, string>
+  /** working directory for the child; empty = the container's cwd */
+  cwd?: string
+  /** false = listed but never connectable from the panel (default true) */
+  enabled?: boolean
+  /** connect automatically at container boot (implies nothing about `enabled` — both must be true) */
+  autoStart?: boolean
+  /**
+   * Locked, code-owned row (see runtime/mcp-hub lockedMcpSpecs — currently only
+   * `filesystem`): command/args/name are re-asserted on every reconcile, never persisted,
+   * and the panel renders it read-only (no edit/delete) — only connect/disconnect. The other
+   * curated servers are NOT built-in: they are seeded once into the store as ordinary rows
+   * the user can edit/delete; direct-launch of their downloaded package is resolved at
+   * connect time (mcp-hub.effectiveSpawn), not baked into the spec, for that reason.
+   */
+  builtin?: boolean
+}
+
+export type McpServerStatus = 'stopped' | 'connecting' | 'connected' | 'error'
+
+/** Live hub state for one server row. */
+export interface McpServerState {
+  spec: McpServerSpec
+  status: McpServerStatus
+  /** server-declared identity after a successful initialize */
+  serverInfo?: { name: string; version?: string }
+  /** tool count after the last successful listTools (0 when never connected) */
+  toolCount: number
+  lastError?: string
+}
+
+/** One tool surfaced by a connected server, namespaced by its server id. */
+export interface McpToolInfo {
+  serverId: string
+  /** the server's own tool name (what callTool must receive) */
+  name: string
+  title?: string
+  description?: string
+  /** JSON Schema for `arguments` — opaque to the container, shown raw in the panel */
+  inputSchema?: Record<string, unknown>
+}
+
+/** Args for `IPC.McpCallTool`. */
+export interface McpCallToolArgs {
+  serverId: string
+  tool: string
+  arguments?: Record<string, unknown>
+  /** per-call timeout in ms; default MCP_CALL_TOOL_TIMEOUT_MS in the hub */
+  timeoutMs?: number
+}
+
+/** Result of one tool call — content blocks flattened to text by the hub. */
+export interface McpCallToolResult {
+  ok: boolean
+  /** concatenated text content blocks (non-text blocks are JSON-inlined) */
+  text: string
+  isError: boolean
+  error?: string
+  durationMs: number
+}
+
+/** Qualified key a tool is addressed by inside the hub UI (`serverId/name`). */
+export const mcpToolKey = (serverId: string, tool: string): string => `${serverId}/${tool}`
+
+/** Where the hub's agent-facing bridge exports live (see runtime/mcp-bridge.ts). */
+export interface McpBridgeInfo {
+  /** userData/mcp-bridge — the export directory */
+  dir: string
+  /** full aggregated catalog (specs + connected tools with input schemas) */
+  catalogFile: string
+  /** `mcpServers` JSON, the shape `codex --mcp-config` (and friends) consume */
+  configFile: string
+  /** codex's resolved config file when a CODEX_HOME- declaring page exists */
+  codexConfigFile?: string
+}
+
 export interface IpcResult<T = unknown> {
   ok: boolean
   data?: T
@@ -794,11 +925,12 @@ export interface NodeVersionInfo {
 }
 
 /**
- * The two agent runtimes the container can (re)provision at runtime via the bundled npm.
+ * The built-in components the container can (re)provision at runtime via the bundled npm.
  * Same channel the 关于与更新 panel's reprovision rows use, so a *missing* built-in gets an
- * "install" entry point (first-run setup) as well as an "update" one.
+ * "install" entry point (first-run setup) as well as an "update" one. 'mcp' is the group of
+ * npm packages behind the built-in MCP servers (userData/mcp, see runtime/mcp-packages).
  */
-export type BuiltinKind = 'dsh' | 'openclaw'
+export type BuiltinKind = 'dsh' | 'openclaw' | 'mcp'
 
 export const IPC = {
   GetNodeInfo: 'container:get-node-info',
@@ -815,6 +947,8 @@ export const IPC = {
   PreflightImport: 'container:import-preflight',
   ChooseDirectory: 'container:choose-directory',
   RemovePage: 'container:remove-page',
+  /** switch a built-in dsh/openclaw page off/on (disabled = hidden from switcher, never starts) */
+  SetPageDisabled: 'container:set-page-disabled',
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
   ResetBuiltinPage: 'container:reset-builtin-page',
   SetPagePort: 'container:set-page-port',
@@ -935,7 +1069,27 @@ export const IPC = {
   CheckPortFree: 'container:check-port-free',
   /** broadcast: a rebindable shortcut was pressed *inside* a hosted webview, so the shell window
    *  that owns the action runs it (HotkeySignal). The guest consumed nothing back. */
-  OnHotkey: 'container:hotkey'
+  OnHotkey: 'container:hotkey',
+  /** MCP hub: live state of every registered server → McpServerState[] */
+  McpListServers: 'container:mcp-list-servers',
+  /** MCP hub: add or update one spec (id wins over an existing row) → McpServerState[] */
+  McpSaveServer: 'container:mcp-save-server',
+  /** MCP hub: disconnect (when live) and drop one server spec */
+  McpRemoveServer: 'container:mcp-remove-server',
+  /** MCP hub: open the stdio connection for one server */
+  McpConnect: 'container:mcp-connect',
+  /** MCP hub: close the stdio connection for one server */
+  McpDisconnect: 'container:mcp-disconnect',
+  /** MCP hub: aggregated tool catalog, optionally for one server → McpToolInfo[] */
+  McpListTools: 'container:mcp-list-tools',
+  /** MCP hub: invoke one tool and await its result (McpCallToolArgs → McpCallToolResult) */
+  McpCallTool: 'container:mcp-call-tool',
+  /** broadcast: hub server states changed (McpServerState[]) */
+  OnMcpStateChanged: 'container:mcp-state-changed',
+  /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
+  McpBridgeInfo: 'container:mcp-bridge-info',
+  /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
+  McpPackagesStatus: 'container:mcp-packages-status'
 } as const
 
 /** Payload of {@link IPC.OnHotkey}: which action fired and for which page, if any. */

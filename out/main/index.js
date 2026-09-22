@@ -1,6 +1,6 @@
 import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, BrowserWindow, nativeImage, Tray, Menu, dialog, session, screen, ipcMain as ipcMain$1, webContents } from "electron";
 import * as fs from "node:fs";
-import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, unlinkSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, cpSync, promises, copyFileSync } from "node:fs";
+import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, unlinkSync, writeFileSync as writeFileSync$1, rmSync, createWriteStream, cpSync, promises, copyFileSync } from "node:fs";
 import path, { join, delimiter, extname, basename, dirname, sep } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import { EventEmitter } from "node:events";
@@ -15,6 +15,8 @@ import { promisify, isDeepStrictEqual } from "node:util";
 import crypto, { randomBytes } from "node:crypto";
 import assert from "node:assert";
 import { Transform } from "node:stream";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { pipeline } from "node:stream/promises";
 import { copyFile, readdir, stat } from "node:fs/promises";
 import { simpleGit } from "simple-git";
@@ -70,6 +72,8 @@ const IPC = {
   PreflightImport: "container:import-preflight",
   ChooseDirectory: "container:choose-directory",
   RemovePage: "container:remove-page",
+  /** switch a built-in dsh/openclaw page off/on (disabled = hidden from switcher, never starts) */
+  SetPageDisabled: "container:set-page-disabled",
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
   ResetBuiltinPage: "container:reset-builtin-page",
   SetPagePort: "container:set-page-port",
@@ -190,7 +194,27 @@ const IPC = {
   CheckPortFree: "container:check-port-free",
   /** broadcast: a rebindable shortcut was pressed *inside* a hosted webview, so the shell window
    *  that owns the action runs it (HotkeySignal). The guest consumed nothing back. */
-  OnHotkey: "container:hotkey"
+  OnHotkey: "container:hotkey",
+  /** MCP hub: live state of every registered server → McpServerState[] */
+  McpListServers: "container:mcp-list-servers",
+  /** MCP hub: add or update one spec (id wins over an existing row) → McpServerState[] */
+  McpSaveServer: "container:mcp-save-server",
+  /** MCP hub: disconnect (when live) and drop one server spec */
+  McpRemoveServer: "container:mcp-remove-server",
+  /** MCP hub: open the stdio connection for one server */
+  McpConnect: "container:mcp-connect",
+  /** MCP hub: close the stdio connection for one server */
+  McpDisconnect: "container:mcp-disconnect",
+  /** MCP hub: aggregated tool catalog, optionally for one server → McpToolInfo[] */
+  McpListTools: "container:mcp-list-tools",
+  /** MCP hub: invoke one tool and await its result (McpCallToolArgs → McpCallToolResult) */
+  McpCallTool: "container:mcp-call-tool",
+  /** broadcast: hub server states changed (McpServerState[]) */
+  OnMcpStateChanged: "container:mcp-state-changed",
+  /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
+  McpBridgeInfo: "container:mcp-bridge-info",
+  /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
+  McpPackagesStatus: "container:mcp-packages-status"
 };
 let cached = null;
 function invalidateNodeRuntimeCache() {
@@ -527,7 +551,7 @@ function setProperty(object, path2, value) {
   if (!isObject(object) || typeof path2 !== "string" && !Array.isArray(path2)) {
     return object;
   }
-  const root = object;
+  const root2 = object;
   const pathArray = normalizePath(path2);
   if (pathArray.length === 0) {
     return object;
@@ -548,7 +572,7 @@ function setProperty(object, path2, value) {
     object[key] = shouldCreateArray ? [] : {};
     object = object[key];
   }
-  return root;
+  return root2;
 }
 function deleteProperty(object, path2) {
   if (!isObject(object) || typeof path2 !== "string" && !Array.isArray(path2)) {
@@ -3938,22 +3962,22 @@ function requireCompile() {
     }
   }
   compile.compileSchema = compileSchema;
-  function resolveRef(root, baseId, ref2) {
+  function resolveRef(root2, baseId, ref2) {
     var _a;
     ref2 = (0, resolve_1.resolveUrl)(this.opts.uriResolver, baseId, ref2);
-    const schOrFunc = root.refs[ref2];
+    const schOrFunc = root2.refs[ref2];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve2.call(this, root, ref2);
+    let _sch = resolve2.call(this, root2, ref2);
     if (_sch === void 0) {
-      const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref2];
+      const schema = (_a = root2.localRefs) === null || _a === void 0 ? void 0 : _a[ref2];
       const { schemaId } = this.opts;
       if (schema)
-        _sch = new SchemaEnv({ schema, schemaId, root, baseId });
+        _sch = new SchemaEnv({ schema, schemaId, root: root2, baseId });
     }
     if (_sch === void 0)
       return;
-    return root.refs[ref2] = inlineOrCompile.call(this, _sch);
+    return root2.refs[ref2] = inlineOrCompile.call(this, _sch);
   }
   compile.resolveRef = resolveRef;
   function inlineOrCompile(sch) {
@@ -3971,23 +3995,23 @@ function requireCompile() {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve2(root, ref2) {
+  function resolve2(root2, ref2) {
     let sch;
     while (typeof (sch = this.refs[ref2]) == "string")
       ref2 = sch;
-    return sch || this.schemas[ref2] || resolveSchema.call(this, root, ref2);
+    return sch || this.schemas[ref2] || resolveSchema.call(this, root2, ref2);
   }
-  function resolveSchema(root, ref2) {
+  function resolveSchema(root2, ref2) {
     const p = this.opts.uriResolver.parse(ref2);
     const refPath = (0, resolve_1._getFullPath)(this.opts.uriResolver, p);
-    let baseId = (0, resolve_1.getFullPath)(this.opts.uriResolver, root.baseId, void 0);
-    if (Object.keys(root.schema).length > 0 && refPath === baseId) {
-      return getJsonPointer.call(this, p, root);
+    let baseId = (0, resolve_1.getFullPath)(this.opts.uriResolver, root2.baseId, void 0);
+    if (Object.keys(root2.schema).length > 0 && refPath === baseId) {
+      return getJsonPointer.call(this, p, root2);
     }
     const id2 = (0, resolve_1.normalizeId)(refPath);
     const schOrRef = this.refs[id2] || this.schemas[id2];
     if (typeof schOrRef == "string") {
-      const sch = resolveSchema.call(this, root, schOrRef);
+      const sch = resolveSchema.call(this, root2, schOrRef);
       if (typeof (sch === null || sch === void 0 ? void 0 : sch.schema) !== "object")
         return;
       return getJsonPointer.call(this, p, sch);
@@ -4002,7 +4026,7 @@ function requireCompile() {
       const schId = schema[schemaId];
       if (schId)
         baseId = (0, resolve_1.resolveUrl)(this.opts.uriResolver, baseId, schId);
-      return new SchemaEnv({ schema, schemaId, root, baseId });
+      return new SchemaEnv({ schema, schemaId, root: root2, baseId });
     }
     return getJsonPointer.call(this, p, schOrRef);
   }
@@ -4014,7 +4038,7 @@ function requireCompile() {
     "dependencies",
     "definitions"
   ]);
-  function getJsonPointer(parsedRef, { baseId, schema, root }) {
+  function getJsonPointer(parsedRef, { baseId, schema, root: root2 }) {
     var _a;
     if (((_a = parsedRef.fragment) === null || _a === void 0 ? void 0 : _a[0]) !== "/")
       return;
@@ -4033,10 +4057,10 @@ function requireCompile() {
     let env2;
     if (typeof schema != "boolean" && schema.$ref && !(0, util_1.schemaHasRulesButRef)(schema, this.RULES)) {
       const $ref = (0, resolve_1.resolveUrl)(this.opts.uriResolver, baseId, schema.$ref);
-      env2 = resolveSchema.call(this, root, $ref);
+      env2 = resolveSchema.call(this, root2, $ref);
     }
     const { schemaId } = this.opts;
-    env2 = env2 || new SchemaEnv({ schema, schemaId, root, baseId });
+    env2 = env2 || new SchemaEnv({ schema, schemaId, root: root2, baseId });
     if (env2.schema !== env2.root.schema)
       return env2;
     return void 0;
@@ -5470,8 +5494,8 @@ function requireCore$1() {
           keyRef = sch;
         if (sch === void 0) {
           const { schemaId } = this.opts;
-          const root = new compile_1.SchemaEnv({ schema: {}, schemaId });
-          sch = compile_1.resolveSchema.call(this, root, keyRef);
+          const root2 = new compile_1.SchemaEnv({ schema: {}, schemaId });
+          sch = compile_1.resolveSchema.call(this, root2, keyRef);
           if (!sch)
             return;
           this.refs[keyRef] = sch;
@@ -5835,20 +5859,20 @@ function requireRef() {
     code(cxt) {
       const { gen, schema: $ref, it } = cxt;
       const { baseId, schemaEnv: env2, validateName, opts, self } = it;
-      const { root } = env2;
-      if (($ref === "#" || $ref === "#/") && baseId === root.baseId)
+      const { root: root2 } = env2;
+      if (($ref === "#" || $ref === "#/") && baseId === root2.baseId)
         return callRootRef();
-      const schOrEnv = compile_1.resolveRef.call(self, root, baseId, $ref);
+      const schOrEnv = compile_1.resolveRef.call(self, root2, baseId, $ref);
       if (schOrEnv === void 0)
         throw new ref_error_1.default(it.opts.uriResolver, baseId, $ref);
       if (schOrEnv instanceof compile_1.SchemaEnv)
         return callValidate(schOrEnv);
       return inlineRefSchema(schOrEnv);
       function callRootRef() {
-        if (env2 === root)
+        if (env2 === root2)
           return callRef(cxt, validateName, env2, env2.$async);
-        const rootName = gen.scopeValue("root", { ref: root });
-        return callRef(cxt, (0, codegen_1._)`${rootName}.validate`, root, root.$async);
+        const rootName = gen.scopeValue("root", { ref: root2 });
+        return callRef(cxt, (0, codegen_1._)`${rootName}.validate`, root2, root2.$async);
       }
       function callValidate(sch) {
         const v = getValidate(cxt, sch);
@@ -7375,9 +7399,9 @@ function requireDynamicAnchor() {
   dynamicAnchor.dynamicAnchor = dynamicAnchor$1;
   function _getValidate(cxt) {
     const { schemaEnv, schema, self } = cxt.it;
-    const { root, baseId, localRefs, meta } = schemaEnv.root;
+    const { root: root2, baseId, localRefs, meta } = schemaEnv.root;
     const { schemaId } = self.opts;
-    const sch = new compile_1.SchemaEnv({ schema, schemaId, root, baseId, localRefs, meta });
+    const sch = new compile_1.SchemaEnv({ schema, schemaId, root: root2, baseId, localRefs, meta });
     compile_1.compileSchema.call(self, sch);
     return (0, ref_1.getValidate)(cxt, sch);
   }
@@ -10959,8 +10983,8 @@ class Conf {
     return this._handleStoreChange(callback);
   }
   get size() {
-    const entries = Object.keys(this.store);
-    return entries.filter((key) => !this._isReservedKeyPath(key)).length;
+    const entries2 = Object.keys(this.store);
+    return entries2.filter((key) => !this._isReservedKeyPath(key)).length;
   }
   /**
       Get all the config as an object or replace the current config with an object.
@@ -11477,6 +11501,8 @@ const DEFAULTS = {
   autoStartPages: ["openclaw", "dsh-web"],
   // empty until the user pins a page's auto-start by hand; see ContainerSettings.autoStartManual
   autoStartManual: [],
+  // built-in pages switched off from the Pages panel (hidden from the switcher, never started)
+  disabledPages: [],
   lastExternalUrls: [],
   externalSites: [],
   theme: "auto",
@@ -11527,12 +11553,12 @@ const DEFAULTS = {
   trayPageEntries: "all",
   trayBadge: "all"
 };
-let store = null;
+let store$1 = null;
 function getStore() {
-  if (!store) {
-    store = new ElectronStore({ name: "container-settings", defaults: DEFAULTS });
+  if (!store$1) {
+    store$1 = new ElectronStore({ name: "container-settings", defaults: DEFAULTS });
   }
-  return store;
+  return store$1;
 }
 function getSettings() {
   return { ...DEFAULTS, ...getStore().store };
@@ -11765,6 +11791,29 @@ const zh = {
   "err.nodeMissing": "未找到内置 Node 运行时，请在“环境准备”引导中点击下载（开发者可运行 npm run setup:node）",
   "err.dualInstance": "未能重新获取单实例锁：可能有另一个实例仍在运行，请确认是否出现双实例并存后手动关闭多余实例",
   "err.fatal": "桌面控制台遇到致命错误（{err}），即将退出。若反复出现，请通过任务管理器结束残留进程后重新启动；仍无法恢复时请重新安装或回退最近的更新",
+  "mcp.errNoId": "缺少服务 id",
+  "mcp.errBadId": "服务 id “{id}” 不合法：仅允许字母/数字/下划线/短横线，且以字母或数字开头",
+  "mcp.errNoCommand": "缺少启动命令（command）",
+  "mcp.errBadEnvKey": "环境变量名 “{key}” 不合法",
+  "mcp.errBadCwd": "工作目录（cwd）必须是字符串",
+  "mcp.errUnknown": "未知的 MCP 服务：{id}",
+  "mcp.errDisabled": "MCP 服务 {id} 已停用，无法连接",
+  "mcp.errNotConnected": "MCP 服务 {id} 未连接，请先连接",
+  "mcp.errHandshakeTimeout": "MCP 握手超时：服务进程未响应 initialize",
+  "mcp.errListToolsTimeout": "MCP 获取工具列表超时",
+  "mcp.errCallTimeout": "MCP 工具调用超时",
+  "mcp.errClosed": "MCP 服务进程已退出（异常终止或被外部结束）",
+  "mcp.errBuiltinEdit": "内置 MCP 服务不可修改",
+  "mcp.errBuiltinRemove": "内置 MCP 服务不可删除",
+  "mcp.errPkgMissing": "「{name}」的组件尚未下载，请点击行下方的下载按钮获取",
+  "mcp.builtin.sequential-thinking.name": "分步推理 Sequential Thinking",
+  "mcp.builtin.memory.name": "知识图谱记忆 Memory",
+  "mcp.builtin.everything.name": "官方能力演示 Everything",
+  "mcp.builtin.filesystem.name": "文件系统 Filesystem",
+  "mcp.builtin.context7.name": "库文档检索 Context7",
+  "mcp.builtin.playwright.name": "浏览器自动化 Playwright",
+  "mcp.builtin.github.name": "GitHub（需密钥）",
+  "mcp.builtin.brave-search.name": "Brave 搜索（需密钥）",
   "download.doneTitle": "下载完成",
   "download.doneBody": "{name} 已保存到 {dir}",
   "ipc.portRange": "端口需为 1-65535 的整数",
@@ -11792,6 +11841,8 @@ const zh = {
   "page.containerDesc": "容器主程序（git 更新检测对象）",
   "page.unknown": "未知 page: {id}",
   "page.externalNoStart": "{name} 是外部地址项目，无需启动进程",
+  "page.disabled": "{name} 已禁用，请在页面管理中重新启用后再试",
+  "page.disableExternal": "外部地址项目请在外部地址管理中删除，不支持禁用",
   "page.invalidConfig": "{name} 配置无效，无法启动（请先设置端口）",
   "page.noStartCommand": "{name} 缺少启动命令，无法在终端中运行",
   "page.logStarting": "[container] 正在启动 {name}（端口 {port}）…",
@@ -11904,6 +11955,12 @@ const zh = {
   "upd.openclawDirNotWritable": "（安装目录不可写：请以管理员身份重新构建，或手动运行 npm run setup:openclaw --force）",
   "upd.openclawUpgraded": "OpenClaw 已升级至 {after}，重启该页面后生效",
   "upd.openclawUpToDate": "OpenClaw 已是最新（{after}）",
+  "upd.mcpName": "MCP 内置组件",
+  "upd.mcpMissingCount": "{n} 个待下载",
+  "upd.mcpOutdatedPrefix": "可更新",
+  "upd.mcpRootMissing": "未确定 MCP 组件目录",
+  "upd.mcpReady": "MCP 内置组件已就绪",
+  "upd.mcpAlreadyReady": "MCP 内置组件已是最新（{after}）",
   "upd.localNoAuto": "本地项目不支持自动更新，请在其仓库拉取新版后重装/复制",
   "upd.builtinFollowsContainer": "容器内置页面，随桌面控制台源码一起更新",
   "upd.unknownChannel": "未知的更新方式",
@@ -11946,6 +12003,29 @@ const en = {
   "err.nodeMissing": "Built-in Node runtime not found — download it from the setup guide (developers: run npm run setup:node)",
   "err.dualInstance": "Failed to re-acquire the single-instance lock: another instance may still be running — check for duplicate instances and close the extra one manually",
   "err.fatal": "The desktop container hit a fatal error ({err}) and will exit. If it keeps happening, kill leftover processes in Task Manager and restart; if it persists, reinstall or roll back the latest update",
+  "mcp.errNoId": "missing server id",
+  "mcp.errBadId": 'invalid server id "{id}": use letters/digits/underscore/dash, starting with a letter or digit',
+  "mcp.errNoCommand": "missing command",
+  "mcp.errBadEnvKey": 'invalid env var name "{key}"',
+  "mcp.errBadCwd": "cwd must be a string",
+  "mcp.errUnknown": "unknown MCP server: {id}",
+  "mcp.errDisabled": "MCP server {id} is disabled and cannot be connected",
+  "mcp.errNotConnected": "MCP server {id} is not connected — connect it first",
+  "mcp.errHandshakeTimeout": "MCP handshake timed out: the server never answered initialize",
+  "mcp.errListToolsTimeout": "MCP listTools timed out",
+  "mcp.errCallTimeout": "MCP tool call timed out",
+  "mcp.errClosed": "MCP server process exited (crashed or killed externally)",
+  "mcp.errBuiltinEdit": "built-in MCP servers cannot be modified",
+  "mcp.errBuiltinRemove": "built-in MCP servers cannot be removed",
+  "mcp.errPkgMissing": "the component for '{name}' has not been downloaded yet — use the download button under the row to fetch it",
+  "mcp.builtin.sequential-thinking.name": "Sequential Thinking",
+  "mcp.builtin.memory.name": "Knowledge-graph Memory",
+  "mcp.builtin.everything.name": "Everything (official demo)",
+  "mcp.builtin.filesystem.name": "Filesystem",
+  "mcp.builtin.context7.name": "Context7 (library docs)",
+  "mcp.builtin.playwright.name": "Playwright (browser automation)",
+  "mcp.builtin.github.name": "GitHub (needs token)",
+  "mcp.builtin.brave-search.name": "Brave Search (needs key)",
   "download.doneTitle": "Download complete",
   "download.doneBody": "{name} saved to {dir}",
   "ipc.portRange": "Port must be an integer from 1 to 65535",
@@ -11973,6 +12053,8 @@ const en = {
   "page.containerDesc": "Container main program (git update-check target)",
   "page.unknown": "Unknown page: {id}",
   "page.externalNoStart": "{name} is an external address project; no process to start",
+  "page.disabled": "{name} is disabled; re-enable it in the Pages panel first",
+  "page.disableExternal": "External address projects can be removed in the External Sites manager; they cannot be disabled",
   "page.invalidConfig": "{name} has an invalid config and cannot start (set a port first)",
   "page.noStartCommand": "{name} has no start command and cannot run in a terminal",
   "page.logStarting": "[container] Starting {name} (port {port})…",
@@ -12085,6 +12167,12 @@ const en = {
   "upd.openclawDirNotWritable": " (install directory not writable: rebuild as administrator, or run npm run setup:openclaw --force manually)",
   "upd.openclawUpgraded": "OpenClaw upgraded to {after}; restart that page to apply",
   "upd.openclawUpToDate": "OpenClaw is up to date ({after})",
+  "upd.mcpName": "MCP built-in components",
+  "upd.mcpMissingCount": "{n} to download",
+  "upd.mcpOutdatedPrefix": "update available",
+  "upd.mcpRootMissing": "MCP components directory not resolved",
+  "upd.mcpReady": "MCP built-in components are ready",
+  "upd.mcpAlreadyReady": "MCP built-in components are up to date ({after})",
   "upd.localNoAuto": "Local projects do not support auto-update; pull the new version in their repo, then reinstall/copy",
   "upd.builtinFollowsContainer": "Built-in container page — updates with the desktop container source",
   "upd.unknownChannel": "Unknown update channel",
@@ -12326,10 +12414,7 @@ function flushFile(file, key, onLine) {
     return;
   }
   let off = streamOffsets.get(file);
-  if (off === void 0) {
-    streamOffsets.set(file, size);
-    return;
-  }
+  if (off === void 0) off = 0;
   if (size < off) off = 0;
   if (size <= off) return;
   const want = Math.min(size - off, 64 * 1024);
@@ -12354,10 +12439,23 @@ function flushFile(file, key, onLine) {
 function startLogStream(onLine) {
   stopLogStream();
   streamOffsets.clear();
-  const root = logsDir();
-  const pagesDir = join(root, "pages");
+  const root2 = logsDir();
+  const pagesDir = join(root2, "pages");
   try {
     mkdirSync(pagesDir, { recursive: true });
+  } catch {
+  }
+  const seed = (file) => {
+    try {
+      streamOffsets.set(file, statSync(file).size);
+    } catch {
+    }
+  };
+  seed(join(root2, "main.log"));
+  try {
+    for (const f of readdirSync(pagesDir)) {
+      if (f.endsWith(".log")) seed(join(pagesDir, f));
+    }
   } catch {
   }
   const watchDir = (dir, resolve2) => {
@@ -12375,7 +12473,7 @@ function startLogStream(onLine) {
     } catch {
     }
   };
-  watchDir(root, (name) => name === "main.log" ? "main" : null);
+  watchDir(root2, (name) => name === "main.log" ? "main" : null);
   watchDir(pagesDir, (name) => name.endsWith(".log") ? `pages/${name}` : null);
 }
 function stopLogStream() {
@@ -12623,6 +12721,537 @@ function notifyEvent(titleKey, bodyKey, params, revealPath) {
   } catch (err) {
     console.warn("[notify] failed (ignored):", err.message);
   }
+}
+function bridgeDir() {
+  return join(app$1.getPath("userData"), "mcp-bridge");
+}
+function bridgeCatalogFile() {
+  return join(bridgeDir(), "mcp-catalog.json");
+}
+function bridgeConfigFile() {
+  return join(bridgeDir(), "mcp-servers.json");
+}
+function buildCatalog(servers, tools) {
+  return {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    servers: servers.filter((s) => s.spec.enabled !== false).map((s) => ({
+      ...s.spec,
+      status: s.status,
+      tools: (s.status === "connected" ? tools : []).filter((t) => t.serverId === s.spec.id).map((t) => ({
+        name: t.name,
+        ...t.title ? { title: t.title } : {},
+        ...t.description ? { description: t.description } : {},
+        ...t.inputSchema ? { inputSchema: t.inputSchema } : {}
+      }))
+    }))
+  };
+}
+function buildMcpServersJson(servers) {
+  const out = {};
+  for (const s of servers) {
+    out[s.id] = {
+      command: s.command,
+      ...s.args?.length ? { args: s.args } : {},
+      ...s.env && Object.keys(s.env).length ? { env: s.env } : {},
+      ...s.cwd ? { cwd: s.cwd } : {}
+    };
+  }
+  return { mcpServers: out };
+}
+const BRIDGE_BEGIN = "# >>> dsh-mcp-bridge >>> (managed by 桌面控制台 MCP hub; edit above/below, never between)";
+const BRIDGE_END = "# <<< dsh-mcp-bridge <<<";
+function renderCodexBlock(servers) {
+  const lines = [BRIDGE_BEGIN];
+  for (const s of servers) {
+    lines.push(`[mcp_servers.${s.id}]`);
+    lines.push(`command = ${JSON.stringify(s.command)}`);
+    if (s.args?.length) {
+      lines.push(`args = [${s.args.map((a) => JSON.stringify(a)).join(", ")}]`);
+    }
+    if (s.cwd) lines.push(`cwd = ${JSON.stringify(s.cwd)}`);
+    if (s.env && Object.keys(s.env).length) {
+      lines.push(`[mcp_servers.${s.id}.env]`);
+      for (const [k, v] of Object.entries(s.env)) lines.push(`${k} = ${JSON.stringify(v)}`);
+    }
+    lines.push("");
+  }
+  lines.push(BRIDGE_END);
+  return lines.join("\n");
+}
+function hasUserTomlTable(outside, id2) {
+  return new RegExp(`^\\s*\\[\\s*mcp_servers\\s*\\.\\s*${id2.replace(/-/g, "\\-")}\\s*\\]`, "m").test(outside);
+}
+function mergeCodexToml(existing, servers) {
+  const begin = existing.indexOf(BRIDGE_BEGIN);
+  const end = existing.lastIndexOf(BRIDGE_END);
+  const hasBlock = begin >= 0 && end > begin;
+  const head = hasBlock ? existing.slice(0, begin) : existing;
+  const tail = hasBlock ? existing.slice(end + BRIDGE_END.length) : "";
+  const kept = servers.filter((s) => !hasUserTomlTable(head + tail, s.id));
+  if (!hasBlock && !kept.length) return existing;
+  const block = renderCodexBlock(kept);
+  const glue = (part) => part && !part.endsWith("\n") ? `${part}
+` : part;
+  return `${glue(head)}${block}
+${tail.replace(/^\n/, "")}`;
+}
+function bridgeEnvVars() {
+  return {
+    DSH_MCP_BRIDGE_DIR: bridgeDir(),
+    DSH_MCP_CATALOG: bridgeCatalogFile(),
+    DSH_MCP_CONFIG_JSON: bridgeConfigFile()
+  };
+}
+function detectMcpAgent(startCommand) {
+  return /codex(\b|\.)/i.test(startCommand || "") ? "codex" : null;
+}
+function writeText(file, text) {
+  mkdirSync(join(file, ".."), { recursive: true });
+  writeFileSync$1(file, text, "utf8");
+}
+function exportBridgeFiles(servers, tools) {
+  const catalog = buildCatalog(servers, tools);
+  writeText(bridgeCatalogFile(), JSON.stringify(catalog, null, 2));
+  writeText(bridgeConfigFile(), JSON.stringify(buildMcpServersJson(catalog.servers), null, 2));
+}
+function syncCodexConfig(servers, home) {
+  const dir = home ? expandHome(home) : process.env.CODEX_HOME ? expandHome(process.env.CODEX_HOME) : join(homedir$1(), ".codex");
+  const file = join(dir, "config.toml");
+  const existing = existsSync(file) ? readFileSync(file, "utf8") : "";
+  writeText(file, mergeCodexToml(existing, servers));
+  return file;
+}
+const BUILTIN_MCP_PKG = {
+  "sequential-thinking": "@modelcontextprotocol/server-sequential-thinking",
+  memory: "@modelcontextprotocol/server-memory",
+  everything: "@modelcontextprotocol/server-everything",
+  filesystem: "@modelcontextprotocol/server-filesystem",
+  context7: "@upstash/context7-mcp",
+  playwright: "@playwright/mcp",
+  github: "@modelcontextprotocol/server-github",
+  "brave-search": "@modelcontextprotocol/server-brave-search"
+};
+const MCP_PKG_GROUP = "@modelcontextprotocol/server-*";
+let root = null;
+function setMcpPackagesRoot(dir) {
+  root = dir;
+}
+function mcpPackagesRoot() {
+  return root;
+}
+function readBinPkgJson(dir) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch {
+  }
+  return null;
+}
+function resolveMcpPkgEntry(pkgName, base = root) {
+  if (!base) return null;
+  const pkgDir = join(base, "node_modules", ...pkgName.split("/"));
+  const meta = readBinPkgJson(pkgDir);
+  if (!meta) return null;
+  const short = pkgName.split("/").pop();
+  let rel = null;
+  if (typeof meta.bin === "string") rel = meta.bin;
+  else if (meta.bin && typeof meta.bin === "object") {
+    const map = meta.bin;
+    const pick = map[short] ?? Object.values(map).find((v) => typeof v === "string");
+    if (typeof pick === "string") rel = pick;
+  }
+  if (!rel) return null;
+  const entry = join(pkgDir, rel.replace(/^\.\//, ""));
+  return existsSync(entry) ? entry : null;
+}
+function mcpPkgVersion(pkgName, base = root) {
+  if (!base) return void 0;
+  const v = readBinPkgJson(join(base, "node_modules", ...pkgName.split("/")))?.version;
+  return typeof v === "string" && v ? v : void 0;
+}
+function mcpPackagesStatus() {
+  return Object.entries(BUILTIN_MCP_PKG).map(([id2, pkg]) => ({
+    id: id2,
+    pkg,
+    installed: resolveMcpPkgEntry(pkg) !== null,
+    version: mcpPkgVersion(pkg)
+  }));
+}
+const CONNECT_TIMEOUT_MS = 3e4;
+const MCP_CALL_TOOL_TIMEOUT_MS = 6e4;
+let store = null;
+function mcpStore() {
+  if (!store) {
+    store = new ElectronStore({
+      name: "mcp-servers",
+      defaults: { servers: [], dismissed: [] }
+    });
+  }
+  return store;
+}
+function isValidMcpId(id2) {
+  return /^[a-z0-9][a-z0-9_-]{0,39}$/i.test(id2);
+}
+function sanitizeMcpSpec(raw) {
+  const errors2 = [];
+  const r = raw ?? {};
+  const id2 = typeof r.id === "string" ? r.id.trim() : "";
+  if (!id2) errors2.push(m("mcp.errNoId"));
+  else if (!isValidMcpId(id2)) errors2.push(m("mcp.errBadId", { id: id2 }));
+  const command = typeof r.command === "string" ? r.command.trim() : "";
+  if (!command) errors2.push(m("mcp.errNoCommand"));
+  const args = Array.isArray(r.args) ? r.args.filter((a) => typeof a === "string") : [];
+  const env2 = {};
+  if (r.env && typeof r.env === "object" && !Array.isArray(r.env)) {
+    for (const [k, v] of Object.entries(r.env)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+        errors2.push(m("mcp.errBadEnvKey", { key: k }));
+        continue;
+      }
+      if (v !== void 0 && v !== null) env2[k] = String(v);
+    }
+  }
+  if (r.cwd !== void 0 && typeof r.cwd !== "string") errors2.push(m("mcp.errBadCwd"));
+  const name = typeof r.name === "string" && r.name.trim() ? r.name.trim() : id2;
+  if (errors2.length) return { errors: errors2 };
+  return {
+    spec: {
+      id: id2,
+      name,
+      command,
+      args,
+      env: Object.keys(env2).length ? env2 : void 0,
+      cwd: typeof r.cwd === "string" && r.cwd.trim() ? r.cwd.trim() : void 0,
+      enabled: r.enabled !== false,
+      autoStart: r.autoStart === true
+    },
+    errors: []
+  };
+}
+function flattenToolContent(content) {
+  if (!Array.isArray(content)) return typeof content === "string" ? content : "";
+  return content.map((block) => {
+    if (block && typeof block === "object" && block.type === "text") {
+      return String(block.text ?? "");
+    }
+    return JSON.stringify(block);
+  }).join("\n");
+}
+const entries = /* @__PURE__ */ new Map();
+const connecting = /* @__PURE__ */ new Map();
+let shuttingDown = false;
+const hubEvents = new EventEmitter();
+function snapshot() {
+  return [...entries.values()].map((e) => ({
+    spec: e.spec,
+    status: e.status,
+    serverInfo: e.serverInfo,
+    toolCount: e.tools.length,
+    lastError: e.lastError
+  }));
+}
+function emitChanged() {
+  hubEvents.emit("changed", snapshot());
+  scheduleBridgeExport();
+}
+const BRIDGE_DEBOUNCE_MS = 400;
+let bridgeTimer = null;
+function scheduleBridgeExport() {
+  if (bridgeTimer) clearTimeout(bridgeTimer);
+  bridgeTimer = setTimeout(() => {
+    bridgeTimer = null;
+    try {
+      exportBridgeFiles(effectiveServers(), listTools());
+    } catch (err) {
+      console.warn("[mcp-hub] bridge export failed:", err.message);
+    }
+  }, BRIDGE_DEBOUNCE_MS);
+}
+function loadSpecs() {
+  const raw = mcpStore().get("servers");
+  return Array.isArray(raw) ? raw : [];
+}
+function persistSpecs(list) {
+  mcpStore().set("servers", list.filter((s) => !LOCKED_MCP_IDS.has(s.id)));
+}
+const LOCKED_MCP_DEFS = [{ id: "filesystem", autoStart: true }];
+const SEED_MCP_DEFS = [
+  { id: "sequential-thinking" },
+  { id: "memory" },
+  { id: "everything" },
+  { id: "context7" },
+  { id: "playwright" },
+  { id: "github", enabled: false },
+  { id: "brave-search", enabled: false }
+];
+const LOCKED_MCP_IDS = new Set(LOCKED_MCP_DEFS.map((d) => d.id));
+const SEED_MCP_IDS = new Set(SEED_MCP_DEFS.map((d) => d.id));
+/* @__PURE__ */ new Set([...LOCKED_MCP_IDS, ...SEED_MCP_IDS]);
+const hasDirArg = (id2) => id2 === "filesystem";
+function curatedSpec(def) {
+  const pkg = BUILTIN_MCP_PKG[def.id];
+  return {
+    id: def.id,
+    name: m(`mcp.builtin.${def.id}.name`),
+    command: "npx",
+    args: hasDirArg(def.id) ? ["-y", pkg, resolveDownloadDir()] : ["-y", pkg],
+    enabled: def.enabled ?? true,
+    autoStart: def.autoStart === true,
+    builtin: LOCKED_MCP_IDS.has(def.id)
+  };
+}
+function lockedMcpSpecs() {
+  return LOCKED_MCP_DEFS.map(curatedSpec);
+}
+function isDefaultCurated(spec) {
+  const pkg = BUILTIN_MCP_PKG[spec.id];
+  return !!pkg && spec.command === "npx" && (spec.args ?? []).includes(pkg);
+}
+function effectiveSpawn(spec) {
+  const pkg = BUILTIN_MCP_PKG[spec.id];
+  const entry = pkg && isDefaultCurated(spec) ? resolveMcpPkgEntry(pkg) : null;
+  if (entry && pkg) {
+    const positional = (spec.args ?? []).filter((a) => a !== "-y" && a !== pkg);
+    return { command: getNodeExePath(), args: [entry, ...positional] };
+  }
+  return { command: spec.command, args: spec.args ?? [] };
+}
+function effectiveServers() {
+  return listServers().map((s) => {
+    const eff = effectiveSpawn(s.spec);
+    return { ...s, spec: { ...s.spec, command: eff.command, args: eff.args } };
+  });
+}
+function loadDismissed() {
+  const raw = mcpStore().get("dismissed");
+  return Array.isArray(raw) ? raw : [];
+}
+function dismissSeed(id2) {
+  const set = new Set(loadDismissed());
+  set.add(id2);
+  mcpStore().set("dismissed", [...set]);
+}
+function ensureSeeded() {
+  const specs = loadSpecs();
+  const present = new Set(specs.map((s) => s.id));
+  const dismissed = new Set(loadDismissed());
+  let changed = false;
+  for (const def of SEED_MCP_DEFS) {
+    if (present.has(def.id) || dismissed.has(def.id)) continue;
+    specs.push(curatedSpec(def));
+    present.add(def.id);
+    changed = true;
+  }
+  if (changed) persistSpecs(specs);
+}
+function reconcile() {
+  ensureSeeded();
+  const specs = [
+    ...lockedMcpSpecs(),
+    ...loadSpecs().filter((s) => !LOCKED_MCP_IDS.has(s.id))
+  ];
+  const alive = new Set(specs.map((s) => s.id));
+  for (const id2 of [...entries.keys()]) {
+    if (!alive.has(id2)) void disconnect(id2).catch(() => void 0);
+  }
+  for (const spec of specs) {
+    const existing = entries.get(spec.id);
+    if (existing) existing.spec = spec;
+    else entries.set(spec.id, { spec, status: "stopped", tools: [] });
+  }
+}
+function listServers() {
+  reconcile();
+  return snapshot();
+}
+function refreshBuiltinPackages() {
+  reconcile();
+  emitChanged();
+}
+async function saveServer(raw) {
+  const { spec, errors: errors2 } = sanitizeMcpSpec(raw);
+  if (!spec) throw new Error(errors2.join("; "));
+  if (LOCKED_MCP_IDS.has(spec.id)) throw new Error(m("mcp.errBuiltinEdit"));
+  const specs = loadSpecs();
+  const idx = specs.findIndex((s) => s.id === spec.id);
+  if (idx >= 0) specs[idx] = spec;
+  else specs.push(spec);
+  persistSpecs(specs);
+  reconcile();
+  const entry = entries.get(spec.id);
+  if (entry && entry.status === "connected") {
+    await disconnect(spec.id).catch(() => void 0);
+    void connect(spec.id).catch(() => void 0);
+  }
+  return snapshot();
+}
+async function removeServer(id2) {
+  if (LOCKED_MCP_IDS.has(id2)) throw new Error(m("mcp.errBuiltinRemove"));
+  await disconnect(id2).catch(() => void 0);
+  entries.delete(id2);
+  persistSpecs(loadSpecs().filter((s) => s.id !== id2));
+  if (SEED_MCP_IDS.has(id2)) dismissSeed(id2);
+  emitChanged();
+  return snapshot();
+}
+function connect(id2) {
+  const inflight = connecting.get(id2);
+  if (inflight) return inflight;
+  const run = doConnect(id2).finally(() => connecting.delete(id2));
+  connecting.set(id2, run);
+  return run;
+}
+async function doConnect(id2) {
+  const e = entries.get(id2) ?? reconcileAndFind(id2);
+  if (!e) throw new Error(m("mcp.errUnknown", { id: id2 }));
+  if (e.spec.enabled === false) throw new Error(m("mcp.errDisabled", { id: id2 }));
+  if (e.status === "connected") return;
+  if (e.status === "connecting") return connecting.get(id2) ?? Promise.resolve();
+  e.status = "connecting";
+  e.lastError = void 0;
+  emitChanged();
+  const startedAt = Date.now();
+  try {
+    const spawn2 = effectiveSpawn(e.spec);
+    const transport = new StdioClientTransport({
+      command: spawn2.command,
+      args: spawn2.args,
+      cwd: e.spec.cwd,
+      env: { ...getDefaultEnvironment(), ...e.spec.env ?? {} }
+    });
+    const client = new Client(
+      { name: "dsh-desktop-container", version: "1.0.0" },
+      { capabilities: {} }
+      // hub is a pure client: it offers no server-side capabilities back
+    );
+    await withTimeout(client.connect(transport), CONNECT_TIMEOUT_MS, m("mcp.errHandshakeTimeout"));
+    const listed = await withTimeout(client.listTools(), CONNECT_TIMEOUT_MS, m("mcp.errListToolsTimeout"));
+    e.client = client;
+    e.transport = transport;
+    const meta = client.getServerVersion?.();
+    if (meta?.name) e.serverInfo = { name: meta.name, version: meta.version };
+    e.tools = (listed?.tools ?? []).map((t) => ({
+      serverId: id2,
+      name: t.name,
+      title: t.title,
+      description: t.description,
+      inputSchema: t.inputSchema
+    }));
+    e.status = "connected";
+    transport.onclose = () => {
+      if (e.status === "connected" && !shuttingDown) {
+        e.status = "error";
+        e.lastError = m("mcp.errClosed");
+        e.tools = [];
+        emitChanged();
+        logEvent({ level: "warn", kind: "mcp.lost", pageId: id2 });
+      }
+    };
+    logEvent({
+      level: "info",
+      kind: "mcp.connected",
+      pageId: id2,
+      meta: { tools: e.tools.length, ms: Date.now() - startedAt }
+    });
+  } catch (err) {
+    e.status = "error";
+    e.lastError = isDefaultCurated(e.spec) && !resolveMcpPkgEntry(BUILTIN_MCP_PKG[e.spec.id]) ? m("mcp.errPkgMissing", { name: e.spec.name }) : err.message;
+    e.tools = [];
+    logEvent({ level: "error", kind: "mcp.failed", pageId: id2, detail: e.lastError });
+    throw err;
+  } finally {
+    emitChanged();
+  }
+}
+function reconcileAndFind(id2) {
+  reconcile();
+  return entries.get(id2);
+}
+async function disconnect(id2) {
+  const e = entries.get(id2);
+  if (!e) return;
+  const client = e.client;
+  e.client = void 0;
+  e.transport = void 0;
+  e.tools = [];
+  e.serverInfo = void 0;
+  try {
+    await withTimeout(client?.close() ?? Promise.resolve(), 5e3, "close timeout");
+  } catch {
+  }
+  if (e.status !== "error") e.status = "stopped";
+  e.lastError = void 0;
+  emitChanged();
+}
+function listTools(serverId) {
+  const all = [...entries.values()].flatMap((e) => e.tools);
+  return serverId ? all.filter((t) => t.serverId === serverId) : all;
+}
+async function callTool(args) {
+  const startedAt = Date.now();
+  const e = entries.get(args.serverId);
+  if (!e) return { ok: false, text: "", isError: true, error: m("mcp.errUnknown", { id: args.serverId }), durationMs: 0 };
+  if (!e.client || e.status !== "connected") {
+    return { ok: false, text: "", isError: true, error: m("mcp.errNotConnected", { id: e.spec.id }), durationMs: 0 };
+  }
+  try {
+    const res = await withTimeout(
+      e.client.callTool(
+        { name: args.tool, arguments: args.arguments ?? {} },
+        void 0,
+        { timeout: args.timeoutMs ?? MCP_CALL_TOOL_TIMEOUT_MS }
+      ),
+      (args.timeoutMs ?? MCP_CALL_TOOL_TIMEOUT_MS) + 2e3,
+      // SDK's own timeout should fire first; this is the safety net
+      m("mcp.errCallTimeout")
+    );
+    const text = flattenToolContent(res.content);
+    const isError = Boolean(res.isError);
+    return { ok: !isError, text, isError, durationMs: Date.now() - startedAt };
+  } catch (err) {
+    return { ok: false, text: "", isError: true, error: err.message, durationMs: Date.now() - startedAt };
+  }
+}
+async function autoStartAll() {
+  reconcile();
+  const wanted = [...entries.values()].filter(
+    (e) => e.spec.enabled !== false && e.spec.autoStart === true && e.status === "stopped"
+  );
+  await Promise.allSettled(
+    wanted.map(
+      (e) => connect(e.spec.id).catch((err) => {
+        console.warn(`[mcp-hub] auto-start ${e.spec.id} failed:`, err.message);
+      })
+    )
+  );
+}
+async function shutdownAll() {
+  shuttingDown = true;
+  if (bridgeTimer) {
+    clearTimeout(bridgeTimer);
+    bridgeTimer = null;
+  }
+  try {
+    exportBridgeFiles(listServers(), listTools());
+  } catch {
+  }
+  await Promise.allSettled([...entries.keys()].map((id2) => disconnect(id2)));
+}
+function withTimeout(p, ms, message) {
+  return new Promise((resolve2, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve2(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
 }
 const LOG_LIMIT = 1e3;
 const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 3e4);
@@ -13000,20 +13629,38 @@ function buildPageEnv(meta) {
     if (spec.defaultPath) ensureEnvDir(v);
     out[spec.key] = v;
   }
-  return { ...out, ...resolvePageCustomEnvs(meta.id) };
+  const merged = { ...out, ...resolvePageCustomEnvs(meta.id) };
+  if (detectMcpAgent(expandStartCommand(meta.startCommand || "")) === "codex") {
+    try {
+      const states = listServers();
+      const tools = listTools();
+      exportBridgeFiles(states, tools);
+      syncCodexConfig(buildCatalog(states, tools).servers, merged.CODEX_HOME);
+    } catch (err) {
+      console.warn("[mcp-bridge] codex sync failed:", err.message);
+    }
+  }
+  return { ...bridgeEnvVars(), ...merged };
 }
 function expandStartCommand(cmd) {
   return cmd.replace(/(^|\s)~(?=[/\\]|$)/g, (_m, pre) => pre + expandHome("~"));
 }
 class PageRegistry extends EventEmitter {
-  constructor(root) {
+  constructor(root2) {
     super();
-    this.root = root;
+    this.root = root2;
     this.reconcile();
   }
   root;
   entries = /* @__PURE__ */ new Map();
   quitting = false;
+  /**
+   * Terminal-kind pages have no `e.proc` — their process is a PTY owned by the
+   * IPC layer's PtyManager. `registerIpc` wires this hook so {@link stop} can
+   * reach the real process; the status flip itself arrives later, through the
+   * PTY exit event calling {@link reportTerminal}.
+   */
+  onKillTerminal = null;
   /**
    * Cached "is the on-demand CLI present" probe for the hosted runtimes, refreshed by
    * {@link refreshRuntimePresence} and read synchronously by {@link toState}. `loaded` is false
@@ -13078,6 +13725,9 @@ class PageRegistry extends EventEmitter {
       lastError: e.lastError,
       url,
       launchUrl: withThemeParam(e.launchUrl || url, e.meta.kind),
+      // Settings-backed flag joined onto every list so the switcher, the Pages panel and the
+      // start guards all read the same synchronous source (no async status IPC lag).
+      disabled: getSettings().disabledPages?.includes(e.meta.id) || void 0,
       runtimeMissing: (e.meta.kind === "dsh" || e.meta.kind === "openclaw") && e.status !== "running" ? !this.hasRuntime(e.meta.kind) : void 0,
       portHolder: e.portHolder,
       crashes: e.crashes || void 0,
@@ -13095,9 +13745,50 @@ class PageRegistry extends EventEmitter {
   logs(id2) {
     return [...this.entries.get(id2)?.logs ?? []];
   }
+  /**
+   * Terminal-kind CLIs are never spawned by the registry — the embedded terminal
+   * (PtyManager, wired from ipc.ts) owns their whole lifecycle, so it is the only
+   * source that can say "running". The PtyStart handler calls this on spawn and on
+   * exit to keep the switcher / Pages-panel traffic lights honest. The health
+   * watchdog stays out of it: its probes all short-circuit on the absent `e.proc`.
+   */
+  reportTerminal(id2, phase, code2) {
+    const e = this.entries.get(id2);
+    if (!e || e.meta.kind !== "terminal" || this.quitting) return;
+    if (phase === "running") {
+      if (e.status === "running") return;
+      e.startedAt = Date.now();
+      e.lastError = void 0;
+      e.exitCode = void 0;
+      e.logs.push(`[container] ${m("page.logStarting", { name: e.meta.name, port: "-" })}`);
+      this.setStatus(e, "running");
+      logEvent({
+        level: "info",
+        kind: "page.running",
+        pageId: id2,
+        // no port for a CLI — fill the template's {port} slot rather than leaking a raw placeholder
+        meta: { port: "-", ms: 0 }
+      });
+      return;
+    }
+    if (e.status !== "running" && e.status !== "starting") return;
+    e.exitCode = code2;
+    const clean = code2 === 0;
+    if (!clean) e.lastError = m("page.processExited", { code: code2 ?? "" });
+    e.logs.push(`[container] ${m("page.processExited", { code: code2 ?? "" })}`);
+    this.setStatus(e, clean ? "stopped" : "error");
+    logEvent({
+      level: clean ? "info" : "warn",
+      kind: "page.exit",
+      pageId: id2,
+      meta: { code: code2 ?? "n/a" }
+    });
+  }
   async start(id2, opts) {
     const e = this.entries.get(id2);
     if (!e) throw new Error(m("page.unknown", { id: id2 }));
+    if (getSettings().disabledPages?.includes(id2))
+      throw new Error(m("page.disabled", { name: e.meta.name }));
     const initialStatus = e.status;
     if (initialStatus === "running" || initialStatus === "starting") return this.toState(e);
     if (!opts?.fromCrashGuard) {
@@ -13397,6 +14088,13 @@ class PageRegistry extends EventEmitter {
     const e = this.entries.get(id2);
     if (!e) return;
     this.clearRestartTimers(e);
+    if (e.meta.kind === "terminal") {
+      if (e.status === "running" || e.status === "starting") {
+        e.logs.push(m("page.logStopping"));
+        this.onKillTerminal?.(id2);
+      }
+      return;
+    }
     if (!e?.proc) return;
     const proc = e.proc;
     e.logs.push(m("page.logStopping"));
@@ -13627,6 +14325,7 @@ class PageRegistry extends EventEmitter {
       ids.map(async (id2) => {
         const entry = this.entries.get(id2);
         if (!entry || entry.meta.kind === "terminal") return;
+        if (getSettings().disabledPages?.includes(id2)) return;
         if (!this.hasRuntime(entry.meta.kind)) {
           console.log(`[pages] auto-start ${id2} skipped: ${entry.meta.kind} runtime not installed`);
           return;
@@ -13638,6 +14337,11 @@ class PageRegistry extends EventEmitter {
         }
       })
     );
+  }
+  /** Broadcast the current list after a settings-only change (e.g. disabledPages flipped on a
+      stopped page, where no status transition fires emitChanged on its own). */
+  announceChange() {
+    this.emitChanged();
   }
   /** Stop every tracked page and resolve once all children have actually exited (or
    * their per-process timeouts fired). On Windows the taskkill tree-kill is async, so
@@ -13935,9 +14639,9 @@ async function listNodeVersions(includeIncompatible = false) {
   for (const url of indexUrls()) {
     try {
       const { body } = await get(url, 25e3);
-      const entries = JSON.parse(body);
+      const entries2 = JSON.parse(body);
       const out = [];
-      for (const e of entries) {
+      for (const e of entries2) {
         if (!isValidTag(e.version)) continue;
         if (e.files && !e.files.includes("win-x64-zip") && !e.files.includes("win-x64")) continue;
         const usable = nodeVersionUsable(e.version);
@@ -14462,33 +15166,45 @@ async function installDeps(dir, onMessage) {
     [cli, ...args, "--no-audit", "--no-fund"],
     dir,
     `npm ${args.join(" ")}`,
-    onMessage
+    onMessage,
+    // the import target folder *is* the page id — mirror npm's output into its log file
+    basename(dir)
   );
 }
-function runStream(cmd, args, cwd, caption, onMessage, timeoutMs = 15 * 6e4) {
+function runStream(cmd, args, cwd, caption, onMessage, logTo, timeoutMs = 15 * 6e4) {
   return new Promise((resolve2, reject) => {
     const child = spawn(cmd, args, { cwd, env: bundledEnv(), windowsHide: true, shell: false });
+    console.log(`[install] ${caption} started in ${cwd}`);
     let tail = "";
     const onData = (d) => {
-      tail += String(d);
+      const text = String(d);
+      if (logTo) logPageLine(logTo, text);
+      tail += text;
       if (tail.length > 8e3) tail = tail.slice(-8e3);
-      const lines = String(d).split(/\r?\n/).filter((l) => l.trim());
+      const lines = text.split(/\r?\n/).filter((l) => l.trim());
       if (lines.length) onMessage?.(lines[lines.length - 1].trim());
     };
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
+      console.error(`[install] ${caption} timed out after ${Math.round(timeoutMs / 6e4)}min`);
       reject(new Error(m("install.timeout", { cmd: caption })));
     }, timeoutMs);
     child.on("error", (err) => {
       clearTimeout(timer);
+      console.error(`[install] ${caption} spawn failed:`, err);
       reject(err);
     });
     child.on("close", (code2) => {
       clearTimeout(timer);
-      if (code2 === 0) resolve2();
-      else reject(new Error(m("install.depsFail", { cmd: caption, tail: tail.slice(-500) })));
+      if (code2 === 0) {
+        console.log(`[install] ${caption} finished`);
+        resolve2();
+      } else {
+        console.error(`[install] ${caption} failed (exit ${code2}): ${tail.slice(-500)}`);
+        reject(new Error(m("install.depsFail", { cmd: caption, tail: tail.slice(-500) })));
+      }
     });
   });
 }
@@ -14607,7 +15323,9 @@ async function installFromNpm(pagesDir, spec, name, onProgress) {
       [cli, "install", specLabel, "--no-audit", "--no-fund"],
       target,
       `npm install ${specLabel}`,
-      (line) => emit({ phase: "installing", message: line })
+      (line) => emit({ phase: "installing", message: line }),
+      // mirror the npm install into the new page's own log file, like a hosted page's output
+      dirName
     );
   } catch (err) {
     rmSync(target, { recursive: true, force: true });
@@ -14653,8 +15371,8 @@ async function installFromNpm(pagesDir, spec, name, onProgress) {
   emit({ phase: "done", percent: 100 });
   return dirName;
 }
-async function planCopy(root) {
-  const entries = [];
+async function planCopy(root2) {
+  const entries2 = [];
   let totalBytes = 0;
   const walk = async (dir, relBase) => {
     const items2 = await readdir(dir, { withFileTypes: true });
@@ -14664,20 +15382,20 @@ async function planCopy(root) {
       const abs = join(dir, it.name);
       const rel = relBase ? `${relBase}/${it.name}` : it.name;
       if (it.isDirectory()) {
-        entries.push({ abs, rel, dir: true, size: 0 });
+        entries2.push({ abs, rel, dir: true, size: 0 });
         await walk(abs, rel);
       } else if (it.isFile()) {
         const s = await stat(abs);
-        entries.push({ abs, rel, dir: false, size: s.size });
+        entries2.push({ abs, rel, dir: false, size: s.size });
         totalBytes += s.size;
       }
     }
   };
-  await walk(root, "");
-  return { entries, totalBytes };
+  await walk(root2, "");
+  return { entries: entries2, totalBytes };
 }
 async function copyDirWithProgress(srcDir, target, emit) {
-  const { entries, totalBytes } = await planCopy(srcDir);
+  const { entries: entries2, totalBytes } = await planCopy(srcDir);
   mkdirSync(target, { recursive: true });
   let received = 0;
   let last = 0;
@@ -14693,7 +15411,7 @@ async function copyDirWithProgress(srcDir, target, emit) {
     });
   };
   report(true);
-  for (const e of entries) {
+  for (const e of entries2) {
     const dest = join(target, e.rel);
     if (e.dir) {
       if (!existsSync(dest)) mkdirSync(dest, { recursive: true });
@@ -14956,11 +15674,11 @@ async function streamBlob(rev, partPath, resumeFrom, total, name, resumed, onPro
     throw err;
   }
 }
-function pruneOldReleases(root, keep) {
+function pruneOldReleases(root2, keep) {
   try {
-    for (const f of readdirSync(root)) {
+    for (const f of readdirSync(root2)) {
       if (f === "release.git" || keep.has(f)) continue;
-      const p = join(root, f);
+      const p = join(root2, f);
       try {
         if (!statSync(p).isDirectory()) continue;
       } catch {
@@ -14975,12 +15693,12 @@ function pruneOldReleases(root, keep) {
   }
 }
 async function downloadAsar(tip, name, onProgress) {
-  const root = updatesRoot();
-  mkdirSync(root, { recursive: true });
+  const root2 = updatesRoot();
+  mkdirSync(root2, { recursive: true });
   const rev = `${tip.commit}:app.zip`;
   const total = Number(runGit(["--git-dir", gitDir(), "cat-file", "-s", rev]).trim());
   if (!Number.isFinite(total) || total <= 0) throw new Error(m("git.asarSizeUnknown"));
-  const dir = join(root, tip.commit);
+  const dir = join(root2, tip.commit);
   mkdirSync(dir, { recursive: true });
   const part = join(dir, "app.zip.part");
   let resumeFrom = 0;
@@ -15002,7 +15720,7 @@ async function downloadAsar(tip, name, onProgress) {
   const stagedAsar = join(dir, "app.asar");
   if (!ofs.existsSync(stagedAsar) || ofs.statSync(stagedAsar).size < MIN_ASAR_BYTES)
     throw new Error(m("git.asarExtractFailed"));
-  const metaFile = join(root, "update-meta.json");
+  const metaFile = join(root2, "update-meta.json");
   let prev = {};
   try {
     prev = JSON.parse(readFileSync(metaFile, "utf-8"));
@@ -15020,7 +15738,7 @@ async function downloadAsar(tip, name, onProgress) {
   );
   const keep = /* @__PURE__ */ new Set([tip.commit]);
   if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0]);
-  pruneOldReleases(root, keep);
+  pruneOldReleases(root2, keep);
   notifyEvent("notify.updateReadyTitle", "notify.updateReadyBody", { version: tip.version });
   logEvent({
     level: "info",
@@ -15331,25 +16049,25 @@ function dshRoots() {
   return resolveDshRuntimeDirs();
 }
 function dshBinJs() {
-  for (const root of dshRoots()) {
-    const p = join(root, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+  for (const root2 of dshRoots()) {
+    const p = join(root2, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
     if (existsSync(p)) return p;
   }
   return null;
 }
 function dshBinCandidates() {
   const out = [];
-  for (const root of dshRoots()) {
-    const bin = join(root, "node_modules", ".bin");
+  for (const root2 of dshRoots()) {
+    const bin = join(root2, "node_modules", ".bin");
     if (process.platform === "win32")
-      out.push(join(bin, "dsh.cmd"), join(bin, "dsh"), join(root, "dsh.cmd"), join(root, "dsh"));
-    else out.push(join(bin, "dsh"), join(root, "dsh"));
+      out.push(join(bin, "dsh.cmd"), join(bin, "dsh"), join(root2, "dsh.cmd"), join(root2, "dsh"));
+    else out.push(join(bin, "dsh"), join(root2, "dsh"));
   }
   return out;
 }
 function dshPackageDir() {
-  for (const root of dshRoots()) {
-    const p = join(root, "node_modules", "@deepseek-ai", "dsh");
+  for (const root2 of dshRoots()) {
+    const p = join(root2, "node_modules", "@deepseek-ai", "dsh");
     if (existsSync(join(p, "package.json"))) return p;
   }
   return null;
@@ -15372,11 +16090,11 @@ async function probePnpmBinDirs() {
   }
   return dirs;
 }
-function repairPnpmCmd(root) {
+function repairPnpmCmd(root2) {
   if (process.platform !== "win32") return;
-  linkNativePnpm(root);
-  const mjs = join(root, "node_modules", "pnpm", "bin", "pnpm.mjs");
-  const cmd = join(root, "pnpm.cmd");
+  linkNativePnpm(root2);
+  const mjs = join(root2, "node_modules", "pnpm", "bin", "pnpm.mjs");
+  const cmd = join(root2, "pnpm.cmd");
   if (!existsSync(mjs) || !existsSync(cmd)) return;
   const desired = '@ECHO off\r\nSETLOCAL\r\nIF EXIST "%~dp0node.exe" (\r\n  "%~dp0node.exe" "%~dp0node_modules\\pnpm\\bin\\pnpm.mjs" %*\r\n) ELSE (\r\n  node "%~dp0node_modules\\pnpm\\bin\\pnpm.mjs" %*\r\n)\r\nENDLOCAL\r\nEXIT /b %ERRORLEVEL%\r\n';
   try {
@@ -15386,8 +16104,8 @@ function repairPnpmCmd(root) {
   } catch {
   }
 }
-function linkNativePnpm(root) {
-  const pkgDir = join(root, "node_modules", "pnpm");
+function linkNativePnpm(root2) {
+  const pkgDir = join(root2, "node_modules", "pnpm");
   const manifest = join(pkgDir, "package.json");
   if (!existsSync(manifest)) return;
   let pkg;
@@ -15399,7 +16117,7 @@ function linkNativePnpm(root) {
   const target = Object.keys(pkg.optionalDependencies ?? {}).find((k) => k.startsWith("@pnpm/exe."));
   if (!target) return;
   const binFile = target.includes("win32-arm64") ? "pnpm-arm64.exe" : "pnpm.exe";
-  const native = join(root, "node_modules", ...target.split("/"), binFile);
+  const native = join(root2, "node_modules", ...target.split("/"), binFile);
   if (!existsSync(native)) return;
   try {
     const buf = readFileSync(native);
@@ -15425,7 +16143,9 @@ async function dshEnv(profileDir) {
   ];
   return envWithPATH(dirs, {
     DSH_HOME: join(profileDir, "..", ".."),
-    DSH_NODE_PATH: nodeExe
+    DSH_NODE_PATH: nodeExe,
+    // MCP hub catalog pointers: dsh's terminals inherit them to every plugin process
+    ...bridgeEnvVars()
   });
 }
 function validateProfileName(profile) {
@@ -15544,8 +16264,8 @@ function installedBundleVersion(name, profileDir) {
 }
 function bundleSearchDirs(profileDir) {
   const dirs = [join(profileDir, "node_modules")];
-  for (const root of dshRoots()) {
-    const nm = join(root, "node_modules");
+  for (const root2 of dshRoots()) {
+    const nm = join(root2, "node_modules");
     dirs.push(nm, join(nm, "@deepseek-ai", "dsh", "node_modules"));
   }
   return dirs;
@@ -15896,10 +16616,10 @@ function openclawEntryCandidates() {
     join(app$1.getAppPath(), "resources", "openclaw"),
     join(process.cwd(), "resources", "openclaw")
   ].filter(Boolean);
-  const entries = ["node_modules", join("lib", "node_modules")];
+  const entries2 = ["node_modules", join("lib", "node_modules")];
   const out = [];
-  for (const root of roots)
-    for (const e of entries) out.push(join(root, e, "openclaw", "openclaw.mjs"));
+  for (const root2 of roots)
+    for (const e of entries2) out.push(join(root2, e, "openclaw", "openclaw.mjs"));
   return out;
 }
 function resolveOpenclawCommand() {
@@ -15908,7 +16628,7 @@ function resolveOpenclawCommand() {
   return { cmd: getNodeExePath(), script };
 }
 function openclawEnv(extra = {}) {
-  return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...extra });
+  return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...bridgeEnvVars(), ...extra });
 }
 function isOpenclawInstalled() {
   return openclawEntryCandidates().some((p) => existsSync(p));
@@ -15920,10 +16640,10 @@ function openclawVersion() {
     join(app$1.getAppPath(), "resources", "openclaw"),
     join(process.cwd(), "resources", "openclaw")
   ].filter(Boolean);
-  for (const root of roots)
+  for (const root2 of roots)
     for (const e of ["node_modules", join("lib", "node_modules")]) {
       try {
-        return JSON.parse(readFileSync(join(root, e, "openclaw", "package.json"), "utf-8")).version ?? void 0;
+        return JSON.parse(readFileSync(join(root2, e, "openclaw", "package.json"), "utf-8")).version ?? void 0;
       } catch {
       }
     }
@@ -16343,7 +17063,8 @@ async function computeAll(pages) {
       (await getDshStatus()).version,
       dshChannel()
     ),
-    checkBuiltin("OpenClaw", openclawRoot() || "", OPENCLAW_PKG, openclawVersion())
+    checkBuiltin("OpenClaw", openclawRoot() || "", OPENCLAW_PKG, openclawVersion()),
+    checkMcpPackages()
   ]);
 }
 async function checkUpdates(pages, force = false) {
@@ -16413,11 +17134,11 @@ function npmWatcher(name, builtin, onProgress) {
 async function updateDshSelf(pinned, onProgress, rowName) {
   const name = m("upd.dshName");
   const watch2 = npmWatcher(rowName || name, "dsh", onProgress);
-  const root = join(app$1.getPath("userData"), "dsh");
+  const root2 = join(app$1.getPath("userData"), "dsh");
   const before = (await getDshStatus()).version;
   try {
-    mkdirSync(root, { recursive: true });
-    writeFileSync$1(join(root, ".npmrc"), `registry=${registryUrl()}
+    mkdirSync(root2, { recursive: true });
+    writeFileSync$1(join(root2, ".npmrc"), `registry=${registryUrl()}
 `);
     const node = getNodeExePath();
     const npmCli = bundledNpmCli();
@@ -16436,11 +17157,11 @@ async function updateDshSelf(pinned, onProgress, rowName) {
         "--no-audit",
         "--no-fund"
       ],
-      { ...process.env, npm_config_prefix: root },
+      { ...process.env, npm_config_prefix: root2 },
       15 * 6e4,
       watch2
     );
-    if (!existsSync(join(root, "pnpm.cmd")))
+    if (!existsSync(join(root2, "pnpm.cmd")))
       await runNpm(
         node,
         [
@@ -16453,11 +17174,11 @@ async function updateDshSelf(pinned, onProgress, rowName) {
           "--no-audit",
           "--no-fund"
         ],
-        { ...process.env, npm_config_prefix: root },
+        { ...process.env, npm_config_prefix: root2 },
         15 * 6e4,
         watch2
       );
-    repairPnpmCmd(root);
+    repairPnpmCmd(root2);
   } catch (err) {
     const msg = err.message || String(err);
     const hint = /EPERM|EACCES|EROFS|permission/i.test(msg) ? m("upd.dshDirNotWritable") : "";
@@ -16474,12 +17195,12 @@ async function updateDshSelf(pinned, onProgress, rowName) {
 async function reprovisionOpenclaw(pinned, onProgress, rowName) {
   const name = "OpenClaw";
   const watch2 = npmWatcher(rowName || name, "openclaw", onProgress);
-  const root = openclawRoot();
-  if (!root) return { name, ok: false, updated: false, error: m("upd.openclawDirMissing") };
+  const root2 = openclawRoot();
+  if (!root2) return { name, ok: false, updated: false, error: m("upd.openclawDirMissing") };
   const before = openclawVersion();
   try {
-    mkdirSync(root, { recursive: true });
-    writeFileSync$1(join(root, ".npmrc"), `registry=${registryUrl()}
+    mkdirSync(root2, { recursive: true });
+    writeFileSync$1(join(root2, ".npmrc"), `registry=${registryUrl()}
 `);
     const node = getNodeExePath();
     const npmCli = bundledNpmCli();
@@ -16495,7 +17216,7 @@ async function reprovisionOpenclaw(pinned, onProgress, rowName) {
         "--no-audit",
         "--no-fund"
       ],
-      { ...process.env, npm_config_prefix: root },
+      { ...process.env, npm_config_prefix: root2 },
       15 * 6e4,
       watch2
     );
@@ -16512,8 +17233,80 @@ async function reprovisionOpenclaw(pinned, onProgress, rowName) {
     message: after && after !== before ? m("upd.openclawUpgraded", { after }) : m("upd.openclawUpToDate", { after: after || "?" })
   };
 }
+async function checkMcpPackages() {
+  const name = m("upd.mcpName");
+  const base = {
+    name,
+    dir: mcpPackagesRoot() || "",
+    isContainer: false,
+    ok: false,
+    source: "builtin",
+    packageName: MCP_PKG_GROUP,
+    action: "reprovision",
+    canAutoUpdate: true
+  };
+  const statuses = mcpPackagesStatus();
+  const missing = statuses.filter((s) => !s.installed).length;
+  let registryDown = false;
+  let outdated = null;
+  for (const s of statuses) {
+    if (!s.installed) continue;
+    const latest = await fetchNpmLatest(s.pkg);
+    if (!latest) registryDown = true;
+    else if (s.version && isNewer(s.version, latest)) outdated = outdated || s.pkg;
+  }
+  if (missing === 0 && registryDown)
+    return { ...base, currentVersion: `${statuses.length}`, error: m("upd.registryUnreachable") };
+  const currentVersion = missing ? `${statuses.length - missing}/${statuses.length}` : statuses[0]?.version;
+  return {
+    ...base,
+    ok: true,
+    currentVersion,
+    hasUpdate: missing > 0 || outdated !== null,
+    latestVersion: missing ? m("upd.mcpMissingCount", { n: missing }) : outdated ? `${m("upd.mcpOutdatedPrefix")} ${outdated}` : void 0
+  };
+}
+async function installMcpPackages(pinned, onProgress, rowName) {
+  const name = m("upd.mcpName");
+  const root2 = mcpPackagesRoot();
+  if (!root2) return { name, ok: false, updated: false, error: m("upd.mcpRootMissing") };
+  const watch2 = npmWatcher(rowName || name, "mcp", onProgress);
+  const before = mcpPackagesStatus().filter((s) => s.installed).map((s) => `${s.pkg}@${s.version}`).join(",");
+  try {
+    mkdirSync(root2, { recursive: true });
+    writeFileSync$1(join(root2, ".npmrc"), `registry=${registryUrl()}
+`);
+    const node = getNodeExePath();
+    const npmCli = bundledNpmCli();
+    if (!existsSync(npmCli)) throw new Error(m("upd.npmMissing", { npm: npmCli }));
+    const specs = mcpPackagesStatus().map((s) => `${s.pkg}@${pinned || "latest"}`);
+    await runNpm(
+      node,
+      [npmCli, "install", "--global", "--no-save", "--prefix", root2, ...specs, "--ignore-scripts", "--no-audit", "--no-fund"],
+      { ...process.env, npm_config_prefix: root2 },
+      15 * 6e4,
+      watch2
+    );
+  } catch (err) {
+    return { name, ok: false, updated: false, error: err.message || String(err) };
+  }
+  const after = mcpPackagesStatus().filter((s) => s.installed).map((s) => `${s.pkg}@${s.version}`).join(",");
+  return {
+    name,
+    ok: true,
+    updated: after !== before,
+    message: after !== before ? m("upd.mcpReady") : m("upd.mcpAlreadyReady", { after: after || "?" })
+  };
+}
 async function provisionBuiltin(kind, pinned) {
   const version = (pinned || "").trim();
+  if (kind === "mcp") {
+    const result2 = await installMcpPackages(version);
+    logEvent(
+      result2.ok ? { level: "info", kind: "runtime.provision", detail: result2.message, meta: { name: kind } } : { level: "error", kind: "runtime.provisionFail", detail: result2.error, meta: { name: kind } }
+    );
+    return result2;
+  }
   const result = kind === "dsh" ? await updateDshSelf(version) : await reprovisionOpenclaw(version);
   logEvent(
     result.ok ? {
@@ -16545,7 +17338,7 @@ async function runUpdate(target, onProgress) {
     case "apply-asar":
       return applyAsarUpdate(target.name, onProgress);
     case "reprovision":
-      return target.packageName === DSH_PKG ? updateDshSelf(void 0, onProgress, target.name) : reprovisionOpenclaw(void 0, onProgress, target.name);
+      return target.packageName === MCP_PKG_GROUP ? installMcpPackages(void 0, onProgress, target.name) : target.packageName === DSH_PKG ? updateDshSelf(void 0, onProgress, target.name) : reprovisionOpenclaw(void 0, onProgress, target.name);
     case "manual":
       return {
         name: target.name,
@@ -17126,14 +17919,14 @@ async function probeRegistries(timeoutMs = 6e3) {
 const CACHE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "Shared Dictionary"];
 const STORAGE_DIRS = ["Local Storage", "Session Storage", "IndexedDB", "FileSystem", "WebStorage"];
 async function dirBytes(path2) {
-  let entries;
+  let entries2;
   try {
-    entries = await promises.readdir(path2, { withFileTypes: true });
+    entries2 = await promises.readdir(path2, { withFileTypes: true });
   } catch {
     return 0;
   }
   let total = 0;
-  for (const ent of entries) {
+  for (const ent of entries2) {
     const child = join(path2, ent.name);
     if (ent.isDirectory()) {
       total += await dirBytes(child);
@@ -17149,8 +17942,8 @@ async function dirBytes(path2) {
   return total;
 }
 async function sumDirs(names2) {
-  const root = app$1.getPath("userData");
-  const sizes = await Promise.all(names2.map((n) => dirBytes(join(root, n))));
+  const root2 = app$1.getPath("userData");
+  const sizes = await Promise.all(names2.map((n) => dirBytes(join(root2, n))));
   return sizes.reduce((a, b) => a + b, 0);
 }
 async function getWebDataReport() {
@@ -17370,9 +18163,9 @@ function sampleWindows(roots) {
       for (const line of out.split(/\r?\n/)) {
         const parts = line.trim().split("|");
         if (parts.length !== 3) continue;
-        const root = Number(parts[0]);
-        if (!Number.isFinite(root)) continue;
-        map.set(root, { ws: Number(parts[1]) || 0, cpu: Number(parts[2]) || 0 });
+        const root2 = Number(parts[0]);
+        if (!Number.isFinite(root2)) continue;
+        map.set(root2, { ws: Number(parts[1]) || 0, cpu: Number(parts[2]) || 0 });
       }
       resolve2(map);
     });
@@ -17381,13 +18174,13 @@ function sampleWindows(roots) {
 function samplePosix(roots) {
   const map = /* @__PURE__ */ new Map();
   const procs = [];
-  let entries = [];
+  let entries2 = [];
   try {
-    entries = readdirSync("/proc");
+    entries2 = readdirSync("/proc");
   } catch {
     return map;
   }
-  for (const entry of entries) {
+  for (const entry of entries2) {
     if (!/^\d+$/.test(entry)) continue;
     const pid = Number(entry);
     try {
@@ -17408,20 +18201,20 @@ function samplePosix(roots) {
     } catch {
     }
   }
-  for (const root of roots) {
+  for (const root2 of roots) {
     let ws = 0;
     let cpuTicks = 0;
-    for (const p of descendantsOf(procs, root)) {
+    for (const p of descendantsOf(procs, root2)) {
       ws += p.rssKb * 1024;
       cpuTicks += p.cpuTicks;
     }
-    map.set(root, { ws, cpu: cpuTicks / 100 });
+    map.set(root2, { ws, cpu: cpuTicks / 100 });
   }
   return map;
 }
-function descendantsOf(procs, root) {
+function descendantsOf(procs, root2) {
   const out = [];
-  const stack = [root];
+  const stack = [root2];
   const seen = /* @__PURE__ */ new Set();
   while (stack.length) {
     const cur = stack.pop();
@@ -17451,21 +18244,21 @@ async function collectPageMetrics(registry2, memWarnMb) {
     return [];
   }
   const out = [];
-  for (const [root, s] of samples) {
-    const pageId = byPid.get(root);
+  for (const [root2, s] of samples) {
+    const pageId = byPid.get(root2);
     if (!pageId) continue;
-    const prev = lastCpu.get(root);
+    const prev = lastCpu.get(root2);
     let cpu = 0;
     if (prev) {
       const wallSec = (now - prev.at) / 1e3;
       const cpuSec = s.cpu - prev.cpu;
       if (wallSec > 0 && cpuSec >= 0) cpu = Math.round(cpuSec / wallSec * 1e3) / 10;
     }
-    lastCpu.set(root, { cpu: s.cpu, at: now });
+    lastCpu.set(root2, { cpu: s.cpu, at: now });
     const memMb = Math.round(s.ws / 1024 / 1024);
     out.push({
       pageId,
-      pid: root,
+      pid: root2,
       cpu,
       memMb,
       ts: now,
@@ -17758,9 +18551,14 @@ let metricsTimer = null;
 const METRICS_POLL_MS = 5e3;
 const memRestarted = /* @__PURE__ */ new Set();
 const MEM_RESTART_MIN_UPTIME_MS = 10 * 6e4;
+function savedSite(pageId) {
+  return getSettings().externalSites?.find((s) => s.id === pageId) || null;
+}
 const popoutWindows = /* @__PURE__ */ new Map();
 let popoutSaveTimer = null;
 let guestKeysWired = false;
+let guestSchemeWired = false;
+const guestSchemeCss = /* @__PURE__ */ new WeakMap();
 function shellPreload() {
   const dir = join(__dirname, "../preload");
   for (const name of ["index.mjs", "index.js"]) {
@@ -17804,7 +18602,7 @@ function openPageWindow(registry2, pageId) {
     minHeight: 480,
     show: false,
     autoHideMenuBar: true,
-    title: state?.name || pageId,
+    title: state?.name || savedSite(pageId)?.name || pageId,
     backgroundColor: "#000000",
     // same frameless contract as the main shell: the renderer draws its own title strip
     frame: false,
@@ -17891,6 +18689,49 @@ function wireGuestShortcuts(registry2) {
     });
   });
 }
+const GUEST_DARK_PROBE = `(() => {
+  const de = document.documentElement
+  if (!de) return false
+  const root = getComputedStyle(de)
+  if ((root.colorScheme || 'normal').indexOf('dark') >= 0) return false
+  const rgba = (c) => {
+    const m = String(c).match(/rgba?\\(([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)(?:[,\\s/]+([\\d.]+))?\\)/)
+    return m ? { r: +m[1], g: +m[2], b: +m[3], a: m[4] === undefined ? 1 : +m[4] } : null
+  }
+  const body = document.body ? rgba(getComputedStyle(document.body).backgroundColor) : null
+  const bg = (body && body.a ? body : rgba(root.backgroundColor)) || null
+  if (!bg || bg.a === 0) return false
+  return 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b < 110
+})()`;
+const GUEST_DARK_CSS = ":root{color-scheme:dark}";
+async function backfillGuestScheme(contents) {
+  if (contents.isDestroyed()) return;
+  const prev = guestSchemeCss.get(contents);
+  if (prev) {
+    guestSchemeCss.delete(contents);
+    await contents.removeInsertedCSS(prev).catch(() => void 0);
+  }
+  if (!nativeTheme.shouldUseDarkColors) return;
+  try {
+    if (await contents.executeJavaScript(GUEST_DARK_PROBE, false) !== true) return;
+    guestSchemeCss.set(contents, await contents.insertCSS(GUEST_DARK_CSS, { cssOrigin: "user" }));
+  } catch {
+  }
+}
+function wireGuestScheme() {
+  if (guestSchemeWired) return;
+  guestSchemeWired = true;
+  app$1.on("web-contents-created", (_e, contents) => {
+    if (contents.getType() !== "webview") return;
+    contents.on("dom-ready", () => void backfillGuestScheme(contents));
+    contents.once("destroyed", () => guestSchemeCss.delete(contents));
+  });
+  nativeTheme.on("updated", () => {
+    for (const c of webContents.getAllWebContents()) {
+      if (!c.isDestroyed() && c.getType() === "webview") void backfillGuestScheme(c);
+    }
+  });
+}
 function registerIpc(registry2) {
   const ok = (data) => ({ ok: true, data });
   const fail = (err) => ({
@@ -17926,6 +18767,7 @@ function registerIpc(registry2) {
     }
   });
   wireGuestShortcuts(registry2);
+  wireGuestScheme();
   nativeTheme.on("updated", () => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(IPC.OnNativeTheme, nativeTheme.shouldUseDarkColors);
@@ -18001,6 +18843,7 @@ function registerIpc(registry2) {
       try {
         const res = await provisionBuiltin(kind, version);
         clearUpdateCache();
+        if (kind === "mcp") refreshBuiltinPackages();
         registry2.emitChanged();
         return ok(res);
       } catch (err) {
@@ -18152,6 +18995,24 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
+  ipcMain$1.handle(IPC.SetPageDisabled, (_e, id2, disabled) => {
+    try {
+      const state = registry2.get(id2);
+      if (!state) return fail(new Error(m("page.unknown", { id: id2 })));
+      if (state.external) return fail(new Error(m("page.disableExternal")));
+      const s = getSettings();
+      const set = new Set(s.disabledPages || []);
+      if (disabled) set.add(id2);
+      else set.delete(id2);
+      updateSettings({ disabledPages: [...set] });
+      if (disabled && (state.status === "running" || state.status === "starting"))
+        registry2.stop(id2);
+      else registry2.announceChange();
+      return ok(registry2.get(id2));
+    } catch (err) {
+      return fail(err);
+    }
+  });
   ipcMain$1.handle(IPC.RemovePage, (_e, id2) => {
     try {
       registry2.stop(id2);
@@ -18208,10 +19069,8 @@ function registerIpc(registry2) {
   });
   ipcMain$1.handle(IPC.OpenPageWindow, (_e, pageId) => {
     try {
-      const state = registry2.get(pageId);
-      if (!state) return fail(new Error(m("page.unknown", { id: pageId })));
-      if (state.kind === "terminal") {
-        return fail(new Error(m("page.cliNeedsTerminal", { name: state.name })));
+      if (!registry2.get(pageId) && !savedSite(pageId)) {
+        return fail(new Error(m("page.unknown", { id: pageId })));
       }
       openPageWindow(registry2, pageId);
       return ok(true);
@@ -18430,6 +19289,7 @@ function registerIpc(registry2) {
           registry2.reconcile();
           notifyLocaleChanged();
           registry2.emitChanged();
+          runSurvey();
         }
         return ok(getSettings());
       } catch (err) {
@@ -18508,6 +19368,17 @@ function registerIpc(registry2) {
     return ok(true);
   });
   const ptyManager = new PtyManager();
+  const cliPtyByPage = /* @__PURE__ */ new Map();
+  const intentionalKills = /* @__PURE__ */ new Set();
+  registry2.onKillTerminal = (id2) => {
+    const sid = cliPtyByPage.get(id2);
+    if (!sid || !ptyManager.get(sid)) {
+      registry2.reportTerminal(id2, "exit", 0);
+      return;
+    }
+    intentionalKills.add(sid);
+    ptyManager.kill(sid);
+  };
   ipcMain$1.handle(IPC.PageRunSpec, (_e, id2) => {
     try {
       const meta = registry2.get(id2);
@@ -18543,6 +19414,7 @@ function registerIpc(registry2) {
     if (!page) throw new Error(m("ipc.unknownTarget", { target }));
     return page.dir;
   };
+  const ptyTextForLog = (chunk) => chunk.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-Z\\-_]/g, "").replace(/\r\n?/g, "\n");
   ipcMain$1.handle(
     IPC.PtyStart,
     async (e, target, opts) => {
@@ -18557,6 +19429,12 @@ function registerIpc(registry2) {
         const session2 = ptyManager.get(info.id);
         if (session2) {
           const sender = e.sender;
+          const boundPage = opts?.command ? registry2.get(target) : void 0;
+          const cliId = boundPage?.kind === "terminal" ? boundPage.id : null;
+          if (cliId) {
+            cliPtyByPage.set(cliId, info.id);
+            registry2.reportTerminal(cliId, "running");
+          }
           let buf = "";
           let timer = null;
           const FLUSH_MS = 16;
@@ -18572,12 +19450,19 @@ function registerIpc(registry2) {
             if (!sender.isDestroyed()) sender.send(IPC.OnPtyData, { id: info.id, data });
           };
           session2.on("data", (chunk) => {
-            buf += String(chunk);
+            const text = String(chunk);
+            if (cliId) logPageLine(cliId, ptyTextForLog(text));
+            buf += text;
             if (buf.length >= FLUSH_MAX) flush();
             else if (!timer) timer = setTimeout(flush, FLUSH_MS);
           });
           session2.on("exit", (code2) => {
             flush();
+            const intentional = intentionalKills.delete(info.id);
+            if (cliId) {
+              if (cliPtyByPage.get(cliId) === info.id) cliPtyByPage.delete(cliId);
+              registry2.reportTerminal(cliId, "exit", intentional ? 0 : Number(code2));
+            }
             if (!sender.isDestroyed())
               sender.send(IPC.OnPtyExit, { id: info.id, code: Number(code2) });
           });
@@ -18606,6 +19491,7 @@ function registerIpc(registry2) {
   });
   ipcMain$1.handle(IPC.PtyKill, (_e, id2) => {
     try {
+      intentionalKills.add(id2);
       ptyManager.kill(id2);
       return ok(true);
     } catch (err) {
@@ -18743,6 +19629,80 @@ function registerIpc(registry2) {
       }
     }
   );
+  hubEvents.removeAllListeners("changed");
+  hubEvents.on("changed", (states) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnMcpStateChanged, states);
+    }
+  });
+  ipcMain$1.handle(IPC.McpListServers, () => {
+    try {
+      return ok(listServers());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpSaveServer, async (_e, spec) => {
+    try {
+      return ok(await saveServer(spec));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpRemoveServer, async (_e, id2) => {
+    try {
+      return ok(await removeServer(id2));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpConnect, async (_e, id2) => {
+    try {
+      await connect(id2);
+      return ok();
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpDisconnect, async (_e, id2) => {
+    try {
+      await disconnect(id2);
+      return ok();
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpListTools, (_e, serverId) => {
+    try {
+      return ok(listTools(serverId));
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.McpCallTool,
+    async (_e, args) => {
+      try {
+        return ok(await callTool(args));
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.McpBridgeInfo, () => {
+    try {
+      return ok({ dir: bridgeDir(), catalogFile: bridgeCatalogFile(), configFile: bridgeConfigFile() });
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpPackagesStatus, () => {
+    try {
+      return ok(mcpPackagesStatus());
+    } catch (err) {
+      return fail(err);
+    }
+  });
 }
 let sequence = 0;
 function nextId() {
@@ -18782,7 +19742,7 @@ function notifyDone(filename, savePath) {
 function wireItem(item, host) {
   const id2 = nextId();
   const label = () => basename(item.getSavePath()) || item.getFilename() || "download";
-  const snapshot = (state) => ({
+  const snapshot2 = (state) => ({
     id: id2,
     filename: label(),
     state,
@@ -18793,12 +19753,12 @@ function wireItem(item, host) {
     host
   });
   item.on("updated", (_e, state) => {
-    if (state === "progressing") broadcast(snapshot("progressing"));
-    else if (state === "interrupted") broadcast(snapshot("progressing"));
+    if (state === "progressing") broadcast(snapshot2("progressing"));
+    else if (state === "interrupted") broadcast(snapshot2("progressing"));
   });
   item.once("done", (_e, state) => {
     if (state === "completed") {
-      broadcast({ ...snapshot("completed"), received: item.getReceivedBytes(), percent: 100 });
+      broadcast({ ...snapshot2("completed"), received: item.getReceivedBytes(), percent: 100 });
       const savePath = item.getSavePath();
       if (savePath) {
         notifyDone(basename(savePath), savePath);
@@ -18810,7 +19770,7 @@ function wireItem(item, host) {
         });
       }
     } else {
-      broadcast({ ...snapshot("cancelled"), state: "cancelled" });
+      broadcast({ ...snapshot2("cancelled"), state: "cancelled" });
       logEvent({ level: "warn", kind: "download.cancelled", meta: { file: label() } });
     }
   });
@@ -19102,6 +20062,8 @@ if (!gotLock) {
     if (settings.autoStartPages.length) {
       registry.autoStart(settings.autoStartPages).catch((err) => console.warn("[container] auto-start failed", err));
     }
+    setMcpPackagesRoot(join(app$1.getPath("userData"), "mcp"));
+    autoStartAll().catch((err) => console.warn("[mcp-hub] auto-start failed", err));
     void pnpmBinDirs().catch(() => void 0);
     app$1.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -19125,12 +20087,11 @@ if (!gotLock) {
       e.preventDefault();
       const grace = new Promise((resolve2) => setTimeout(resolve2, QUIT_FLUSH_MS));
       Promise.race([registry.shutdownAll(), grace]).then(
-        () => app$1.exit(0),
+        () => shutdownAll(),
         (err) => {
           console.error("[container] shutdownAll failed, forcing exit:", err);
-          app$1.exit(0);
         }
-      );
+      ).finally(() => app$1.exit(0));
     }
   });
 }

@@ -17,6 +17,8 @@ const DEFAULTS: ContainerSettings = {
   autoStartPages: ['openclaw', 'dsh-web'],
   // empty until the user pins a page's auto-start by hand; see ContainerSettings.autoStartManual
   autoStartManual: [],
+  // built-in pages switched off from the Pages panel (hidden from the switcher, never started)
+  disabledPages: [],
   lastExternalUrls: [],
   externalSites: [],
   theme: 'auto',

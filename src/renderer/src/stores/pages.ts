@@ -37,6 +37,9 @@ export const usePagesStore = defineStore('pages', () => {
 
   const runningPages = computed(() => pages.filter((p) => p.status === 'running'))
   const installablePages = computed(() => pages.filter((p) => !p.external))
+  /** Rows the switcher and the counters may show: a disabled built-in is invisible to the
+      user everywhere except the Pages panel (the one place that can switch it back on). */
+  const visiblePages = computed(() => pages.filter((p) => !p.disabled))
 
   async function refresh(): Promise<void> {
     const list = await unwrap<PageState[]>(window.container.listPages())
@@ -168,6 +171,13 @@ export const usePagesStore = defineStore('pages', () => {
     await refresh()
   }
 
+  /** Switch a built-in page off/on; main stops it when disabling and the refreshed list
+      carries the new `disabled` flag to every surface (switcher, counters, default view). */
+  async function setDisabled(id: string, disabled: boolean): Promise<void> {
+    await unwrap(window.container.setPageDisabled(id, disabled))
+    await refresh()
+  }
+
   async function openTerminal(target: string, title?: string): Promise<void> {
     await useTerminalStore().start(target, title || target)
   }
@@ -203,6 +213,7 @@ export const usePagesStore = defineStore('pages', () => {
     installing,
     runningPages,
     installablePages,
+    visiblePages,
     refresh,
     start,
     stop,
@@ -214,6 +225,7 @@ export const usePagesStore = defineStore('pages', () => {
     installNpm,
     setPort,
     remove,
+    setDisabled,
     openTerminal
   }
 })

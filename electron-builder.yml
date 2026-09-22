@@ -31,6 +31,7 @@ files:
   - '!resources/node/**'
   - '!resources/openclaw/**'
   - '!resources/dsh/**'
+  - '!resources/codex/**'
   - '!resources/icon-src.png'
 asarUnpack:
   - '**/node_modules/node-pty/**'

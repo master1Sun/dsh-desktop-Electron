@@ -22,7 +22,6 @@ const emit = defineEmits<{
   'select-page': [id: string]
   'start-page': [id: string]
   'open-terminal': [id: string]
-  'popout-page': [id: string]
 }>()
 
 const open = ref(false)
@@ -53,27 +52,36 @@ function onStart(p: PageState): void {
 }
 
 /**
- * C2: which rows may get their own window. A terminal page renders in the full-surface terminal
- * instead, and an external site has no hosted view to detach — both would open an empty window.
- * Starting is not a precondition: a detached window for a stopped page offers its own ▶ button.
- */
-function canPopout(p: PageState): boolean {
-  return !p.external && p.kind !== 'terminal'
-}
-
-/** Same dismiss-before-emit rule as `pick()`: a window opened behind an open list is a stray list. */
-function onPopout(p: PageState): void {
-  close()
-  emit('popout-page', p.id)
-}
-
-/**
  * A page is only switchable once it actually runs — web/server pages must be started
  * first (the row then offers a ▶ button). Terminal pages have no port to wait for and
  * external pages open in the OS browser, so neither needs a start step.
  */
 function needsStart(p: PageState): boolean {
   return !p.external && p.kind !== 'terminal' && p.status !== 'running'
+}
+
+/** Row leading glyph: tells a CLI page, an external site and a hosted web page apart at a glance. */
+function rowKind(p: PageState): 'terminal' | 'external' | 'web' {
+  if (p.external) return 'external'
+  return p.kind === 'terminal' ? 'terminal' : 'web'
+}
+
+/** The page currently on screen (null while the workbench owns it) — drives the trigger's dot. */
+const activePage = computed(() => props.pages.find((p) => p.id === props.activePageId) || null)
+const activeDotClass = computed(() => {
+  const p = activePage.value
+  if (!p) return ''
+  return p.runtimeMissing === true ? 'dot-stopped' : `dot-${p.status}`
+})
+
+/** Row tooltip: why a name is greyed, or what clicking it does (terminal = open the CLI). */
+function rowTitle(p: PageState): string {
+  if (blocked(p)) return t('setup.runtimeMissingTag')
+  if (needsStart(p)) return t('menu.notRunningHint')
+  const status = statusText(p)
+  return p.kind === 'terminal' && p.status !== 'running'
+    ? `${t('menu.openTerminalHint')} · ${status}`
+    : status
 }
 
 /**
@@ -115,7 +123,22 @@ function onListKeydown(ev: KeyboardEvent): void {
   if (ev.key === 'Escape') {
     close()
     ev.stopPropagation()
+    return
   }
+  // ↑/↓ walk the switchable rows, desktop-list style; Enter then acts on the focused row.
+  if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return
+  ev.preventDefault()
+  const rows = Array.from(
+    (ev.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>(
+      '.row-name:not(:disabled)'
+    )
+  )
+  if (!rows.length) return
+  let next: HTMLButtonElement | undefined
+  const idx = rows.findIndex((r) => r === document.activeElement)
+  if (ev.key === 'ArrowDown') next = idx === -1 ? rows[0] : rows[(idx + 1) % rows.length]
+  else next = idx === -1 ? rows[rows.length - 1] : rows[(idx - 1 + rows.length) % rows.length]
+  next?.focus()
 }
 
 document.addEventListener('mousedown', onDocumentMousedown, true)
@@ -137,84 +160,122 @@ defineExpose({ close })
       :aria-haspopup="'listbox'"
       :aria-expanded="open"
       :aria-controls="open ? listId : undefined"
+      :title="activePage ? `${props.title} · ${statusText(activePage)}` : props.title"
       @click="toggle"
     >
+      <!-- Live status of whatever is on screen, so the bar reads the state at a glance. -->
+      <i v-if="activeDotClass" class="status-dot" :class="activeDotClass" aria-hidden="true" />
       <span class="switcher-title">{{ props.title }}</span>
-      <span class="caret" aria-hidden="true">▾</span>
+      <svg class="caret" :class="{ open }" width="8" height="5" viewBox="0 0 8 5" aria-hidden="true">
+        <path d="M1 1 L4 4 L7 1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+      </svg>
     </button>
-    <ul
-      v-if="open"
-      :id="listId"
-      class="dropdown switcher-menu"
-      role="listbox"
-      :aria-label="t('menu.selectPage')"
-      @keydown="onListKeydown"
-    >
-      <li
-        v-for="p in props.pages"
-        :key="p.id"
-        class="drop-item switcher-item"
-        :class="{ active: p.id === props.activePageId }"
-        role="option"
-        :aria-selected="p.id === props.activePageId"
+    <Transition name="switcher-menu">
+      <ul
+        v-if="open"
+        :id="listId"
+        class="dropdown switcher-menu"
+        role="listbox"
+        :aria-label="t('menu.selectPage')"
+        @keydown="onListKeydown"
       >
-        <button
-          class="row-name"
-          :class="{ 'is-blocked': blocked(p) }"
-          :disabled="needsStart(p)"
-          :title="
-            blocked(p)
-              ? t('setup.runtimeMissingTag')
-              : needsStart(p)
-                ? t('menu.notRunningHint')
-                : statusText(p)
-          "
-          @click="pick(p)"
+        <li
+          v-for="p in props.pages"
+          :key="p.id"
+          class="drop-item switcher-item"
+          :class="{ active: p.id === props.activePageId }"
+          role="option"
+          :aria-selected="p.id === props.activePageId"
         >
-          {{ p.name }}
-        </button>
-        <span v-if="blocked(p)" class="block-tag" :title="t('setup.runtimeMissingTag')">{{
-          t('setup.missingTag')
-        }}</span>
-        <button
-          v-if="canPopout(p)"
-          class="row-popout"
-          :title="t('pageMgr.popoutTip')"
-          @click="onPopout(p)"
-        >
-          <!-- A window with an arrow leaving it: the same "detach" idea as the OS-browser button. -->
-          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <!-- Active page gets the accent check; everyone else a kind glyph (CLI / external / web). -->
+          <svg
+            v-if="p.id === props.activePageId"
+            class="row-icon is-active"
+            width="11"
+            height="11"
+            viewBox="0 0 11 11"
+            aria-hidden="true"
+            :title="t('menu.activePageHint')"
+          >
             <path
-              d="M1 1.6h5.6v4.8H1z M6.6 3.2l2.4 0v5.2h-5"
+              d="M1.5 5.8 L4.2 8.4 L9.5 2.4"
               fill="none"
               stroke="currentColor"
-              stroke-width="1.1"
+              stroke-width="1.6"
+              stroke-linecap="round"
               stroke-linejoin="round"
             />
           </svg>
-        </button>
-        <button
-          v-if="needsStart(p)"
-          :class="['row-start', { 'is-busy': props.busyPages?.[p.id] }]"
-          :disabled="props.busyPages?.[p.id]"
-          :title="props.busyPages?.[p.id] ? t('menu.startingTip') : `${t('menu.start')} ${p.name}`"
-          @click="onStart(p)"
-        >
-          <span v-if="props.busyPages?.[p.id]" class="mini-spinner" aria-hidden="true" />
-          <svg v-else width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
-            <path d="M1.6 0.7 L8 4.5 L1.6 8.3 Z" fill="currentColor" />
+          <svg
+            v-else
+            class="row-icon"
+            width="11"
+            height="11"
+            viewBox="0 0 11 11"
+            aria-hidden="true"
+          >
+            <!-- terminal: box + prompt; globe: external site; window: hosted web page -->
+            <template v-if="rowKind(p) === 'terminal'">
+              <path d="M1 1.8h9v7.6H1z" fill="none" stroke="currentColor" stroke-width="1" />
+              <path
+                d="M2.7 4l1.7 1.5-1.7 1.5M5.8 7.4h2.6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </template>
+            <template v-else-if="rowKind(p) === 'external'">
+              <circle cx="5.5" cy="5.5" r="4.2" fill="none" stroke="currentColor" stroke-width="1" />
+              <path
+                d="M1.3 5.5h8.4M5.5 1.3c-2.6 2.8-2.6 5.6 0 8.4M5.5 1.3c2.6 2.8 2.6 5.6 0 8.4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="0.9"
+              />
+            </template>
+            <template v-else>
+              <path d="M1 1.8h9v7.6H1z" fill="none" stroke="currentColor" stroke-width="1" />
+              <path d="M1 4h9" stroke="currentColor" stroke-width="0.9" />
+            </template>
           </svg>
-        </button>
-        <!-- Traffic light: running=green, error=red, starting=amber, stopped=grey.
-             A page with no runtime installed never got that far — grey it, don't amber. -->
-        <i
-          class="status-dot"
-          :class="blocked(p) ? 'dot-stopped' : `dot-${p.status}`"
-          :title="blocked(p) ? t('setup.runtimeMissingTag') : statusText(p)"
-        />
-      </li>
-      <li v-if="!hasPages" class="drop-empty" role="presentation">{{ t('menu.switcherEmpty') }}</li>
-    </ul>
+          <button
+            class="row-name"
+            :class="{ 'is-blocked': blocked(p) }"
+            :disabled="needsStart(p)"
+            :title="rowTitle(p)"
+            @click="pick(p)"
+          >
+            {{ p.name }}
+          </button>
+          <span v-if="blocked(p)" class="block-tag" :title="t('setup.runtimeMissingTag')">{{
+            t('setup.missingTag')
+          }}</span>
+          <button
+            v-if="needsStart(p)"
+            :class="['row-start', { 'is-busy': props.busyPages?.[p.id] }]"
+            :disabled="props.busyPages?.[p.id]"
+            :title="props.busyPages?.[p.id] ? t('menu.startingTip') : `${t('menu.start')} ${p.name}`"
+            @click="onStart(p)"
+          >
+            <span v-if="props.busyPages?.[p.id]" class="mini-spinner" aria-hidden="true" />
+            <svg v-else width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
+              <path d="M1.6 0.7 L8 4.5 L1.6 8.3 Z" fill="currentColor" />
+            </svg>
+          </button>
+          <!-- Traffic light: running=green, error=red, starting=amber, stopped=grey.
+               A page with no runtime installed never got that far — grey it, don't amber.
+               CLI pages light up through the embedded terminal's PTY (registry.reportTerminal). -->
+          <i
+            class="status-dot"
+            :class="blocked(p) ? 'dot-stopped' : `dot-${p.status}`"
+            :title="rowTitle(p)"
+          />
+        </li>
+        <li v-if="!hasPages" class="drop-empty" role="presentation">{{ t('menu.switcherEmpty') }}</li>
+      </ul>
+    </Transition>
   </div>
 </template>
 
@@ -236,10 +297,16 @@ defineExpose({ close })
   font-size: 12.5px;
   padding: 3px 10px;
   cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.switcher:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
 .switcher.open {
   border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
 }
 
 .switcher-title {
@@ -251,13 +318,33 @@ defineExpose({ close })
 .caret {
   font-size: 10px;
   color: var(--text-dim);
+  flex: none;
+  transition: transform 0.18s ease, color 0.15s ease;
+}
+
+.caret.open {
+  color: var(--accent);
+  transform: rotate(180deg);
+}
+
+/* 打开/关闭动效：从触发器下方“抽开”，而不是突兀出现。 */
+.switcher-menu-enter-active,
+.switcher-menu-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.switcher-menu-enter-from,
+.switcher-menu-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
 }
 
 .dropdown {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
-  min-width: 180px;
+  min-width: 210px;
+  max-height: min(420px, 70vh);
+  overflow: auto;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -295,7 +382,24 @@ defineExpose({ close })
 }
 
 .drop-item.active {
+  /* The on-screen page keeps a faint accent wash + its row leading check, so 「当前」
+     survives hovering other rows. */
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
   color: var(--accent);
+}
+
+/* Row leading slot: kind glyph, or the accent check on the active page. */
+.row-icon {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+
+.row-icon.is-active {
+  color: var(--accent);
+  opacity: 1;
 }
 
 /* Switcher rows: name (switch) + ▶ (start) + traffic light. */
@@ -323,6 +427,13 @@ defineExpose({ close })
   cursor: not-allowed;
 }
 
+/* ↑/↓ 键盘导航时的焦点环；hover 已有底色，焦点只需要一个轮廓提示。 */
+.row-name:focus-visible {
+  outline: 1.5px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .row-name.is-blocked {
   color: var(--text-dim);
 }
@@ -335,28 +446,6 @@ defineExpose({ close })
   border-radius: 999px;
   color: var(--warn);
   border: 1px solid var(--warn);
-}
-
-/* C2: a quieter sibling of the ▶ button — same box, no accent fill, so the row still reads
-   name → (start) → status first. */
-.row-popout {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: none;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--surface-2);
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: color 0.15s ease, border-color 0.15s ease;
-}
-
-.row-popout:hover {
-  color: var(--accent);
-  border-color: var(--accent);
 }
 
 .row-start {

@@ -648,7 +648,7 @@ defineExpose({
   color: var(--text-dim);
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 9999px;
   padding: 4px 12px;
   cursor: pointer;
 }

@@ -55,6 +55,9 @@ function matchesFilter(line: string): boolean {
 }
 
 function onLogEvent(ev: LogLineEvent): void {
+  // A stream line for a file we never listed means a new log just appeared (an import,
+  // a first CLI run): pull the file list so it becomes selectable without a panel reopen.
+  if (!files.value.some((f) => f.key === ev.key)) void loadFiles()
   if (!live.value || ev.key !== key.value) return
   const fresh = (ev.lines || []).filter(matchesFilter)
   if (!fresh.length) return
@@ -93,6 +96,13 @@ async function loadContent(): Promise<void> {
   } finally {
     busy.value = false
   }
+  scrollBottom()
+}
+
+/** 刷新 = re-list files AND re-read content: new page logs join the dropdown too. */
+async function refreshAll(): Promise<void> {
+  await loadFiles()
+  await loadContent()
 }
 
 function onKeyChange(): void {
@@ -221,7 +231,7 @@ onBeforeUnmount(() => {
         :active-text="t('panel.logNewestFirst')"
         @change="scrollBottom"
       />
-      <el-button size="small" :loading="busy" @click="loadContent">{{
+      <el-button size="small" :loading="busy" @click="refreshAll">{{
         t('panel.logRefresh')
       }}</el-button>
       <span class="lv-spacer" />

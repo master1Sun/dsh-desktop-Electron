@@ -11,6 +11,7 @@ import {
 } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
+import { bridgeEnvVars } from './mcp-bridge'
 import {
   resolveDshProfileDir,
   resolveDshRuntimeDirs,
@@ -194,7 +195,9 @@ async function dshEnv(profileDir: string): Promise<NodeJS.ProcessEnv> {
   // that hosts dsh's node-pty; never let bundled/Electron node leak into it.
   return envWithPATH(dirs, {
     DSH_HOME: join(profileDir, '..', '..'),
-    DSH_NODE_PATH: nodeExe
+    DSH_NODE_PATH: nodeExe,
+    // MCP hub catalog pointers: dsh's terminals inherit them to every plugin process
+    ...bridgeEnvVars()
   })
 }
 
