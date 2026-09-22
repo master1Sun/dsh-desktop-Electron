@@ -1,4 +1,4 @@
-import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, dialog, nativeImage, Tray, Menu, ipcMain as ipcMain$1, BrowserWindow, webContents, session } from "electron";
+import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, BrowserWindow, nativeImage, Tray, Menu, dialog, session, screen, ipcMain as ipcMain$1, webContents } from "electron";
 import * as fs from "node:fs";
 import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, rmSync, createWriteStream, writeFileSync as writeFileSync$1, unlinkSync, cpSync, promises, copyFileSync } from "node:fs";
 import path, { join, delimiter, extname, basename, dirname, sep } from "node:path";
@@ -25,6 +25,26 @@ const __filename = import.meta.filename;
 const __dirname = import.meta.dirname;
 const require2 = __cjs_mod__.createRequire(import.meta.url);
 const CONTAINER_REPO_URL = "https://github.com/master1Sun/dsh-desktop-Electron.git";
+const REGISTRY_CANDIDATES = [
+  {
+    id: "npmmirror",
+    url: "https://registry.npmmirror.com",
+    label: { zh: "npmmirror（国内默认）", en: "npmmirror (built-in default)" },
+    builtin: true
+  },
+  { id: "npm", url: "https://registry.npmjs.org", label: { zh: "npm 官方", en: "npm official" } },
+  {
+    id: "tencent",
+    url: "https://mirrors.cloud.tencent.com/npm",
+    label: { zh: "腾讯云", en: "Tencent Cloud" }
+  },
+  {
+    id: "huawei",
+    url: "https://repo.huaweicloud.com/repository/npm",
+    label: { zh: "华为云", en: "Huawei Cloud" }
+  }
+];
+const NPM_REGISTRY_DEFAULT = REGISTRY_CANDIDATES[0].url;
 const OPENCLAW_DEFAULT_PORT = 18789;
 const IPC = {
   GetNodeInfo: "container:get-node-info",
@@ -82,6 +102,8 @@ const IPC = {
   DshUninstallPlugin: "dsh:uninstall-plugin",
   DshUpdatePlugin: "dsh:update-plugin",
   DshUpdateAll: "dsh:update-all",
+  /** broadcast: in-flight dsh plugin ops (DshPluginOpEvent) → window top progress bar */
+  OnDshPluginOp: "dsh:plugin-op",
   DshCreatePage: "dsh:create-page",
   DshToken: "dsh:token",
   OpenclawStatus: "openclaw:status",
@@ -136,7 +158,13 @@ const IPC = {
   /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
   OnPageMetrics: "container:page-metrics",
   /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
-  OnLogLine: "container:log-line"
+  OnLogLine: "container:log-line",
+  /** #26: probe every candidate npm registry in parallel → RegistryProbe[] */
+  ProbeRegistries: "container:probe-registries",
+  /** #26: what the embedded webviews hold (cookies per domain, cache + storage bytes) → WebDataReport */
+  GetWebData: "container:get-web-data",
+  /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
+  ClearWebData: "container:clear-web-data"
 };
 let cached = null;
 function invalidateNodeRuntimeCache() {
@@ -11442,7 +11470,8 @@ const DEFAULTS = {
   systemNotifications: true,
   // #25: '' keeps each theme's CSS-defined accent; a hex overrides it live in both modes.
   accentColor: "",
-  // #25: matches the stylesheet default (.glass blur 30px); slider overrides --glass-blur live.
+  // #25: frosted-blur px; the slider overrides --glass-blur live, clamped to GLASS_BLUR_MAX_PX
+  // (25) at apply time — this default sits at that ceiling, i.e. the heaviest frost.
   glassBlur: 30,
   // #25: frosted-surface opacity (%); slider overrides --glass-tint-a live (independent of blur).
   glassAlpha: 60,
@@ -11450,7 +11479,17 @@ const DEFAULTS = {
   memWarnMb: 800,
   // bottom-docked terminal height the user dragged out; keep the default in sync with
   // TerminalDrawer's DEFAULT_H.
-  terminalHeight: 320
+  terminalHeight: 320,
+  // #26: restore the last window geometry/maximized state. On by default: a container that
+  // relaunches at 1280x860 every time is annoying once you've arranged it beside other windows.
+  rememberWindowBounds: true,
+  // #26: 'auto' keeps the previous behaviour of following the OS reduced-motion preference.
+  reduceMotion: "auto",
+  // #26: '' = the built-in mirror (NPM_REGISTRY_DEFAULT), i.e. the pre-setting behaviour.
+  npmRegistry: "",
+  // #26: tray defaults mirror what the menu/badge did before they were configurable.
+  trayPageEntries: "all",
+  trayBadge: "all"
 };
 let store = null;
 function getStore() {
@@ -11616,6 +11655,21 @@ function resolveDownloadDir() {
   const override = (getSettings().downloadDir || "").trim();
   return override ? expandHome(override) : defaultDownloadDir();
 }
+function resolveNpmRegistry() {
+  const override = (getSettings().npmRegistry || "").trim().replace(/\/+$/, "");
+  return override || NPM_REGISTRY_DEFAULT;
+}
+function npmRegistryWithSlash() {
+  return `${resolveNpmRegistry()}/`;
+}
+function clearWindowBounds() {
+  getStore().delete("windowBounds");
+}
+function applyNpmRegistryEnv() {
+  const url = npmRegistryWithSlash();
+  process.env.npm_config_registry = url;
+  return url;
+}
 function uniquePath(dir, filename) {
   try {
     mkdirSync(dir, { recursive: true });
@@ -11714,6 +11768,7 @@ const zh = {
   "dsh.gitNeedsUrl": "git 更新需要提供仓库地址",
   "dsh.updatedTo": "已更新至 {spec}",
   "dsh.npmUpdated": "已通过 npm 更新 {spec}",
+  "dsh.notADependency": "{name} 并非本 profile 的已安装依赖（已被卸载，或仅是 dsh 遗留的 bundle 层），无需卸载；插件列表已重新读取",
   "dsh.illegalRepoChars": "仓库地址包含非法字符",
   "dsh.lsRemoteFail": "git ls-remote 失败",
   "dsh.remoteHeadFail": "无法解析远端 HEAD",
@@ -11877,6 +11932,7 @@ const en = {
   "dsh.gitNeedsUrl": "A git update requires a repository URL",
   "dsh.updatedTo": "Updated to {spec}",
   "dsh.npmUpdated": "Updated {spec} via npm",
+  "dsh.notADependency": "{name} is not an installed dependency of this profile (already removed, or just a leftover dsh bundle layer) — nothing to uninstall; the plugin list has been re-read",
   "dsh.illegalRepoChars": "The repository URL contains illegal characters",
   "dsh.lsRemoteFail": "git ls-remote failed",
   "dsh.remoteHeadFail": "Could not resolve the remote HEAD",
@@ -13316,6 +13372,11 @@ const DIST_BASES = [
   "https://cdn.npmmirror.com/binaries/node/%V%/node-%V%-win-x64.zip",
   "https://nodejs.org/dist/%V%/node-%V%-win-x64.zip"
 ];
+function preferUpstream() {
+  return (getSettings().npmRegistry || "").trim().replace(/\/+$/, "") === "https://registry.npmjs.org";
+}
+const indexUrls = () => preferUpstream() ? [...INDEX_URLS].reverse() : INDEX_URLS;
+const distBases = () => preferUpstream() ? [...DIST_BASES].reverse() : DIST_BASES;
 const MAX_VERSIONS = 50;
 function isValidTag(v) {
   return /^v\d+\.\d+\.\d+$/.test(v);
@@ -13362,7 +13423,7 @@ function get(url, timeoutMs = 2e4) {
 async function listNodeVersions() {
   if (process.platform !== "win32") throw new Error(m("node.notWin"));
   let lastErr = "";
-  for (const url of INDEX_URLS) {
+  for (const url of indexUrls()) {
     try {
       const { body } = await get(url, 25e3);
       const entries = JSON.parse(body);
@@ -13489,7 +13550,7 @@ async function updateNodeRuntime(version, onProgress) {
   mkdirSync(work, { recursive: true });
   onProgress({ name: "Node", phase: "fetch", percent: 0, message: m("node.downloading", { v: want }) });
   await downloadZip(
-    DIST_BASES.map((b) => b.split("%V%").join(want)),
+    distBases().map((b) => b.split("%V%").join(want)),
     zip,
     want,
     onProgress
@@ -14575,20 +14636,31 @@ function listDshPlugins(profile = DEFAULT_PROFILE) {
   }
   for (const b of bundles) {
     if (seen.has(b)) continue;
-    out.push({ name: b, version: installedBundleVersion(b) || "(bundled)", source: "bundle" });
+    const version = installedBundleVersion(b, profileDir);
+    out.push(
+      version ? { name: b, version, source: "bundle", present: true } : { name: b, version: "", source: "bundle", present: false }
+    );
   }
   return out;
 }
-function installedBundleVersion(name) {
-  for (const root of dshRoots()) {
+function installedBundleVersion(name, profileDir) {
+  const parts = name.split("/");
+  for (const dir of bundleSearchDirs(profileDir)) {
     try {
-      return JSON.parse(
-        readFileSync(join(root, "node_modules", ...name.split("/"), "package.json"), "utf-8")
-      ).version;
+      const manifest = join(dir, ...parts, "package.json");
+      return JSON.parse(readFileSync(manifest, "utf-8")).version;
     } catch {
     }
   }
   return null;
+}
+function bundleSearchDirs(profileDir) {
+  const dirs = [join(profileDir, "node_modules")];
+  for (const root of dshRoots()) {
+    const nm = join(root, "node_modules");
+    dirs.push(nm, join(nm, "@deepseek-ai", "dsh", "node_modules"));
+  }
+  return dirs;
 }
 function createDshPage(profile, port) {
   const safe = validateProfileName(profile);
@@ -14617,13 +14689,42 @@ function validateNpmSpec(spec) {
 }
 async function installDshPlugin(spec, profile = DEFAULT_PROFILE) {
   const s = validateNpmSpec(spec);
-  await dshPluginForward(["add", s], profile);
+  broadcastPluginOp({ name: s, done: false });
+  try {
+    await dshPluginForward(["add", s], profile);
+    broadcastPluginOp({ name: s, done: true });
+  } catch (err) {
+    broadcastPluginOp({ name: s, done: true, error: err.message });
+    throw err;
+  }
 }
+const NOT_A_DEPENDENCY = /ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS|no such dependency found/i;
 async function uninstallDshPlugin(name, profile = DEFAULT_PROFILE) {
   const s = validateNpmSpec(name);
-  await dshPluginForward(["remove", s], profile);
+  try {
+    await dshPluginForward(["remove", s], profile);
+  } catch (err) {
+    const raw = err.message;
+    if (NOT_A_DEPENDENCY.test(raw)) throw new Error(m("dsh.notADependency", { name: s }));
+    throw err;
+  }
+}
+function broadcastPluginOp(p) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(IPC.OnDshPluginOp, p);
+  }
 }
 async function updateDshPlugin(name, channel, gitUrl, profile = DEFAULT_PROFILE) {
+  try {
+    const result = await applyPluginUpdate(name, channel, gitUrl, profile);
+    broadcastPluginOp({ name, done: true });
+    return result;
+  } catch (err) {
+    broadcastPluginOp({ name, done: true, error: err.message });
+    throw err;
+  }
+}
+async function applyPluginUpdate(name, channel, gitUrl, profile = DEFAULT_PROFILE) {
   if (channel === "git") {
     if (!gitUrl) throw new Error(m("dsh.gitNeedsUrl"));
     const parsed = parseGitSpec(gitUrl);
@@ -14643,7 +14744,11 @@ async function updateAllDshPlugins(profile = DEFAULT_PROFILE) {
   if (!targets.length) return "";
   const done = [];
   const failed = [];
+  const total = targets.length;
+  let index = 0;
   for (const u of targets) {
+    index++;
+    broadcastPluginOp({ name: u.name, done: false, index, total });
     try {
       const pinnedToGit = !!parseGitSpec(current.get(u.name) || "");
       if (u.channel === "npm" && pinnedToGit && u.latest) {
@@ -14651,16 +14756,16 @@ async function updateAllDshPlugins(profile = DEFAULT_PROFILE) {
         await installDshPlugin(spec, profile);
         done.push(m("dsh.npmUpdated", { spec }));
       } else {
-        done.push(await updateDshPlugin(u.name, u.channel || "npm", u.gitUrl, profile));
+        done.push(await applyPluginUpdate(u.name, u.channel || "npm", u.gitUrl, profile));
       }
     } catch (err) {
       failed.push(`${u.name}: ${err.message}`);
     }
+    broadcastPluginOp({ name: u.name, done: true });
   }
   if (!done.length) throw new Error(failed.join("\n") || m("dsh.unavailable"));
   return [...done, ...failed].join("\n").slice(-2e3);
 }
-const NPM_REGISTRY_MIRROR = "https://registry.npmmirror.com";
 function parseGitSpec(version) {
   const from = (repo, ref2) => ({
     repo,
@@ -14717,7 +14822,7 @@ function isNewerVersion(installed2, latest) {
   return false;
 }
 async function npmLatestVersion(name) {
-  const res = await runCli$1("npm", ["view", name, "version", "--registry", NPM_REGISTRY_MIRROR], {
+  const res = await runCli$1("npm", ["view", name, "version", "--registry", npmRegistryWithSlash()], {
     timeoutMs: 3e4,
     shell: process.platform === "win32"
   });
@@ -14740,7 +14845,7 @@ function normalizeRepoUrl(raw) {
 async function npmRepositoryUrl(name) {
   const res = await runCli$1(
     "npm",
-    ["view", name, "repository.url", "--registry", NPM_REGISTRY_MIRROR],
+    ["view", name, "repository.url", "--registry", npmRegistryWithSlash()],
     { timeoutMs: 3e4, shell: process.platform === "win32" }
   );
   return res.code === 0 ? res.stdout.trim().replace(/^["']|["']$/g, "") : "";
@@ -15220,7 +15325,11 @@ const openclaw = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   openclawVersion,
   resolveOpenclawLaunchUrl
 }, Symbol.toStringTag, { value: "Module" }));
-const REGISTRY = process.env.npm_config_registry || "https://registry.npmmirror.com/";
+function registryUrl() {
+  const picked = (getSettings().npmRegistry || "").trim();
+  const base = picked || process.env.npm_config_registry || NPM_REGISTRY_DEFAULT;
+  return `${base.replace(/\/+$/, "")}/`;
+}
 const DSH_PKG = "@deepseek-ai/dsh";
 const OPENCLAW_PKG = "openclaw";
 const containerName = () => m("app.title");
@@ -15229,7 +15338,7 @@ let cache = null;
 async function fetchNpmLatest(name) {
   const url = new URL(
     encodeURIComponent(name).replace(/^%40/, "@") + "/latest",
-    REGISTRY
+    registryUrl()
   ).toString();
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(15e3) });
@@ -15393,7 +15502,7 @@ async function updateDshSelf() {
   const before = (await getDshStatus()).version;
   try {
     mkdirSync(root, { recursive: true });
-    writeFileSync$1(join(root, ".npmrc"), `registry=${REGISTRY}
+    writeFileSync$1(join(root, ".npmrc"), `registry=${registryUrl()}
 `);
     const node = getNodeExePath();
     const npmCli = bundledNpmCli();
@@ -15450,7 +15559,7 @@ async function reprovisionOpenclaw() {
   const before = openclawVersion();
   try {
     mkdirSync(root, { recursive: true });
-    writeFileSync$1(join(root, ".npmrc"), `registry=${REGISTRY}
+    writeFileSync$1(join(root, ".npmrc"), `registry=${registryUrl()}
 `);
     const node = getNodeExePath();
     const npmCli = bundledNpmCli();
@@ -15702,6 +15811,128 @@ function zipFolder$1(src, dest) {
     });
   });
 }
+const icon = join$1(import.meta.dirname, "../../resources/icon.png");
+function appIconPath() {
+  const candidates = [
+    icon,
+    join(process.resourcesPath || "", "icon.png"),
+    join(app$1.getAppPath(), "resources", "icon.png")
+  ].filter(Boolean);
+  return candidates.find((p) => existsSync(p)) || icon;
+}
+let tray = null;
+let trayImage = null;
+let updatePending = false;
+let resourceWarn = false;
+const BADGE_COLORS = {
+  1: [245, 158, 11],
+  2: [245, 192, 0],
+  3: [239, 68, 68]
+};
+function composeImage(level) {
+  if (!trayImage || level === 0) return trayImage;
+  try {
+    const { width, height } = trayImage.getSize();
+    if (!width || !height) return trayImage;
+    const bmp = trayImage.toBitmap();
+    const [r, g, b] = BADGE_COLORS[level];
+    const rad = Math.max(3, Math.round(width * 0.28));
+    const cx = width - rad - 1;
+    const cy = height - rad - 1;
+    for (let y = Math.max(0, cy - rad); y < Math.min(height, cy + rad + 1); y++) {
+      for (let x = Math.max(0, cx - rad); x < Math.min(width, cx + rad + 1); x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > rad * rad) continue;
+        const i = (y * width + x) * 4;
+        const edge = d2 > (rad - 1) * (rad - 1);
+        bmp[i] = edge ? 255 : b;
+        bmp[i + 1] = edge ? 255 : g;
+        bmp[i + 2] = edge ? 255 : r;
+        bmp[i + 3] = 255;
+      }
+    }
+    return nativeImage.createFromBitmap(bmp, { width, height });
+  } catch (err) {
+    console.warn("[tray] badge compose failed, using bare icon:", err.message);
+    return trayImage;
+  }
+}
+let hooks = {
+  getRegistry: () => null,
+  onShowWindow: () => void 0,
+  onQuitRequest: () => void 0
+};
+const TRAY_STOPPED_LIMIT = 8;
+function pageEntryMode() {
+  return getSettings().trayPageEntries ?? "all";
+}
+function badgeLevel(alert) {
+  const mode = getSettings().trayBadge ?? "all";
+  if (mode === "off") return 0;
+  if (alert) return 3;
+  if (mode === "alert") return 0;
+  return resourceWarn ? 2 : updatePending ? 1 : 0;
+}
+function rebuildTrayMenu() {
+  const registry2 = hooks.getRegistry();
+  if (!tray || !registry2) return;
+  const mode = pageEntryMode();
+  const running = registry2.running();
+  const stopped = registry2.list().filter((p) => p.status !== "running" && !p.external);
+  const runningRows = mode === "off" ? [] : running.map((p) => ({
+    label: m("tray.stop", { name: p.name }),
+    click: () => registry2.stop(p.id)
+  }));
+  const stoppedRows = mode !== "all" ? [] : stopped.slice(0, TRAY_STOPPED_LIMIT).map((p) => ({
+    label: m("tray.start", { name: p.name }),
+    click: () => {
+      registry2.start(p.id).catch((err) => console.warn("[tray] start failed:", err.message));
+    }
+  }));
+  const pageRows = [...runningRows, ...stoppedRows];
+  const template = [
+    { label: m("tray.show"), click: () => hooks.onShowWindow() }
+  ];
+  if (pageRows.length) template.push({ type: "separator" }, ...pageRows);
+  template.push({ type: "separator" }, { label: m("tray.quit"), click: () => hooks.onQuitRequest() });
+  const alert = stopped.some((p) => p.status === "error");
+  const level = badgeLevel(alert);
+  tray.setToolTip(
+    level === 3 ? m("tray.tooltipAlert") : level === 2 ? m("tray.tooltipResource") : m("tray.tooltip", { n: running.length })
+  );
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+  const img = composeImage(level);
+  if (img) tray.setImage(img);
+}
+function setTrayUpdatePending(v) {
+  if (updatePending === v) return;
+  updatePending = v;
+  refreshBadge();
+}
+function setTrayResourceWarn(v) {
+  if (resourceWarn === v) return;
+  resourceWarn = v;
+  refreshBadge();
+}
+function refreshBadge() {
+  if (!tray) return;
+  const registry2 = hooks.getRegistry();
+  const alert = registry2 ? registry2.list().some((p) => p.status === "error" && !p.external) : false;
+  const img = composeImage(badgeLevel(alert));
+  if (img) tray.setImage(img);
+}
+function createTray(injected) {
+  if (tray) return;
+  hooks = injected;
+  const path2 = appIconPath();
+  const image = existsSync(path2) ? nativeImage.createFromPath(path2) : nativeImage.createEmpty();
+  trayImage = image.isEmpty() ? image : image.resize({ width: 16, height: 16 });
+  tray = new Tray(trayImage);
+  tray.on("click", () => hooks.onShowWindow());
+  rebuildTrayMenu();
+}
 function captureSettings() {
   const s = getSettings();
   return {
@@ -15723,7 +15954,15 @@ function captureSettings() {
     systemNotifications: s.systemNotifications,
     accentColor: s.accentColor,
     glassBlur: s.glassBlur,
-    memWarnMb: s.memWarnMb
+    glassAlpha: s.glassAlpha,
+    memWarnMb: s.memWarnMb,
+    terminalHeight: s.terminalHeight,
+    // #26: preferences (the remembered `windowBounds` stays out on purpose — it is machine-local).
+    rememberWindowBounds: s.rememberWindowBounds,
+    reduceMotion: s.reduceMotion,
+    npmRegistry: s.npmRegistry,
+    trayPageEntries: s.trayPageEntries,
+    trayBadge: s.trayBadge
   };
 }
 function zipFolder(src, dest) {
@@ -15815,6 +16054,8 @@ async function importSnapshot(registry2) {
     }
     if (manifest.settings && typeof manifest.settings === "object") {
       updateSettings(manifest.settings, { syncAutoStartPin: false });
+      applyNpmRegistryEnv();
+      rebuildTrayMenu();
     }
     const pagesDir = resolvePagesDir();
     mkdirSync(pagesDir, { recursive: true });
@@ -15930,6 +16171,99 @@ async function runNetworkProbe(npmRegistry) {
   ];
   const healthy = gateway.ok && github.ok && (npm.ok || mirror.ok);
   return { steps, proxy, healthy };
+}
+async function probeRegistries(timeoutMs = 6e3) {
+  const results = await Promise.all(
+    REGISTRY_CANDIDATES.map(async (c) => {
+      const p = await probeUrl(`${c.url.replace(/\/+$/, "")}/-/ping`, timeoutMs);
+      return { id: c.id, url: c.url, ok: p.ok, ms: p.ms, status: p.status, error: p.error };
+    })
+  );
+  return results;
+}
+const CACHE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "Shared Dictionary"];
+const STORAGE_DIRS = ["Local Storage", "Session Storage", "IndexedDB", "FileSystem", "WebStorage"];
+async function dirBytes(path2) {
+  let entries;
+  try {
+    entries = await promises.readdir(path2, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const ent of entries) {
+    const child = join(path2, ent.name);
+    if (ent.isDirectory()) {
+      total += await dirBytes(child);
+      continue;
+    }
+    if (!ent.isFile()) continue;
+    try {
+      const st = await promises.stat(child);
+      total += st.size;
+    } catch {
+    }
+  }
+  return total;
+}
+async function sumDirs(names2) {
+  const root = app$1.getPath("userData");
+  const sizes = await Promise.all(names2.map((n) => dirBytes(join(root, n))));
+  return sizes.reduce((a, b) => a + b, 0);
+}
+async function getWebDataReport() {
+  const [cacheBytes, storageBytes, cookies] = await Promise.all([
+    sumDirs(CACHE_DIRS),
+    sumDirs(STORAGE_DIRS),
+    session.defaultSession.cookies.get({})
+  ]);
+  const counts = /* @__PURE__ */ new Map();
+  for (const c of cookies) {
+    const domain = (c.domain || "").replace(/^\./, "") || "(unknown)";
+    counts.set(domain, (counts.get(domain) || 0) + 1);
+  }
+  const cookieDomains = [...counts.entries()].map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count || a.domain.localeCompare(b.domain));
+  return { cacheBytes, storageBytes, cookieDomains, totalCookies: cookies.length };
+}
+function cookieUrl(cookie) {
+  const host = (cookie.domain || "").replace(/^\./, "");
+  const scheme = cookie.secure ? "https" : "http";
+  const path2 = cookie.path && cookie.path !== "/" ? cookie.path : "";
+  return `${scheme}://${host}${path2}`;
+}
+async function clearCookies(domain) {
+  const all = await session.defaultSession.cookies.get({});
+  const targets = domain ? all.filter((c) => {
+    const host = (c.domain || "").replace(/^\./, "");
+    return host === domain || host.endsWith(`.${domain}`);
+  }) : all;
+  let removed = 0;
+  for (const c of targets) {
+    try {
+      await session.defaultSession.cookies.remove(cookieUrl(c), c.name);
+      removed += 1;
+    } catch {
+    }
+  }
+  return removed;
+}
+async function clearWebData(args) {
+  const scope2 = args.scope;
+  let removedCookies = 0;
+  if (scope2 === "cache") {
+    await session.defaultSession.clearCache();
+  } else if (scope2 === "cookies") {
+    removedCookies = await clearCookies(args.domain);
+  } else if (scope2 === "storage") {
+    await session.defaultSession.clearStorageData({
+      storages: ["localstorage", "indexdb", "filesystem", "serviceworkers", "shadercache"]
+    });
+  } else {
+    removedCookies = await clearCookies(args.domain);
+    await session.defaultSession.clearStorageData();
+    await session.defaultSession.clearCache();
+  }
+  return { removedCookies, scope: scope2 };
 }
 function listInterfaces() {
   const out = [];
@@ -16190,120 +16524,110 @@ function pruneMetricsBaseline(livePids) {
   const keep = new Set(livePids);
   for (const pid of [...lastCpu.keys()]) if (!keep.has(pid)) lastCpu.delete(pid);
 }
-const icon = join$1(import.meta.dirname, "../../resources/icon.png");
-function appIconPath() {
-  const candidates = [
-    icon,
-    join(process.resourcesPath || "", "icon.png"),
-    join(app$1.getAppPath(), "resources", "icon.png")
-  ].filter(Boolean);
-  return candidates.find((p) => existsSync(p)) || icon;
+const SAVE_DEBOUNCE_MS = 400;
+const MIN_VISIBLE_PX = 60;
+let saveTimer = null;
+let watched = null;
+function boundsEnabled() {
+  return getSettings().rememberWindowBounds !== false;
 }
-let tray = null;
-let trayImage = null;
-let updatePending = false;
-let resourceWarn = false;
-const BADGE_COLORS = {
-  1: [245, 158, 11],
-  2: [245, 192, 0],
-  3: [239, 68, 68]
-};
-function composeImage(level) {
-  if (!trayImage || level === 0) return trayImage;
-  try {
-    const { width, height } = trayImage.getSize();
-    if (!width || !height) return trayImage;
-    const bmp = trayImage.toBitmap();
-    const [r, g, b] = BADGE_COLORS[level];
-    const rad = Math.max(3, Math.round(width * 0.28));
-    const cx = width - rad - 1;
-    const cy = height - rad - 1;
-    for (let y = Math.max(0, cy - rad); y < Math.min(height, cy + rad + 1); y++) {
-      for (let x = Math.max(0, cx - rad); x < Math.min(width, cx + rad + 1); x++) {
-        const dx = x - cx;
-        const dy = y - cy;
-        const d2 = dx * dx + dy * dy;
-        if (d2 > rad * rad) continue;
-        const i = (y * width + x) * 4;
-        const edge = d2 > (rad - 1) * (rad - 1);
-        bmp[i] = edge ? 255 : b;
-        bmp[i + 1] = edge ? 255 : g;
-        bmp[i + 2] = edge ? 255 : r;
-        bmp[i + 3] = 255;
-      }
-    }
-    return nativeImage.createFromBitmap(bmp, { width, height });
-  } catch (err) {
-    console.warn("[tray] badge compose failed, using bare icon:", err.message);
-    return trayImage;
+function isValid(b) {
+  if (!b) return false;
+  return [b.x, b.y, b.width, b.height].every((n) => Number.isFinite(n));
+}
+function isOnSomeDisplay(rect) {
+  const probe = {
+    x: rect.x,
+    y: rect.y,
+    width: Math.max(1, Math.min(rect.width, MIN_VISIBLE_PX)),
+    height: Math.max(1, Math.min(rect.height, MIN_VISIBLE_PX))
+  };
+  return screen.getAllDisplays().some((d) => {
+    const a = d.bounds;
+    const ix = Math.max(probe.x, a.x);
+    const iy = Math.max(probe.y, a.y);
+    const ix2 = Math.min(probe.x + probe.width, a.x + a.width);
+    const iy2 = Math.min(probe.y + probe.height, a.y + a.height);
+    return ix2 - ix > 0 && iy2 - iy > 0;
+  });
+}
+function resolveBounds(minWidth, minHeight) {
+  if (!boundsEnabled()) return null;
+  const stored = getSettings().windowBounds;
+  if (!isValid(stored)) return null;
+  const rect = {
+    x: stored.x,
+    y: stored.y,
+    width: Math.max(stored.width, minWidth),
+    height: Math.max(stored.height, minHeight)
+  };
+  if (!isOnSomeDisplay(rect)) return null;
+  const display = screen.getDisplayMatching(rect);
+  const wa = display.workAreaSize;
+  return {
+    x: stored.x,
+    y: stored.y,
+    width: Math.min(rect.width, wa.width),
+    height: Math.min(rect.height, wa.height),
+    maximized: Boolean(stored.maximized)
+  };
+}
+function scheduleSave() {
+  if (!boundsEnabled()) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveWindowBounds();
+  }, SAVE_DEBOUNCE_MS);
+}
+function saveWindowBounds() {
+  if (!boundsEnabled()) return;
+  const win = watched;
+  if (!win || win.isDestroyed() || win.isMinimized()) return;
+  const n = win.getNormalBounds();
+  const next2 = {
+    x: n.x,
+    y: n.y,
+    width: n.width,
+    height: n.height,
+    maximized: win.isMaximized()
+  };
+  const prev = getSettings().windowBounds;
+  if (prev && prev.x === next2.x && prev.y === next2.y && prev.width === next2.width && prev.height === next2.height && prev.maximized === next2.maximized)
+    return;
+  updateSettings({ windowBounds: next2 });
+}
+function flushWindowBounds() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
   }
+  saveWindowBounds();
 }
-let hooks = {
-  getRegistry: () => null,
-  onShowWindow: () => void 0,
-  onQuitRequest: () => void 0
-};
-const TRAY_STOPPED_LIMIT = 8;
-function rebuildTrayMenu() {
-  const registry2 = hooks.getRegistry();
-  if (!tray || !registry2) return;
-  const running = registry2.running();
-  const stopped = registry2.list().filter((p) => p.status !== "running" && !p.external);
-  const template = [
-    { label: m("tray.show"), click: () => hooks.onShowWindow() },
-    { type: "separator" },
-    ...running.map((p) => ({
-      label: m("tray.stop", { name: p.name }),
-      click: () => registry2.stop(p.id)
-    })),
-    ...stopped.slice(0, TRAY_STOPPED_LIMIT).map((p) => ({
-      label: m("tray.start", { name: p.name }),
-      click: () => {
-        registry2.start(p.id).catch((err) => console.warn("[tray] start failed:", err.message));
-      }
-    })),
-    { type: "separator" },
-    {
-      label: m("tray.quit"),
-      click: () => hooks.onQuitRequest()
-    }
-  ];
-  const alert = stopped.some((p) => p.status === "error");
-  const level = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0;
-  tray.setToolTip(
-    alert ? m("tray.tooltipAlert") : resourceWarn ? m("tray.tooltipResource") : m("tray.tooltip", { n: running.length })
-  );
-  tray.setContextMenu(Menu.buildFromTemplate(template));
-  const img = composeImage(level);
-  if (img) tray.setImage(img);
+function forgetWindowBounds() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  clearWindowBounds();
 }
-function setTrayUpdatePending(v) {
-  if (updatePending === v) return;
-  updatePending = v;
-  refreshBadge();
+function watchWindowBounds(win) {
+  if (watched === win) return;
+  if (watched && !watched.isDestroyed()) {
+    watched.off("resize", scheduleSave);
+    watched.off("move", scheduleSave);
+    watched.off("maximize", scheduleSave);
+    watched.off("unmaximize", scheduleSave);
+  }
+  watched = win;
+  win.on("resize", scheduleSave);
+  win.on("move", scheduleSave);
+  win.on("maximize", scheduleSave);
+  win.on("unmaximize", scheduleSave);
 }
-function setTrayResourceWarn(v) {
-  if (resourceWarn === v) return;
-  resourceWarn = v;
-  refreshBadge();
-}
-function refreshBadge() {
-  if (!tray) return;
-  const registry2 = hooks.getRegistry();
-  const alert = registry2 ? registry2.list().some((p) => p.status === "error" && !p.external) : false;
-  const level = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0;
-  const img = composeImage(level);
-  if (img) tray.setImage(img);
-}
-function createTray(injected) {
-  if (tray) return;
-  hooks = injected;
-  const path2 = appIconPath();
-  const image = existsSync(path2) ? nativeImage.createFromPath(path2) : nativeImage.createEmpty();
-  trayImage = image.isEmpty() ? image : image.resize({ width: 16, height: 16 });
-  tray = new Tray(trayImage);
-  tray.on("click", () => hooks.onShowWindow());
-  rebuildTrayMenu();
+function unwatchWindowBounds() {
+  flushWindowBounds();
+  watched = null;
 }
 class PtySession {
   constructor(id2, title2, cwd, shell2, args, env2) {
@@ -16759,6 +17083,27 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
+  ipcMain$1.handle(IPC.ProbeRegistries, async () => {
+    try {
+      return ok(await probeRegistries());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetWebData, async () => {
+    try {
+      return ok(await getWebDataReport());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ClearWebData, async (_e, args) => {
+    try {
+      return ok(await clearWebData(args));
+    } catch (err) {
+      return fail(err);
+    }
+  });
   ipcMain$1.handle(IPC.GetUpdateHistory, () => {
     try {
       return ok(getUpdateHistory());
@@ -16825,6 +17170,9 @@ function registerIpc(registry2) {
         if (typeof partial.launchAtStartup === "boolean") {
           applyLaunchAtStartup(partial.launchAtStartup);
         }
+        if ("npmRegistry" in partial) applyNpmRegistryEnv();
+        if (partial.rememberWindowBounds === false) forgetWindowBounds();
+        if (partial.trayPageEntries || partial.trayBadge) rebuildTrayMenu();
         if (partial.locale) {
           invalidateLocaleCache();
           registry2.reconcile();
@@ -17319,9 +17667,12 @@ function ensureUnpackedForUpdate() {
   }
 }
 function createWindow() {
+  const restored = resolveBounds(940, 600);
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: restored?.width ?? 1280,
+    height: restored?.height ?? 860,
+    x: restored?.x,
+    y: restored?.y,
     minWidth: 940,
     minHeight: 600,
     show: false,
@@ -17347,8 +17698,11 @@ function createWindow() {
     if (!startHidden) mainWindow?.show();
   });
   mainWindow.on("closed", () => {
+    unwatchWindowBounds();
     mainWindow = null;
   });
+  watchWindowBounds(mainWindow);
+  if (restored?.maximized) mainWindow.maximize();
   const pushMaximized = () => {
     mainWindow?.webContents.send(IPC.OnMaximizedChanged, mainWindow.isMaximized());
   };
@@ -17447,6 +17801,7 @@ if (!gotLock) {
     markBootOk();
     startHidden = process.argv.includes("--autostart") || app$1.getLoginItemSettings().wasOpenedAtLogin;
     applyLaunchAtStartup(getSettings().launchAtStartup);
+    applyNpmRegistryEnv();
     app$1.on("browser-window-created", (_, window) => optimizer.watchWindowShortcuts(window));
     app$1.on("web-contents-created", (_e, contents) => {
       if (contents.getType() === "webview") {
@@ -17492,6 +17847,7 @@ if (!gotLock) {
   const QUIT_FLUSH_MS = 3e3;
   app$1.on("before-quit", (e) => {
     isQuitting = true;
+    flushWindowBounds();
     if (registry && !shutdownDone) {
       shutdownDone = true;
       e.preventDefault();

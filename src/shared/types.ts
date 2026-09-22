@@ -3,6 +3,42 @@ export const NODE_VERSION_REQUIRED = 'v24.21.0'
 /** Upstream git repo the desktop container itself updates from (self-update via git pull). */
 export const CONTAINER_REPO_URL = 'https://github.com/master1Sun/dsh-desktop-Electron.git'
 
+/**
+ * #25: ceiling (px) for the frosted-glass blur the 毛玻璃效果 slider can reach. The slider
+ * itself stays 0–100 (%); the settings value (`glassBlur`) is written straight to
+ * `--glass-blur`, so both the preview and the persisted value are clamped to this range —
+ * configs saved while the max was still 60 keep working, they just top out here.
+ */
+export const GLASS_BLUR_MAX_PX = 25
+
+/**
+ * #26: the npm registries the 网络镜像 panel can probe and switch between. First entry is the
+ * built-in default (what the container used before the setting existed), so an empty
+ * `npmRegistry` and picking this row are the same thing.
+ */
+export const REGISTRY_CANDIDATES: RegistryCandidate[] = [
+  {
+    id: 'npmmirror',
+    url: 'https://registry.npmmirror.com',
+    label: { zh: 'npmmirror（国内默认）', en: 'npmmirror (built-in default)' },
+    builtin: true
+  },
+  { id: 'npm', url: 'https://registry.npmjs.org', label: { zh: 'npm 官方', en: 'npm official' } },
+  {
+    id: 'tencent',
+    url: 'https://mirrors.cloud.tencent.com/npm',
+    label: { zh: '腾讯云', en: 'Tencent Cloud' }
+  },
+  {
+    id: 'huawei',
+    url: 'https://repo.huaweicloud.com/repository/npm',
+    label: { zh: '华为云', en: 'Huawei Cloud' }
+  }
+]
+
+/** Built-in registry every install falls back to when the user picked none. */
+export const NPM_REGISTRY_DEFAULT = REGISTRY_CANDIDATES[0].url
+
 export type PageStatus = 'stopped' | 'starting' | 'running' | 'error'
 
 /** 'terminal' = a CLI-only project: no HTTP port, runs inside the embedded terminal */
@@ -217,7 +253,8 @@ export interface ContainerSettings {
   accentColor?: string
   /**
    * Glass blur strength in px (#25) applied to `.glass`/`.glass-soft` backdrops. Undefined =
-   * keep the stylesheet default (30px); a number overrides `--glass-blur` at runtime.
+   * keep the stylesheet default; a number overrides `--glass-blur` at runtime, clamped to
+   * `GLASS_BLUR_MAX_PX` so configs saved under an older, wider range never render past it.
    */
   glassBlur?: number
   /**
@@ -234,6 +271,80 @@ export interface ContainerSettings {
    * launch. Undefined = the stylesheet default (320), clamped to the window height at runtime.
    */
   terminalHeight?: number
+  /** #26: remember the window size/position/maximized state and restore them on the next launch. */
+  rememberWindowBounds?: boolean
+  /**
+   * #26: the last window geometry, written by the main process on move/resize. Not a user-facing
+   * setting (never exported into a snapshot either) — it just lives in the same store file.
+   */
+  windowBounds?: WindowBounds
+  /**
+   * #26: motion preference. 'auto' (default) follows the OS `prefers-reduced-motion`; 'on'/'off'
+   * force it for this app only. The renderer resolves all three down to one `.reduce-motion`
+   * class on `<html>`, which is what every animation-damping rule keys off — so 'off' works even
+   * when the OS asks for less motion.
+   */
+  reduceMotion?: 'auto' | 'on' | 'off'
+  /**
+   * #26: the npm registry every install / `npm view` the container runs goes through, also
+   * injected into hosted pages as `npm_config_registry`. Empty = the built-in default mirror.
+   */
+  npmRegistry?: string
+  /** #26: how far the tray context menu lists pages: all = running + stopped, running = only live ones, off = none */
+  trayPageEntries?: 'all' | 'running' | 'off'
+  /** #26: which tiers may light the tray badge: all = update/resource/alert, alert = a crashed page only, off = never */
+  trayBadge?: 'all' | 'alert' | 'off'
+}
+
+/** #26: persisted BrowserWindow geometry; `maximized` is restored on top of the bounds. */
+export interface WindowBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+  maximized: boolean
+}
+
+/**
+ * #26: one npm mirror the 网络镜像 panel can probe and apply. Lives here (not in the main
+ * process) because both sides need it: the probe walks the list, the settings row renders it.
+ */
+export interface RegistryCandidate {
+  id: string
+  /** registry root, no trailing slash; `/-/ping` is appended for the probe */
+  url: string
+  /** display label per UI language; the renderer resolves it against the active locale */
+  label: { zh: string; en: string }
+  /** the registry the container falls back to when `npmRegistry` is empty */
+  builtin?: boolean
+}
+
+/** #26: outcome of probing one registry's `/-/ping` endpoint. */
+export interface RegistryProbe {
+  id: string
+  url: string
+  ok: boolean
+  /** round-trip latency in ms; only meaningful when `ok` */
+  ms?: number
+  status?: number
+  error?: string
+}
+
+/** #26: what the embedded webviews hold right now, as shown by the 隐私数据 panel. */
+export interface WebDataReport {
+  /** bytes in the session's HTTP cache (`Cache/` + `Code Cache/` under userData) */
+  cacheBytes: number
+  /** session-wide storage bytes the storage layer reports (localStorage / IDB / …) */
+  storageBytes: number
+  /** cookies grouped by domain, most cookies first */
+  cookieDomains: { domain: string; count: number }[]
+  totalCookies: number
+}
+
+/** #26: what to wipe; `domain` narrows a cookie clear to one site. */
+export interface WebDataClearArgs {
+  scope: 'cache' | 'cookies' | 'storage' | 'all'
+  domain?: string
 }
 
 export interface UpdateCheckResult {
@@ -397,6 +508,12 @@ export interface DshPluginInfo {
   name: string
   version: string
   source: 'bundle' | 'profile'
+  /**
+   * Bundle layers only: false when the layer is named in `dsh.profile.bundles` but resolves
+   * nowhere on disk. dsh registers the layer before pnpm runs, so an install that failed left a
+   * ghost — pnpm has no dependency to remove, and the row must not read as "ships with dsh".
+   */
+  present?: boolean
 }
 
 /**
@@ -417,6 +534,20 @@ export interface DshPluginUpdate {
 }
 
 export type DshUpdateChannel = 'npm' | 'git'
+
+/**
+ * Broadcast while a dsh plugin install/update runs in main, so the window-level top bar can
+ * show live progress even with the DSH panel closed. `done:false` marks the op's start
+ * (`name`, plus `index`/`total` = 1-based queue position when batch-updating), `done:true`
+ * closes it out; the position lets the bar trend determinate across the queue.
+ */
+export interface DshPluginOpEvent {
+  name: string
+  done: boolean
+  index?: number
+  total?: number
+  error?: string
+}
 
 /**
  * Outcome of asking for a dsh profile's runtime token.
@@ -516,6 +647,8 @@ export const IPC = {
   DshUninstallPlugin: 'dsh:uninstall-plugin',
   DshUpdatePlugin: 'dsh:update-plugin',
   DshUpdateAll: 'dsh:update-all',
+  /** broadcast: in-flight dsh plugin ops (DshPluginOpEvent) → window top progress bar */
+  OnDshPluginOp: 'dsh:plugin-op',
   DshCreatePage: 'dsh:create-page',
   DshToken: 'dsh:token',
   OpenclawStatus: 'openclaw:status',
@@ -570,7 +703,13 @@ export const IPC = {
   /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
   OnPageMetrics: 'container:page-metrics',
   /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
-  OnLogLine: 'container:log-line'
+  OnLogLine: 'container:log-line',
+  /** #26: probe every candidate npm registry in parallel → RegistryProbe[] */
+  ProbeRegistries: 'container:probe-registries',
+  /** #26: what the embedded webviews hold (cookies per domain, cache + storage bytes) → WebDataReport */
+  GetWebData: 'container:get-web-data',
+  /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
+  ClearWebData: 'container:clear-web-data'
 } as const
 
 /** One row of `IPC.ListLogFiles`. `key` is 'main' or a `pages/<file>` basename. */

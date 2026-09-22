@@ -124,17 +124,18 @@ function saveHeight(): void {
   settingsStore.patch({ terminalHeight: size.value.h }).catch(() => undefined)
 }
 
-// 启动时从设置里恢复上次高度（设置是异步加载的，loaded 之前先用默认值）。只恢复一次，
-// 之后高度归拖拽管，避免 save 回包反过来覆盖用户刚拖出的新高度。
-let restored = false
+// 高度与设置双向同步：启动时（设置是异步加载的）恢复上次高度，运行中在设置面板里改
+// 也立即生效。拖动本身会写回同一个 key，所以回包时 next === 本地高度，不会自打循环；
+// 拖动过程中忽略回包，免得把上一次保存的旧值盖到刚拖到一半的高度上。
 watch(
-  () => settingsStore.loaded,
-  (loaded) => {
-    if (!loaded || restored) return
-    restored = true
-    const h = settingsStore.settings.terminalHeight
-    size.value.h = clampH(typeof h === 'number' && h > 0 ? h : DEFAULT_H)
-    fitActive()
+  () => [settingsStore.loaded, settingsStore.settings.terminalHeight] as const,
+  ([loaded, h]) => {
+    if (!loaded || resizing.value) return
+    const next = clampH(typeof h === 'number' && h > 0 ? h : DEFAULT_H)
+    if (next !== size.value.h) {
+      size.value.h = next
+      fitActive()
+    }
   },
   { immediate: true }
 )

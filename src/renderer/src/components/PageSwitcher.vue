@@ -406,17 +406,16 @@ defineExpose({ close })
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .mini-spinner {
-    animation-duration: 1.6s;
-  }
-  .dot-starting,
-  .dot-starting::after {
-    animation: none;
-  }
-  .dot-starting {
-    opacity: 0.7;
-    box-shadow: 0 0 6px var(--warn);
-  }
+/* Damped when 减少动效 is in effect (see stores/settings.applyReduceMotion). */
+html.reduce-motion .mini-spinner {
+  animation-duration: 1.6s;
+}
+html.reduce-motion .dot-starting,
+html.reduce-motion .dot-starting::after {
+  animation: none;
+}
+html.reduce-motion .dot-starting {
+  opacity: 0.7;
+  box-shadow: 0 0 6px var(--warn);
 }
 </style>

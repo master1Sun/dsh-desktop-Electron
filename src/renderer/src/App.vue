@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MenuBar, { type PanelKind } from './components/MenuBar.vue'
-import { appPanelKey } from '@shared/types'
+import { appPanelKey, GLASS_BLUR_MAX_PX } from '@shared/types'
 import MenuPanelContent from './components/MenuPanelContent.vue'
 import CommandPalette, { type Command } from './components/CommandPalette.vue'
 import TerminalDrawer from './components/TerminalDrawer.vue'
@@ -10,7 +10,7 @@ import CliTerminalView from './components/CliTerminalView.vue'
 import SetupGate from './components/SetupGate.vue'
 import HomeView from './views/HomeView.vue'
 import { usePagesStore, type PageState } from './stores/pages'
-import { useSettingsStore } from './stores/settings'
+import { useSettingsStore, applyReduceMotion } from './stores/settings'
 import { useTerminalStore } from './stores/terminal'
 import { useUpdatesStore } from './stores/updates'
 import { useRuntimesStore } from './stores/runtimes'
@@ -277,7 +277,7 @@ async function restoreDefaultView(): Promise<boolean> {
   if (dv.kind === 'external') {
     if (!dv.url) return false
     const site = settingsStore.settings.externalSites.find((s) => s.url === dv.url)
-    previewExternalUrl(dv.url, site?.id)
+    previewExternalUrl(dv.url, site?.id, true)
     return true
   }
   const page = pagesStore.pages.find((p) => p.id === dv.pageId)
@@ -452,10 +452,21 @@ async function openPage(id: string): Promise<void> {
   showInWebview(page)
 }
 
-/** Show a saved/typed external URL in the webview. `siteId` keeps the switcher row highlighted. */
-function previewExternalUrl(url: string, siteId?: string): void {
+/**
+ * Open a saved/typed external address. `siteId` keeps the switcher row highlighted.
+ *
+ * #26: 外部地址打开方式 (`openExternalIn`) is wired back in here — the setting had been retired to
+ * a stored-only field, so the row in 设置 would have changed nothing. `embedOnly` overrides it for
+ * the one caller that *is* the container's own view (the 默认打开 restore at boot): honouring
+ * 'system-browser' there would leave the window showing nothing but a welcome page.
+ */
+function previewExternalUrl(url: string, siteId?: string, embedOnly = false): void {
   if (!url) return
-  // The 外部地址打开方式 setting was removed — external addresses always display embedded.
+  if (!embedOnly && settingsStore.settings.openExternalIn === 'system-browser') {
+    void window.container.openExternal(url)
+    ElMessage.info(t('app.openedExternally'))
+    return
+  }
   externalView.value = true
   activePageId.value = siteId ?? null
   const sid = siteId || `ext:${url}`
@@ -573,7 +584,9 @@ function applyAccent(hex?: string): void {
 
 /** #25: frosted-blur strength — write the base token the glass surfaces scale off.
     Set the px token (used by blur()) and its unitless mirror --glass-blur-n (used by the
-    tint/saturate ratios) together so they never drift. */
+    tint/saturate ratios) together so they never drift.
+    Clamped to the shared ceiling instead of rewritten: configs saved while the slider still
+    went up to 60px keep their value on disk, they just never render past GLASS_BLUR_MAX_PX. */
 function applyGlassBlur(px?: number): void {
   const root = document.documentElement
   if (typeof px !== 'number') {
@@ -581,8 +594,9 @@ function applyGlassBlur(px?: number): void {
     root.style.removeProperty('--glass-blur-n')
     return
   }
-  root.style.setProperty('--glass-blur', `${px}px`)
-  root.style.setProperty('--glass-blur-n', `${px}`)
+  const clamped = Math.min(Math.max(Math.round(px), 0), GLASS_BLUR_MAX_PX)
+  root.style.setProperty('--glass-blur', `${clamped}px`)
+  root.style.setProperty('--glass-blur-n', `${clamped}`)
 }
 
 /** #25: background transparency — the frosted-surface opacity. A percentage (0–100, full
@@ -606,6 +620,26 @@ watchEffect(() => {
   applyGlassAlpha(settingsStore.settings.glassAlpha)
 })
 
+// #26: reduced motion — one class resolves the tri-state setting and the OS hint; re-apply when
+// the OS flips live (battery-saver / accessibility changes mid-session) so 'auto' stays honest.
+watchEffect(() => {
+  applyReduceMotion(settingsStore.settings.reduceMotion)
+})
+/** #26: the OS query whose change we follow while the setting is 'auto'; torn down with the view. */
+let osMotionMq: MediaQueryList | null = null
+function onOsMotionChange(): void {
+  applyReduceMotion(settingsStore.settings.reduceMotion)
+}
+onMounted(() => {
+  if (typeof window.matchMedia !== 'function') return
+  osMotionMq = window.matchMedia('(prefers-reduced-motion: reduce)')
+  osMotionMq.addEventListener?.('change', onOsMotionChange)
+})
+onBeforeUnmount(() => {
+  osMotionMq?.removeEventListener?.('change', onOsMotionChange)
+  osMotionMq = null
+})
+
 // Apply the persisted UI language as soon as settings load, and keep the Element Plus
 // locale in lockstep so its built-in component text (empty states, pagination…) matches.
 const currentEpLocale = computed(() => epLocale())
@@ -614,9 +648,10 @@ const currentEpLocale = computed(() => epLocale())
  * Global ElMessage defaults: every toast pops bottom-right (EP anchors + stacks them
  * upward there natively) and de-duplicates identical repeats. A stable reference so the
  * ConfigProvider watcher doesn't re-merge a fresh object on each App re-render. Sizes are
- * trimmed to a compact "small toast" via the `.el-message` overrides in glass.css.
+ * trimmed to a compact "small toast" via the `.el-message` overrides in glass.css, where a
+ * long message also clips into a scrollable box; `showClose` gives every toast a manual dismiss.
  */
-const messageConfig = { placement: 'bottom-right', offset: 16, grouping: true }
+const messageConfig = { placement: 'bottom-right', offset: 16, grouping: true, showClose: true }
 watchEffect(() => {
   if (settingsStore.loaded) i18nLocale.value = settingsStore.settings.locale || 'zh'
 })

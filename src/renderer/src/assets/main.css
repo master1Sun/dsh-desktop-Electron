@@ -13,9 +13,11 @@
      at runtime from settings.glassBlur via documentElement.style.setProperty.
      --glass-blur carries the px used by blur(); --glass-blur-n is the same value unitless,
      for the alpha/saturate ratios (CSS calc can't divide/subtract across a unit). Both are
-     kept in sync by applyGlassBlur()/previewGlassBlur(). */
-  --glass-blur: 30px;
-  --glass-blur-n: 30;
+     kept in sync by applyGlassBlur()/previewGlassBlur().
+     25px == GLASS_BLUR_MAX_PX, the strongest blur the slider can ask for: a pre-load paint
+     must never render past the supported range. */
+  --glass-blur: 25px;
+  --glass-blur-n: 25;
   /* Blur-coupled frosting: the bigger --glass-blur, the more the surface tint thins out,
      so the slider actually *shows* (a near-opaque tint makes the backdrop invisible and
      blur 0↔60 indistinguishable). rgb channels + a plain alpha keep the calc simple. */
@@ -294,13 +296,14 @@ body {
 .el-radio-button__inner:active {
   transform: scale(0.96);
 }
-@media (prefers-reduced-motion: reduce) {
-  .el-button,
-  .el-button:active:not(.is-disabled),
-  .el-radio-button__inner,
-  .el-radio-button__inner:active {
-    transform: none;
-  }
+/* #26: reduced motion. These rules used to live in `@media (prefers-reduced-motion: reduce)`, so a
+   user whose OS asked for less motion could never opt back in. They now key off `.reduce-motion`,
+   which the renderer paints from setting + OS (see applyReduceMotion in stores/settings.ts). */
+html.reduce-motion .el-button,
+html.reduce-motion .el-button:active:not(.is-disabled),
+html.reduce-motion .el-radio-button__inner,
+html.reduce-motion .el-radio-button__inner:active {
+  transform: none;
 }
 
 .status-dot {

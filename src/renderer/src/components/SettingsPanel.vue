@@ -1,11 +1,29 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Monitor, Operation, Download, FolderOpened } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  Monitor,
+  Operation,
+  Download,
+  FolderOpened,
+  Connection,
+  Lock,
+  Bell
+} from '@element-plus/icons-vue'
 import { usePagesStore } from '../stores/pages'
 import { useSettingsStore } from '../stores/settings'
 import type { DefaultView } from '../stores/settings'
-import type { EnvRootInfo, DownloadDirInfo } from '../../../shared/types'
+import type {
+  EnvRootInfo,
+  DownloadDirInfo,
+  RegistryProbe,
+  WebDataReport
+} from '../../../shared/types'
+import {
+  GLASS_BLUR_MAX_PX,
+  NPM_REGISTRY_DEFAULT,
+  REGISTRY_CANDIDATES
+} from '../../../shared/types'
 import { t } from '../i18n'
 
 const emit = defineEmits<{
@@ -16,7 +34,7 @@ const emit = defineEmits<{
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
 
-/** Which settings tab is open — one of view / behavior / download / env. */
+/** Which settings tab is open — one of view / behavior / alerts / download / network / env / privacy. */
 const activeTab = ref('view')
 
 /* ---- dynamic per-page directory env config ----
@@ -230,7 +248,7 @@ function onLocaleChange(next: 'zh' | 'en'): void {
    100 = heavy frost (max blur, most see-through). It still persists into the two existing
    settings (glassBlur / glassAlpha) so the main process, App.vue and the four frosted surfaces
    keep consuming them unchanged. Local draft + @input live preview; @change talks to main once. */
-const FROST_BLUR_MAX_PX = 60 // frost 100 → 60px blur (== the old glassBlur slider max)
+const FROST_BLUR_MAX_PX = GLASS_BLUR_MAX_PX // frost 100 → the shared blur ceiling (25px)
 const FROST_ALPHA_TOP = 96 // frost 0 → 96% opaque (near-solid)
 const FROST_ALPHA_BOTTOM = 8 // frost 100 → 8% opaque (very transparent)
 function blurFromFrost(f: number): number {
@@ -262,6 +280,178 @@ function previewFrost(f: number): void {
 function commitFrost(f: number): void {
   void patch({ glassBlur: blurFromFrost(f), glassAlpha: alphaFromFrost(f) }, '')
 }
+
+/* ---- #26: 内存告警阈值 / 终端面板高度 ----------------------------------------------
+   Both were stored-and-used-but-never-editable: memWarnMb drives the gold tray badge and the
+   over-budget row colour, terminalHeight is what the drawer restores after a drag. Sliders here
+   write the same keys, so nothing downstream changes. */
+const MEM_WARN_MIN_MB = 100
+const MEM_WARN_MAX_MB = 8000
+const TERMINAL_MIN_H = 160
+const TERMINAL_MAX_H = 2000
+/** Mirrors TerminalDrawer's DEFAULT_H; kept literal so resetting doesn't need an import cycle. */
+const TERMINAL_DEFAULT_H = 320
+const memWarnDraft = ref(settingsStore.settings.memWarnMb ?? 800)
+const termHeightDraft = ref(settingsStore.settings.terminalHeight ?? TERMINAL_DEFAULT_H)
+watch(
+  () => [settingsStore.settings.memWarnMb, settingsStore.settings.terminalHeight] as const,
+  ([mem, th]) => {
+    const nextMem = mem ?? 800
+    if (nextMem !== memWarnDraft.value) memWarnDraft.value = nextMem
+    const nextTh = th ?? TERMINAL_DEFAULT_H
+    if (nextTh !== termHeightDraft.value) termHeightDraft.value = nextTh
+  }
+)
+async function resetTerminalHeight(): Promise<void> {
+  termHeightDraft.value = TERMINAL_DEFAULT_H
+  await patch({ terminalHeight: TERMINAL_DEFAULT_H }, t('settings.saved'))
+}
+
+/* ---- #26: 网络镜像 ---------------------------------------------------------------
+   One setting (npmRegistry) decides where every install the container drives goes. The panel can
+   measure all candidate mirrors at once and jump to the fastest reachable one. An empty setting is
+   *not* "no registry" — it means the built-in default, so the picker writes '' for that row. */
+const registryProbes = ref<Record<string, RegistryProbe>>({})
+const probing = ref(false)
+const currentRegistry = computed(() => settingsStore.settings.npmRegistry?.trim() || NPM_REGISTRY_DEFAULT)
+const customRegistry = ref(settingsStore.settings.npmRegistry || '')
+watch(
+  () => settingsStore.settings.npmRegistry,
+  () => {
+    const next = settingsStore.settings.npmRegistry || ''
+    if (next !== customRegistry.value) customRegistry.value = next
+  }
+)
+function isCurrent(url: string): boolean {
+  return url === currentRegistry.value
+}
+function labelOf(label: { zh: string; en: string }): string {
+  return settingsStore.settings.locale === 'en' ? label.en : label.zh
+}
+function msText(id: string): string {
+  const p = registryProbes.value[id]
+  if (!p) return t('settings.registryNotProbed')
+  return p.ok ? `${p.ms} ms` : t('settings.registryUnreachable')
+}
+function probeClass(id: string): string {
+  const p = registryProbes.value[id]
+  return p ? (p.ok ? 'ok' : 'bad') : ''
+}
+/** Fastest reachable candidate, or '' when nothing answered (never pick a dead mirror). */
+const bestRegistry = computed<RegistryProbe | null>(() => {
+  const ok = Object.values(registryProbes.value).filter((p) => p.ok && Number.isFinite(p.ms))
+  if (!ok.length) return null
+  return ok.reduce((a, b) => ((a.ms ?? 1e9) <= (b.ms ?? 1e9) ? a : b))
+})
+const bestName = computed(() => {
+  const best = bestRegistry.value
+  if (!best) return ''
+  return labelOf(REGISTRY_CANDIDATES.find((c) => c.id === best.id)?.label ?? { zh: best.url, en: best.url })
+})
+async function probeAllRegistries(): Promise<void> {
+  if (probing.value) return
+  probing.value = true
+  try {
+    const res = await window.container.probeRegistries()
+    if (!res?.ok) throw new Error(res?.error || t('common.unknownError'))
+    const map: Record<string, RegistryProbe> = {}
+    for (const p of (res.data ?? []) as RegistryProbe[]) map[p.id] = p
+    registryProbes.value = map
+    const best = bestRegistry.value
+    if (best) ElMessage.success(t('settings.registryProbed', { ms: best.ms ?? 0 }))
+    else ElMessage.warning(t('settings.registryProbeNone'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    probing.value = false
+  }
+}
+async function useRegistry(url: string, msg = t('settings.registrySwitched')): Promise<void> {
+  // Writing '' for the built-in mirror keeps the stored setting equal to a fresh install.
+  const next = url === NPM_REGISTRY_DEFAULT ? '' : url
+  customRegistry.value = next
+  await patch({ npmRegistry: next }, msg)
+}
+async function saveCustomRegistry(value: string): Promise<void> {
+  const url = value.trim().replace(/\/+$/, '')
+  customRegistry.value = url
+  if (!url) return void useRegistry(NPM_REGISTRY_DEFAULT)
+  if (!/^https?:\/\//i.test(url)) {
+    ElMessage.error(t('settings.registryBadUrl'))
+    return
+  }
+  await useRegistry(url)
+}
+
+/* ---- #26: 隐私数据 ---------------------------------------------------------------
+   Every <webview> shares one session, so this is deliberately explicit about scope: a per-domain
+   cookie wipe is offered next to the global ones, and anything that logs the user out of
+   *every* hosted service asks first. */
+const webData = ref<WebDataReport | null>(null)
+const webDataLoading = ref(false)
+const webDataBusy = ref('')
+
+function sizeText(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`
+}
+
+/** Cache + site data, shown once in the header row so each category row can keep its own size. */
+const webDataTotal = computed(() =>
+  sizeText((webData.value?.cacheBytes ?? 0) + (webData.value?.storageBytes ?? 0))
+)
+
+async function loadWebData(): Promise<void> {
+  webDataLoading.value = true
+  try {
+    const res = await window.container.getWebData?.()
+    if (res?.ok) webData.value = (res.data ?? null) as WebDataReport | null
+  } catch {
+    /* a failed read just leaves the previous report on screen */
+  } finally {
+    webDataLoading.value = false
+  }
+}
+
+/** Clear one scope; `confirmKey` marks the destructive ones (they sign pages out). */
+async function clearWeb(scope: 'cache' | 'cookies' | 'storage' | 'all', domain?: string, confirmKey = ''): Promise<void> {
+  if (confirmKey) {
+    try {
+      await ElMessageBox.confirm(t(confirmKey), t('settings.webDataClear'), {
+        type: 'warning',
+        confirmButtonText: t('common.ok'),
+        cancelButtonText: t('common.cancel')
+      })
+    } catch {
+      return
+    }
+  }
+  webDataBusy.value = domain ? `${scope}:${domain}` : scope
+  try {
+    const res = await window.container.clearWebData({ scope, domain })
+    if (!res?.ok) throw new Error(res?.error || t('common.unknownError'))
+    const n = (res.data as { removedCookies: number }).removedCookies
+    ElMessage.success(
+      scope === 'cookies' && n
+        ? t('settings.webDataCookiesGone', { n })
+        : t('settings.webDataCleared')
+    )
+    await loadWebData()
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    webDataBusy.value = ''
+  }
+}
+
+onMounted(loadWebData)
 </script>
 
 <template>
@@ -389,12 +579,122 @@ function commitFrost(f: number): void {
             <div class="tip">{{ t('settings.crashAutoRestartTip') }}</div>
           </el-form-item>
 
+          <!-- #26: terminal height (stored-only until now) plus the window/motion memory. -->
+          <el-form-item :label="t('settings.terminalHeight')">
+            <div class="blur-row">
+              <el-slider
+                v-model="termHeightDraft"
+                :min="TERMINAL_MIN_H"
+                :max="TERMINAL_MAX_H"
+                :step="20"
+                style="width: 260px"
+                @change="patch({ terminalHeight: termHeightDraft }, '')"
+              />
+              <span class="blur-val">{{ termHeightDraft }} px</span>
+              <el-button
+                v-if="termHeightDraft !== TERMINAL_DEFAULT_H"
+                link
+                type="primary"
+                @click="resetTerminalHeight"
+              >
+                {{ t('settings.accentReset') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.terminalHeightTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.rememberWindow')">
+            <el-switch
+              :model-value="settingsStore.settings.rememberWindowBounds !== false"
+              @update:model-value="patch({ rememberWindowBounds: $event as boolean })"
+            />
+            <div class="tip">{{ t('settings.rememberWindowTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.reduceMotion')">
+            <el-radio-group
+              :model-value="settingsStore.settings.reduceMotion || 'auto'"
+              @update:model-value="patch({ reduceMotion: $event as 'auto' | 'on' | 'off' })"
+            >
+              <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
+              <el-radio-button value="on">{{ t('settings.alwaysOn') }}</el-radio-button>
+              <el-radio-button value="off">{{ t('settings.alwaysOff') }}</el-radio-button>
+            </el-radio-group>
+            <div class="tip">{{ t('settings.reduceMotionTip') }}</div>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <!-- 提醒告警：托盘、系统通知、内存阈值、外部地址去哪打开——都是“会主动打扰到人”的出口，从行为规范里拆出来。 -->
+      <el-tab-pane name="alerts">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Bell /></el-icon>{{ t('settings.tabAlerts') }}</span
+          >
+        </template>
+        <el-form label-position="left" size="small">
           <el-form-item :label="t('settings.systemNotifications')">
             <el-switch
               :model-value="settingsStore.settings.systemNotifications"
               @update:model-value="patch({ systemNotifications: $event as boolean })"
             />
             <div class="tip">{{ t('settings.systemNotificationsTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.memWarnMb')">
+            <div class="blur-row">
+              <el-slider
+                v-model="memWarnDraft"
+                :min="MEM_WARN_MIN_MB"
+                :max="MEM_WARN_MAX_MB"
+                :step="50"
+                style="width: 260px"
+                @change="patch({ memWarnMb: memWarnDraft }, '')"
+              />
+              <span class="blur-val">{{ memWarnDraft }} MB</span>
+            </div>
+            <div class="tip">{{ t('settings.memWarnMbTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.trayPageEntries')">
+            <el-radio-group
+              :model-value="settingsStore.settings.trayPageEntries || 'all'"
+              @update:model-value="
+                patch({ trayPageEntries: $event as 'all' | 'running' | 'off' })
+              "
+            >
+              <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
+              <el-radio-button value="running">{{ t('settings.trayRunning') }}</el-radio-button>
+              <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
+            </el-radio-group>
+            <div class="tip">{{ t('settings.trayPageEntriesTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.trayBadge')">
+            <el-radio-group
+              :model-value="settingsStore.settings.trayBadge || 'all'"
+              @update:model-value="patch({ trayBadge: $event as 'all' | 'alert' | 'off' })"
+            >
+              <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
+              <el-radio-button value="alert">{{ t('settings.trayAlertOnly') }}</el-radio-button>
+              <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
+            </el-radio-group>
+            <div class="tip">{{ t('settings.trayBadgeTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.externalOpenMode')">
+            <el-radio-group
+              :model-value="settingsStore.settings.openExternalIn"
+              @update:model-value="
+                patch({ openExternalIn: $event as 'embedded' | 'system-browser' })
+              "
+            >
+              <el-radio-button value="embedded">{{ t('settings.embedded') }}</el-radio-button>
+              <el-radio-button value="system-browser">{{
+                t('settings.systemBrowser')
+              }}</el-radio-button>
+            </el-radio-group>
+            <div class="tip">{{ t('settings.externalOpenModeTip') }}</div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -430,6 +730,79 @@ function commitFrost(f: number): void {
                 })
               }}
             </div>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <!-- #26: 网络镜像。一个设置决定容器带动的所有安装去哪拉包。 -->
+      <el-tab-pane name="network">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Connection /></el-icon>{{ t('settings.tabNetwork') }}</span
+          >
+        </template>
+        <el-form label-position="left" size="small">
+          <el-form-item :label="t('settings.registryPick')">
+            <div class="reg-list">
+              <div
+                v-for="c in REGISTRY_CANDIDATES"
+                :key="c.id"
+                class="reg-row"
+                :class="{ on: isCurrent(c.url) }"
+              >
+                <span class="reg-name">{{ labelOf(c.label) }}</span>
+                <span class="reg-url">{{ c.url }}</span>
+                <span class="reg-ms" :class="probeClass(c.id)">{{ msText(c.id) }}</span>
+                <el-button
+                  class="reg-act"
+                  size="small"
+                  :disabled="isCurrent(c.url)"
+                  @click="useRegistry(c.url)"
+                >
+                  {{ isCurrent(c.url) ? t('settings.registryCurrent') : t('settings.registryUse') }}
+                </el-button>
+              </div>
+            </div>
+            <div class="tip">{{ t('settings.registryTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.registryProbe')">
+            <div class="act-row act-end">
+              <el-button size="small" :loading="probing" @click="probeAllRegistries">
+                {{ t('settings.registryProbeBtn') }}
+              </el-button>
+              <el-button
+                v-if="bestRegistry"
+                size="small"
+                type="primary"
+                :disabled="isCurrent(bestRegistry.url)"
+                @click="useRegistry(bestRegistry.url)"
+              >
+                {{ t('settings.registryUseBest', { name: bestName, ms: bestRegistry.ms ?? 0 }) }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.registryProbeTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.registryCustom')">
+            <div class="act-row">
+              <el-input
+                v-model="customRegistry"
+                :placeholder="NPM_REGISTRY_DEFAULT"
+                clearable
+                @change="saveCustomRegistry(String($event || ''))"
+              />
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :disabled="customRegistry.trim() === (settingsStore.settings.npmRegistry || '')"
+                @click="saveCustomRegistry(customRegistry)"
+              >
+                {{ t('common.save') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.registryCustomTip') }}</div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -507,6 +880,103 @@ function commitFrost(f: number): void {
         </template>
         <div v-else class="env-empty">{{ t('settings.envSectionEmpty') }}</div>
       </el-tab-pane>
+
+      <!-- #26: 隐私数据。所有 <webview> 共用一个 session，所以这里说清楚每次清理的范围。 -->
+      <el-tab-pane name="privacy">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Lock /></el-icon>{{ t('settings.tabPrivacy') }}</span
+          >
+        </template>
+        <el-form label-position="left" size="small">
+          <el-form-item :label="t('settings.webDataTitle')">
+            <div class="act-row">
+              <span class="wd-size">
+                {{ t('settings.webDataTotal', { size: webDataTotal }) }}
+              </span>
+              <el-button size="small" :loading="webDataLoading" @click="loadWebData">
+                {{ t('common.refresh') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.webDataTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.webDataCache')">
+            <div class="act-row">
+              <span class="wd-size">{{ sizeText(webData?.cacheBytes ?? 0) }}</span>
+              <el-button size="small" :loading="webDataBusy === 'cache'" @click="clearWeb('cache')">
+                {{ t('settings.webDataClear') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.webDataCacheTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.webDataStorage')">
+            <div class="act-row">
+              <span class="wd-size">{{ sizeText(webData?.storageBytes ?? 0) }}</span>
+              <el-button
+                size="small"
+                :loading="webDataBusy === 'storage'"
+                @click="clearWeb('storage', undefined, 'settings.webDataStorageConfirm')"
+              >
+                {{ t('settings.webDataClear') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.webDataStorageTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.webDataCookies')">
+            <div class="act-row">
+              <span class="wd-size">
+                {{ t('settings.webDataCookieCount', { n: webData?.totalCookies ?? 0 }) }}
+              </span>
+              <el-button
+                size="small"
+                :loading="webDataBusy === 'cookies'"
+                :disabled="!webData?.totalCookies"
+                @click="clearWeb('cookies', undefined, 'settings.webDataCookieConfirm')"
+              >
+                {{ t('settings.webDataClearAll') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.webDataCookiesTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.webDataPerSite')">
+            <div v-if="webData?.cookieDomains.length" class="reg-list scroll">
+              <div v-for="d in webData.cookieDomains" :key="d.domain" class="reg-row">
+                <span class="wd-site">{{ d.domain }}</span>
+                <span class="reg-ms">{{ t('settings.webDataCookieCount', { n: d.count }) }}</span>
+                <el-button
+                  class="reg-act"
+                  size="small"
+                  :loading="webDataBusy === `cookies:${d.domain}`"
+                  @click="clearWeb('cookies', d.domain)"
+                >
+                  {{ t('settings.webDataClear') }}
+                </el-button>
+              </div>
+            </div>
+            <div v-else class="env-empty">{{ t('settings.webDataNoCookies') }}</div>
+            <div class="tip">{{ t('settings.webDataPerSiteTip') }}</div>
+          </el-form-item>
+
+          <el-form-item :label="t('settings.webDataAll')">
+            <div class="act-row act-end">
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                :loading="webDataBusy === 'all'"
+                @click="clearWeb('all', undefined, 'settings.webDataAllConfirm')"
+              >
+                {{ t('settings.webDataAllBtn') }}
+              </el-button>
+            </div>
+            <div class="tip">{{ t('settings.webDataAllTip') }}</div>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -579,6 +1049,9 @@ function commitFrost(f: number): void {
 .settings-tabs :deep(.el-tabs__content) {
   flex: 1;
   overflow: hidden;
+  /* The column used to sit flush with the rail and the panel's own padding, so the row hover
+     wash ran straight into both. A little air on all four sides keeps it off the edges. */
+  padding: 6px 8px 8px 6px;
 }
 .tab-label {
   display: inline-flex;
@@ -667,11 +1140,19 @@ function commitFrost(f: number): void {
   color: var(--text);
   margin: 4px 0 8px;
 }
+/* Rows carry their own inner padding so the hover wash and its inset ring never hug the label
+   or the control; `margin-bottom` shrinks by the same amount the padding grows, so the list
+   doesn't get taller overall. The radius lives here (not just on :hover) because a bordered
+   box only reads as one box when the corner is already rounded before it lights up. */
+.settings-panel :deep(.el-form-item) {
+  padding: 3px 8px;
+  margin-bottom: 7px;
+  border-radius: 8px;
+}
 /* Every settings form row (incl. the 系统 page bottom / env-section lists) reads on
    hover with a glassy accent wash instead of an opaque block. */
 .settings-panel :deep(.el-form-item):hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
-  border-radius: 8px;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
   transition: background 0.15s ease, box-shadow 0.15s ease;
 }
@@ -685,5 +1166,92 @@ function commitFrost(f: number): void {
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 0 5px;
+}
+
+/* #26 网络镜像 / 隐私数据: one compact row list per tab, sharing the same hairline look as
+   the frosted surfaces. `.on` marks the row the current setting points at. */
+.reg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-width: 620px;
+}
+.reg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.reg-row.on {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.reg-name {
+  min-width: 128px;
+  font-weight: 650;
+  color: var(--text);
+}
+.reg-url {
+  flex: 1;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.reg-ms {
+  min-width: 64px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+.reg-ms.ok {
+  color: var(--ok);
+}
+.reg-ms.bad {
+  color: var(--err);
+}
+/* Keep the action button at the row's right edge no matter how long the mirror URL got. */
+.reg-act {
+  flex: none;
+}
+
+/* Right-rail action rows (#26): the value keeps the left edge and every button lands on the same
+   right edge of one 620px column, so both tabs read as a table instead of a stack of controls of
+   differing width. `.act-end` is for rows with nothing to say on the left (a bare wipe button). */
+.act-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 620px;
+}
+.act-row .el-input {
+  flex: 1;
+  min-width: 0;
+}
+.act-row.act-end {
+  justify-content: flex-end;
+}
+.wd-size {
+  flex: 1;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+/* A cookie-domain name is arbitrary text: clip it rather than let it push the button off-column. */
+.wd-site {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+/* Signed-in sites can pile up; the list scrolls instead of stretching the panel forever. */
+.reg-list.scroll {
+  max-height: 240px;
+  overflow-y: auto;
 }
 </style>

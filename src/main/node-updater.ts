@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { app, net } from 'electron'
 import { m } from './i18n'
+import { getSettings } from './store'
 import { getNodeRuntimeInfo, invalidateNodeRuntimeCache, nodeVersionUsable, overrideNodeDir } from './node-runtime'
 import type { NodeRuntimeInfo } from './node-runtime'
 import type { NodeVersionInfo, UpdateProgress } from '../shared/types'
@@ -32,6 +33,18 @@ const DIST_BASES = [
   'https://cdn.npmmirror.com/binaries/node/%V%/node-%V%-win-x64.zip',
   'https://nodejs.org/dist/%V%/node-%V%-win-x64.zip'
 ]
+
+/**
+ * #26: picking npmjs.org over the mirrors in 网络镜像 says something about this machine's
+ * network — it reaches upstream — so the Node index/zip candidates get re-ordered to match. Only
+ * the order changes: every other source stays a fallback, so a wrong read of the network can only
+ * cost a retry, never a dead end.
+ */
+function preferUpstream(): boolean {
+  return (getSettings().npmRegistry || '').trim().replace(/\/+$/, '') === 'https://registry.npmjs.org'
+}
+const indexUrls = (): string[] => (preferUpstream() ? [...INDEX_URLS].reverse() : INDEX_URLS)
+const distBases = (): string[] => (preferUpstream() ? [...DIST_BASES].reverse() : DIST_BASES)
 
 /** Same cap the index is useful at in a dropdown; newest-first order is kept. */
 const MAX_VERSIONS = 50
@@ -91,7 +104,7 @@ function get(url: string, timeoutMs = 20000): Promise<{ status: number; body: st
 export async function listNodeVersions(): Promise<NodeVersionInfo[]> {
   if (process.platform !== 'win32') throw new Error(m('node.notWin'))
   let lastErr = ''
-  for (const url of INDEX_URLS) {
+  for (const url of indexUrls()) {
     try {
       const { body } = await get(url, 25000)
       const entries = JSON.parse(body) as Array<{
@@ -265,7 +278,7 @@ export async function updateNodeRuntime(
 
   onProgress({ name: 'Node', phase: 'fetch', percent: 0, message: m('node.downloading', { v: want }) })
   await downloadZip(
-    DIST_BASES.map((b) => b.split('%V%').join(want)),
+    distBases().map((b) => b.split('%V%').join(want)),
     zip,
     want,
     onProgress

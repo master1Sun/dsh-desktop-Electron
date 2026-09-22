@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { BrowserWindow } from 'electron'
 import {
   existsSync,
   mkdirSync,
@@ -10,7 +11,13 @@ import {
 } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
-import { resolveDshProfileDir, resolveDshRuntimeDirs, resolvePagesDir } from './store'
+import {
+  resolveDshProfileDir,
+  resolveDshRuntimeDirs,
+  npmRegistryWithSlash,
+  resolvePagesDir
+} from './store'
+import { IPC } from '../shared/types'
 import type { DshPluginInfo, DshPluginUpdate, DshUpdateChannel } from '../shared/types'
 import type { ContainerManifest } from './pages'
 // aliased: `m` is already a local identifier in this file (regex match results)
@@ -324,23 +331,45 @@ export function listDshPlugins(profile = DEFAULT_PROFILE): DshPluginInfo[] {
   }
   for (const b of bundles) {
     if (seen.has(b)) continue
-    out.push({ name: b, version: installedBundleVersion(b) || '(bundled)', source: 'bundle' })
+    const version = installedBundleVersion(b, profileDir)
+    // A layer resolving neither in the profile nor in any dsh root is a ghost: dsh appends to
+    // `bundles` before pnpm runs, so a failed install leaves the name with nothing to uninstall.
+    out.push(
+      version
+        ? { name: b, version, source: 'bundle', present: true }
+        : { name: b, version: '', source: 'bundle', present: false }
+    )
   }
   return out
 }
 
-/** version of a bundle resolved from the dsh installation, when it is present there */
-function installedBundleVersion(name: string): string | null {
-  for (const root of dshRoots()) {
+/** version of a bundle resolved from the profile install or the dsh installation, when present */
+function installedBundleVersion(name: string, profileDir: string): string | null {
+  const parts = name.split('/')
+  for (const dir of bundleSearchDirs(profileDir)) {
     try {
-      return JSON.parse(
-        readFileSync(join(root, 'node_modules', ...name.split('/'), 'package.json'), 'utf-8')
-      ).version
+      const manifest = join(dir, ...parts, 'package.json')
+      return JSON.parse(readFileSync(manifest, 'utf-8')).version
     } catch {
       /* try the next root */
     }
   }
   return null
+}
+
+/**
+ * node_modules dirs a bundle layer can resolve from: the profile's own (pnpm-installed plugins),
+ * then each dsh root's top level *and* the nested tree dsh ships its built-in layers in —
+ * `@deepseek-ai/dsh-base` & friends live under `@deepseek-ai/dsh/node_modules`, so omitting it
+ * would report every shipped layer as missing.
+ */
+function bundleSearchDirs(profileDir: string): string[] {
+  const dirs = [join(profileDir, 'node_modules')]
+  for (const root of dshRoots()) {
+    const nm = join(root, 'node_modules')
+    dirs.push(nm, join(nm, '@deepseek-ai', 'dsh', 'node_modules'))
+  }
+  return dirs
 }
 
 /** register the launcher profile as a pages/<id> entry by writing container.json (no file copying) */
@@ -380,16 +409,65 @@ function validateNpmSpec(spec: string): string {
 
 export async function installDshPlugin(spec: string, profile = DEFAULT_PROFILE): Promise<void> {
   const s = validateNpmSpec(spec)
-  await dshPluginForward(['add', s], profile)
+  broadcastPluginOp({ name: s, done: false })
+  try {
+    await dshPluginForward(['add', s], profile)
+    broadcastPluginOp({ name: s, done: true })
+  } catch (err) {
+    broadcastPluginOp({ name: s, done: true, error: (err as Error).message })
+    throw err
+  }
 }
+
+/**
+ * pnpm's "not one of my dependencies" verdict. dsh keeps a layer in `dsh.profile.bundles` even
+ * after the package stops being a dependency, so such a row can never be `remove`d — translate
+ * the multi-line diagnostic (and its log path) into one actionable sentence.
+ */
+const NOT_A_DEPENDENCY = /ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS|no such dependency found/i
 
 export async function uninstallDshPlugin(name: string, profile = DEFAULT_PROFILE): Promise<void> {
   const s = validateNpmSpec(name)
-  await dshPluginForward(['remove', s], profile)
+  try {
+    await dshPluginForward(['remove', s], profile)
+  } catch (err) {
+    const raw = (err as Error).message
+    if (NOT_A_DEPENDENCY.test(raw)) throw new Error(msg('dsh.notADependency', { name: s }))
+    throw err
+  }
+}
+
+/** Snapshot of one in-flight plugin op, broadcast to the windows' top progress bars. */
+function broadcastPluginOp(p: {
+  name: string
+  done: boolean
+  index?: number
+  total?: number
+  error?: string
+}): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(IPC.OnDshPluginOp, p)
+  }
 }
 
 /** update one plugin: npm → pnpm update <name>; git → re-add <url>#<ref|sha> with the ref resolved to its commit */
 export async function updateDshPlugin(
+  name: string,
+  channel: DshUpdateChannel,
+  gitUrl?: string,
+  profile = DEFAULT_PROFILE
+): Promise<string> {
+  try {
+    const result = await applyPluginUpdate(name, channel, gitUrl, profile)
+    broadcastPluginOp({ name, done: true })
+    return result
+  } catch (err) {
+    broadcastPluginOp({ name, done: true, error: (err as Error).message })
+    throw err
+  }
+}
+
+async function applyPluginUpdate(
   name: string,
   channel: DshUpdateChannel,
   gitUrl?: string,
@@ -424,7 +502,11 @@ export async function updateAllDshPlugins(profile = DEFAULT_PROFILE): Promise<st
   if (!targets.length) return ''
   const done: string[] = []
   const failed: string[] = []
+  const total = targets.length
+  let index = 0
   for (const u of targets) {
+    index++
+    broadcastPluginOp({ name: u.name, done: false, index, total })
     try {
       // Newest is on npm but the dep is currently git-pinned: `pnpm update` won't drop the git
       // source, so replace it with the registry version instead (the mirror of an npm→git flip).
@@ -434,17 +516,16 @@ export async function updateAllDshPlugins(profile = DEFAULT_PROFILE): Promise<st
         await installDshPlugin(spec, profile)
         done.push(msg('dsh.npmUpdated', { spec }))
       } else {
-        done.push(await updateDshPlugin(u.name, u.channel || 'npm', u.gitUrl, profile))
+        done.push(await applyPluginUpdate(u.name, u.channel || 'npm', u.gitUrl, profile))
       }
     } catch (err) {
       failed.push(`${u.name}: ${(err as Error).message}`)
     }
+    broadcastPluginOp({ name: u.name, done: true })
   }
   if (!done.length) throw new Error(failed.join('\n') || msg('dsh.unavailable'))
   return [...done, ...failed].join('\n').slice(-2000)
 }
-
-const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
 
 /**
  * git dependency specs, e.g. github:user/repo#<sha> / github:user/repo#v1.2.3 /
@@ -521,7 +602,9 @@ function isNewerVersion(installed: string, latest: string): boolean {
 }
 
 async function npmLatestVersion(name: string): Promise<string> {
-  const res = await runCli('npm', ['view', name, 'version', '--registry', NPM_REGISTRY_MIRROR], {
+  // #26: the user-picked registry, resolved per call (not a module constant) so switching 镜像源
+  // takes effect without a restart.
+  const res = await runCli('npm', ['view', name, 'version', '--registry', npmRegistryWithSlash()], {
     timeoutMs: 30_000,
     shell: process.platform === 'win32'
   })
@@ -551,7 +634,7 @@ function normalizeRepoUrl(raw: string): string | null {
 async function npmRepositoryUrl(name: string): Promise<string> {
   const res = await runCli(
     'npm',
-    ['view', name, 'repository.url', '--registry', NPM_REGISTRY_MIRROR],
+    ['view', name, 'repository.url', '--registry', npmRegistryWithSlash()],
     { timeoutMs: 30_000, shell: process.platform === 'win32' }
   )
   return res.code === 0 ? res.stdout.trim().replace(/^["']|["']$/g, '') : ''

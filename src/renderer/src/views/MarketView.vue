@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { t } from '../i18n'
+import { reduceMotion } from '../stores/settings'
 
 /**
  * 默认工作台 = 内置插件市场静态页（原 pages/dsh-plugin-market 的 node server 版本已移除）。
@@ -184,8 +185,14 @@ onMounted(() => {
   })
   reveals.forEach((el) => io?.observe(el))
 
-  // Pointer-driven 3D tilt on plugin cards (skipped when the OS asks for less motion).
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  // Pointer-driven 3D tilt on plugin cards. Driven by the app-wide `reduceMotion` flag instead of
+  // a raw matchMedia() probe, so the in-app tri-state setting can override the OS preference.
+  watch(reduceMotion, (on) => (on ? detachTilt() : attachTilt()), { immediate: true })
+})
+
+function attachTilt(): void {
+  const root = rootEl.value
+  if (!root || tiltCleanups.length) return
   for (const card of root.querySelectorAll<HTMLElement>('.card, .module')) {
     const onMove = (e: PointerEvent): void => {
       const r = card.getBoundingClientRect()
@@ -205,13 +212,17 @@ onMounted(() => {
       card.removeEventListener('pointerleave', onLeave)
     })
   }
-})
+}
+
+function detachTilt(): void {
+  for (const fn of tiltCleanups) fn()
+  tiltCleanups = []
+}
 
 onBeforeUnmount(() => {
   io?.disconnect()
   io = null
-  for (const fn of tiltCleanups) fn()
-  tiltCleanups = []
+  detachTilt()
   window.clearTimeout(copyTimer)
 })
 </script>
@@ -1102,26 +1113,25 @@ a.repo:hover {
   opacity: 1;
   transform: none;
 }
-@media (prefers-reduced-motion: reduce) {
-  .blob,
-  .whale,
-  .typed,
-  .ok-badge,
-  .mod-icon,
-  .mod-icon::after,
-  .mod-status .sdot {
-    animation: none !important;
-  }
-  .typed {
-    max-width: 100%;
-  }
-  .ok-badge {
-    opacity: 1;
-  }
-  .reveal {
-    opacity: 1;
-    transform: none;
-    transition: none;
-  }
+/* Damped when 减少动效 is in effect (see stores/settings.applyReduceMotion). */
+html.reduce-motion .blob,
+html.reduce-motion .whale,
+html.reduce-motion .typed,
+html.reduce-motion .ok-badge,
+html.reduce-motion .mod-icon,
+html.reduce-motion .mod-icon::after,
+html.reduce-motion .mod-status .sdot {
+  animation: none !important;
+}
+html.reduce-motion .typed {
+  max-width: 100%;
+}
+html.reduce-motion .ok-badge {
+  opacity: 1;
+}
+html.reduce-motion .reveal {
+  opacity: 1;
+  transform: none;
+  transition: none;
 }
 </style>

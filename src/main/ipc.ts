@@ -13,7 +13,8 @@ import {
   type InstallProgress,
   type ReadLogsArgs,
   type UpdateCheckResult,
-  type UpdateProgress
+  type UpdateProgress,
+  type WebDataClearArgs
 } from '../shared/types'
 import { getNodeRuntimeInfo } from './node-runtime'
 import { listNodeVersions, updateNodeRuntime, restoreBundledNode } from './node-updater'
@@ -39,7 +40,8 @@ import {
   resolveInstallDir,
   resolveDownloadDir,
   defaultDownloadDir,
-  applyLaunchAtStartup
+  applyLaunchAtStartup,
+  applyNpmRegistryEnv
 } from './store'
 import { installFromGit, installFromLocalDir, removePage } from './installer'
 import { checkUpdates, performUpdate, clearUpdateCache, provisionBuiltin } from './update-service'
@@ -52,11 +54,13 @@ import {
 import { logsDir, listLogFiles, readLogTail, startLogStream } from './logger'
 import { exportDiagnostics } from './diagnostics'
 import { exportSnapshot, importSnapshot } from './snapshot'
-import { runNetworkProbe } from './net-probe'
+import { runNetworkProbe, probeRegistries } from './net-probe'
+import { getWebDataReport, clearWebData } from './webdata'
 import { getSystemInfo, getNetworkStats } from './sysinfo'
 import { collectPageMetrics, pruneMetricsBaseline } from './metrics'
 import { killPortHolder } from './port-holder'
-import { setTrayUpdatePending, setTrayResourceWarn } from './tray'
+import { setTrayUpdatePending, setTrayResourceWarn, rebuildTrayMenu } from './tray'
+import { forgetWindowBounds } from './window-bounds'
 import { PtyManager } from './pty'
 import {
   getDshStatus,
@@ -500,6 +504,32 @@ export function registerIpc(registry: PageRegistry): void {
     }
   })
 
+  // #26: latency of every candidate npm mirror, in parallel, for 设置 ▸ 网络镜像's 一键选优.
+  ipcMain.handle(IPC.ProbeRegistries, async (): Promise<IpcResult> => {
+    try {
+      return ok(await probeRegistries())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // #26: what the embedded webviews are holding on disk / in the shared cookie jar.
+  ipcMain.handle(IPC.GetWebData, async (): Promise<IpcResult> => {
+    try {
+      return ok(await getWebDataReport())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  ipcMain.handle(IPC.ClearWebData, async (_e, args: WebDataClearArgs): Promise<IpcResult> => {
+    try {
+      return ok(await clearWebData(args))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
   // #17 container OTA version history for the small table under the help-panel row.
   ipcMain.handle(IPC.GetUpdateHistory, (): IpcResult => {
     try {
@@ -592,6 +622,13 @@ export function registerIpc(registry: PageRegistry): void {
         glassBlur?: number
         glassAlpha?: number
         memWarnMb?: number
+        terminalHeight?: number
+        rememberWindowBounds?: boolean
+        reduceMotion?: 'auto' | 'on' | 'off'
+        npmRegistry?: string
+        trayPageEntries?: 'all' | 'running' | 'off'
+        trayBadge?: 'all' | 'alert' | 'off'
+        autoStartManual?: string[]
       }
     ): IpcResult => {
       try {
@@ -614,6 +651,15 @@ export function registerIpc(registry: PageRegistry): void {
         if (typeof partial.launchAtStartup === 'boolean') {
           applyLaunchAtStartup(partial.launchAtStartup)
         }
+        // #26: the registry is published as `npm_config_registry`, which every spawn helper already
+        // spreads — so switching mirrors takes effect for the next install without a restart, and
+        // no `.npmrc` outside the app gets rewritten.
+        if ('npmRegistry' in partial) applyNpmRegistryEnv()
+        // Turning the memory off must also forget what was remembered, otherwise re-enabling it
+        // later jumps straight back to geometry the user has since abandoned.
+        if (partial.rememberWindowBounds === false) forgetWindowBounds()
+        // The tray menu rows and the badge tier are rendered here, not in the window.
+        if (partial.trayPageEntries || partial.trayBadge) rebuildTrayMenu()
         // The tray menu / window caption are rendered by the main process, so a language
         // change is fanned out to them explicitly (see main/index.ts). container.json text
         // is resolved in the *active* language when a manifest is read, so the cached metas

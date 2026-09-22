@@ -71,7 +71,9 @@ const zh: Dict = {
     appOpenclaw: 'OpenClaw 管理器',
     helpAboutUpdates: '关于与更新',
     tagExternal: '外部',
-    openLogsDir: '打开日志目录'
+    openLogsDir: '打开日志目录',
+    /** #26: 外部地址按设置交给系统浏览器时的轻提示（窗口内看不到变化） */
+    openedExternally: '已在系统默认浏览器中打开（可在 设置 ▸ 提醒告警 改回容器内嵌）'
   },
   appmgr: {
     notFound: '该应用不存在或已被移除',
@@ -88,6 +90,8 @@ const zh: Dict = {
   settings: {
     tabView: '界面视图',
     tabBehavior: '行为规范',
+    /** 从行为规范里拆出来的一个 tab：托盘 + 通知 + 内存告警 + 外部地址去处，都是“会打扰到人”的提示项。 */
+    tabAlerts: '提醒告警',
     tabDownload: '外链下载',
     tabEnv: '环境目录',
     interfaceTitle: '界面与默认视图',
@@ -157,7 +161,82 @@ const zh: Dict = {
     envInputPlaceholderEmpty: '留空则不注入该变量',
     envInjectPrefix: '以环境变量 ',
     envInjectSuffix: ' 注入该页面子进程{def}。改动后重启该页面生效。',
-    envInjectDefault: '，默认 {path}'
+    envInjectDefault: '，默认 {path}',
+    /* ---- #26: 行为规范 / 提醒告警 新增项 ---- */
+    externalOpenModeTip:
+      '选「系统默认浏览器」后，在页面切换器 / 外部地址面板里打开地址会直接交给浏览器；弹窗、剪贴板、下载这类功能在浏览器里更完整。作为默认打开的外部地址仍会内嵌显示。',
+    memWarnMb: '内存告警阈值',
+    memWarnMbTip:
+      '某个运行中页面的常驻内存超过该值时，页面列表标黄并在托盘点亮金色角标；只影响提示，不会停止页面。',
+    terminalHeight: '终端面板高度',
+    terminalHeightTip: '底部内嵌终端面板的默认高度；拖动面板上边缘后会自动更新这里的值。',
+    rememberWindow: '记住窗口大小',
+    rememberWindowTip:
+      '保存并恢复主窗口的大小、位置与最大化状态；关闭会同时清除已记住的几何信息，下次启动回到默认尺寸。恢复前会校验窗口还落在某块已连接的屏幕上，拔掉副屏也不会把窗口丢到可视区外。',
+    reduceMotion: '减少动效',
+    alwaysOn: '总是开启',
+    alwaysOff: '总是关闭',
+    reduceMotionTip:
+      '开启后去掉装饰性动画（卡片跟随鼠标倾斜、滚动淡入、背景流动、部分转圈）。「跟随系统」读系统的减少动效设置；选「总是关闭」则忽略系统设置照常播放。',
+    trayPageEntries: '托盘菜单页面',
+    trayAll: '全部',
+    trayRunning: '仅运行中',
+    trayOff: '不显示',
+    trayPageEntriesTip:
+      '托盘右键菜单里列出的启动/停止条目：全部 = 运行中 + 未运行（未运行最多 8 项），仅运行中 = 只保留可停止的项，不显示 = 只留打开窗口与退出。',
+    trayBadge: '托盘角标',
+    trayAlertOnly: '仅崩溃告警',
+    trayBadgeTip:
+      '图标右下角小圆点的含义：全部 = 崩溃（红）/ 内存超预算（金）/ 待更新（橙），仅崩溃告警 = 只在页面异常退出时点亮，不显示 = 永远不亮（系统通知仍跟随上面的开关）。',
+    /* ---- #26: 网络镜像 ---- */
+    tabNetwork: '网络镜像',
+    registryPick: '当前镜像源',
+    registryCurrent: '使用中',
+    registryUse: '使用',
+    registryNotProbed: '未测速',
+    registryUnreachable: '不可达',
+    registryTip:
+      '容器带动的安装（内置 Node / pnpm / dsh 插件 / 导入项目的依赖安装）都从这里拉包。它以环境变量 npm_config_registry 注入，改完下一次安装即生效：不重启，也不会去改你自己的 ~/.npmrc。',
+    registryProbe: '镜像测速',
+    registryProbeBtn: '测速全部',
+    registryProbeTip:
+      '并行请求各镜像的 /-/ping 并比较往返延迟（只取第一个响应头，不下载包数据）；测完可以直接切到最快且可达的那个。',
+    registryUseBest: '切到最快：{name}（{ms} ms）',
+    registryProbed: '测速完成，最快 {ms} ms',
+    registryProbeNone: '所有镜像都未响应，请检查网络或代理',
+    registrySwitched: '镜像源已切换，下一次安装生效',
+    registryCustom: '自定义镜像源',
+    registryCustomTip:
+      '公司内网私服等填完整 URL（http/https 开头，结尾斜杠可省）；清空则回到内置默认镜像。',
+    registryBadUrl: '镜像源需是以 http:// 或 https:// 开头的完整地址',
+    /* ---- #26: 隐私数据 ---- */
+    tabPrivacy: '隐私数据',
+    webDataTitle: '当前占用',
+    webDataTotal: '合计 {size}',
+    webDataTip:
+      '所有内嵌页面与外部地址共用同一份浏览数据，所以清除会影响全部站点（不只是当前页）。下面是本应用用户数据目录里的实际占用。',
+    webDataClear: '清除',
+    webDataClearAll: '全部清除',
+    webDataCleared: '已清除',
+    webDataCache: 'HTTP 缓存',
+    webDataCacheTip: '页面静态资源的本地副本；清除后下次打开会重新下载，不会退出登录。',
+    webDataStorage: '站点数据',
+    webDataStorageTip:
+      'localStorage / IndexedDB / Service Worker 等。页面把草稿与本地状态存在这里，清除后可能需要重新初始化该页面。',
+    webDataStorageConfirm: '确定清除所有站点的本地数据？未同步的草稿与页面本地状态会一并丢失。',
+    webDataCookies: 'Cookie',
+    webDataCookieCount: '{n} 条',
+    webDataCookiesTip: '内嵌页面的登录态存在这里；全部清除会让所有内嵌站点退出登录。',
+    webDataCookieConfirm: '确定清除全部 Cookie？所有内嵌站点都会退出登录。',
+    webDataCookiesGone: '已清除 {n} 条 Cookie',
+    webDataPerSite: '按站点',
+    webDataPerSiteTip: '只清某一家的 Cookie，即只让该站点退出登录，常用于修好一个登不进去的页面。',
+    webDataNoCookies: '当前没有已保存的 Cookie。',
+    webDataAll: '一键清理',
+    webDataAllBtn: '清除全部浏览数据',
+    webDataAllTip: '缓存 + 站点数据 + 全部 Cookie；内嵌站点会全部退出登录。',
+    webDataAllConfirm:
+      '确定清除内嵌浏览的全部数据？所有内嵌站点会退出登录，页面本地草稿也会丢失。'
   },
   panel: {
     /** 帮助面板竖排分类 tab 标题。 */
@@ -454,9 +533,12 @@ const zh: Dict = {
     colSource: '来源',
     sourceBundle: '内置组合包',
     sourceInstalled: '已安装',
+    sourceGhost: '残留层',
+    versionMissing: '未安装',
     colActions: '操作',
     updatableTag: '可更新 {latest}',
     bundleOnly: '随 dsh 发行，不可单独卸载',
+    ghostOnly: '安装未成功，无依赖可卸载',
     update: '更新',
     uninstall: '卸载',
     dshTerminal: '在 dsh 打开终端',
@@ -561,6 +643,8 @@ const zh: Dict = {
     importDir: '导入项目 (目录)',
     dsh: 'DSH 本体',
     openclaw: 'OpenClaw',
+    dshPlugin: 'DSH 插件',
+    pluginUpdating: '正在安装/更新 {name}',
     installing: '安装中…',
     downloading: '下载中…',
     downloadTo: '保存到',
@@ -745,7 +829,9 @@ const en: Dict = {
     appOpenclaw: 'OpenClaw manager',
     helpAboutUpdates: 'About & updates',
     tagExternal: 'external',
-    openLogsDir: 'Open log folder'
+    openLogsDir: 'Open log folder',
+    /** #26: soft toast for when an external address is handed to the OS browser */
+    openedExternally: 'Opened in your default browser (Settings ▸ Alerts can put it back inline)'
   },
   appmgr: {
     notFound: 'This app no longer exists or was removed',
@@ -762,6 +848,7 @@ const en: Dict = {
   settings: {
     tabView: 'Interface & View',
     tabBehavior: 'Behavior',
+    tabAlerts: 'Alerts',
     tabDownload: 'External Downloads',
     tabEnv: 'Environment',
     interfaceTitle: 'Interface & default view',
@@ -832,7 +919,87 @@ const en: Dict = {
     envInputPlaceholderEmpty: 'Empty = do not inject this var',
     envInjectPrefix: 'Injected into this page’s subprocess as env var ',
     envInjectSuffix: '{def}. Restart the page to apply.',
-    envInjectDefault: ', default {path}'
+    envInjectDefault: ', default {path}',
+    /* ---- #26: new 行为 rows ---- */
+    externalOpenModeTip:
+      'With “System default browser” picked, opening an address from the page switcher or the external-address panel hands it to the browser, where pop-ups, the clipboard and downloads work fully. An external address set as the default view still opens embedded.',
+    memWarnMb: 'Memory warning limit',
+    memWarnMbTip:
+      'A running page above this resident-memory budget turns its row yellow and lights the gold tray dot. It only flags the page — nothing gets stopped.',
+    terminalHeight: 'Terminal panel height',
+    terminalHeightTip:
+      'Default height of the bottom-docked terminal; dragging its top edge updates this value.',
+    rememberWindow: 'Remember window size',
+    rememberWindowTip:
+      'Keeps the main window’s size, position and maximized state across launches. Turning this off also forgets what was stored, so the next start returns to the default size. A restored window is checked against every connected display first, so unplugging a monitor never leaves it off-screen.',
+    reduceMotion: 'Reduce motion',
+    alwaysOn: 'Always on',
+    alwaysOff: 'Always off',
+    reduceMotionTip:
+      'Damping removes decorative animation (pointer tilt on cards, scroll reveal, moving backgrounds, some spinners). “Follow system” reads the OS preference; “Always off” plays them back even when the OS asks for less.',
+    trayPageEntries: 'Tray menu pages',
+    trayAll: 'All',
+    trayRunning: 'Running only',
+    trayOff: 'Hidden',
+    trayPageEntriesTip:
+      'Start/stop rows in the tray context menu: All = running plus stopped pages (up to 8 stopped), Running only = just what you can stop, Hidden = only Open Window and Quit.',
+    trayBadge: 'Tray badge',
+    trayAlertOnly: 'Crash alerts only',
+    trayBadgeTip:
+      'What the small dot may mean: All = crash (red) / over memory budget (gold) / update pending (orange), Crash alerts only = the red dot only, Off = never. System notifications keep following the switch above.',
+    /* ---- #26: 网络镜像 ---- */
+    tabNetwork: 'Mirrors',
+    registryPick: 'Current registry',
+    registryCurrent: 'In use',
+    registryUse: 'Use',
+    registryNotProbed: 'Not measured',
+    registryUnreachable: 'Unreachable',
+    registryTip:
+      'Every install the container drives (bundled Node / pnpm / dsh plugins / an imported project’s dependencies) pulls from here. It is injected as the npm_config_registry environment variable, so the next install already uses it — no restart, and your own ~/.npmrc is left alone.',
+    registryProbe: 'Mirror latency',
+    registryProbeBtn: 'Measure all',
+    registryProbeTip:
+      'Requests each mirror’s /-/ping in parallel and compares round-trip latency (first response head only, no package data downloaded). Once measured you can jump straight to the fastest reachable one.',
+    registryUseBest: 'Use fastest: {name} ({ms} ms)',
+    registryProbed: 'Measured, fastest {ms} ms',
+    registryProbeNone: 'No mirror answered — check the network or proxy',
+    registrySwitched: 'Registry switched, effective for the next install',
+    registryCustom: 'Custom registry',
+    registryCustomTip:
+      'For a corporate private registry, give the full URL (http/https, trailing slash optional); clearing it goes back to the built-in mirror.',
+    registryBadUrl: 'A registry must be a full URL starting with http:// or https://',
+    /* ---- #26: 隐私数据 ---- */
+    tabPrivacy: 'Privacy',
+    webDataTitle: 'Current usage',
+    webDataTotal: 'Total {size}',
+    webDataTip:
+      'All embedded pages and external addresses share one browsing profile, so clearing affects every site — not just the one you are looking at. These are the real sizes inside this app’s user-data folder.',
+    webDataClear: 'Clear',
+    webDataClearAll: 'Clear all',
+    webDataCleared: 'Cleared',
+    webDataCache: 'HTTP cache',
+    webDataCacheTip:
+      'Local copies of page assets. Clearing re-downloads them on the next visit and does not sign you out.',
+    webDataStorage: 'Site data',
+    webDataStorageTip:
+      'localStorage / IndexedDB / service workers, where pages keep drafts and local state. A page may need re-initialising afterwards.',
+    webDataStorageConfirm:
+      'Clear every site’s local data? Unsynced drafts and page-local state go with it.',
+    webDataCookies: 'Cookies',
+    webDataCookieCount: '{n} cookies',
+    webDataCookiesTip:
+      'Embedded pages keep their sign-in here; clearing everything signs you out of every embedded site.',
+    webDataCookieConfirm: 'Clear all cookies? Every embedded site will sign you out.',
+    webDataCookiesGone: 'Removed {n} cookies',
+    webDataPerSite: 'Per site',
+    webDataPerSiteTip:
+      'Clearing one site’s cookies signs only that site out — the usual fix for a page that will not log in.',
+    webDataNoCookies: 'No cookies stored yet.',
+    webDataAll: 'Reset everything',
+    webDataAllBtn: 'Clear all browsing data',
+    webDataAllTip: 'Cache + site data + every cookie; signs you out of all embedded sites.',
+    webDataAllConfirm:
+      'Clear all embedded browsing data? Every embedded site signs you out and local page drafts are lost.'
   },
   panel: {
     /** Help-panel vertical tab titles. */
@@ -1135,9 +1302,12 @@ const en: Dict = {
     colSource: 'Source',
     sourceBundle: 'Built-in bundle',
     sourceInstalled: 'Installed',
+    sourceGhost: 'Leftover',
+    versionMissing: 'not installed',
     colActions: 'Actions',
     updatableTag: 'Update {latest}',
     bundleOnly: 'Ships with dsh; cannot be uninstalled separately',
+    ghostOnly: 'Its install failed; there is no dependency to uninstall',
     update: 'Update',
     uninstall: 'Uninstall',
     dshTerminal: 'Open terminal in dsh',
@@ -1244,6 +1414,8 @@ const en: Dict = {
     importDir: 'Importing project (folder)',
     dsh: 'DSH core',
     openclaw: 'OpenClaw',
+    dshPlugin: 'DSH plugin',
+    pluginUpdating: 'Installing/updating {name}',
     installing: 'Installing…',
     downloading: 'Downloading…',
     downloadTo: 'Saving to',

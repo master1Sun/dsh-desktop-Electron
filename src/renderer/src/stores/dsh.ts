@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { IpcResult } from '@shared/types'
+import type { DshUpdateChannel, IpcResult } from '@shared/types'
 
 /**
  * Transient state for the long-running dsh CLI operations (plugin install / uninstall).
@@ -38,5 +38,18 @@ export const useDshStore = defineStore('dsh', () => {
   const updateAllPlugins = (profile: string): Promise<IpcResult> =>
     run('update:all', () => window.container.dshUpdateAll(profile))
 
-  return { busy, startedAt, installPlugin, uninstallPlugin, updateAllPlugins }
+  /**
+   * Update a single plugin through the channel the check picked (npm/git, gitUrl = repo#tag).
+   * Keyed by the bare plugin name — the same key `installPlugin` uses for a `name@version`
+   * spec — so a git→npm flip (which re-installs that spec in main) still marks this row busy.
+   */
+  const updatePlugin = (
+    name: string,
+    channel: DshUpdateChannel,
+    profile: string,
+    gitUrl?: string
+  ): Promise<IpcResult> =>
+    run(name, () => window.container.dshUpdatePlugin(name, channel, gitUrl, profile))
+
+  return { busy, startedAt, installPlugin, uninstallPlugin, updatePlugin, updateAllPlugins }
 })

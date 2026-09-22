@@ -37,7 +37,7 @@ export interface Settings {
   pagePorts: Record<string, number>
   /** #25: custom accent hex; '' = keep the theme's CSS default */
   accentColor?: string
-  /** #25: glass blur strength in px; undefined = stylesheet default (30) */
+  /** #25: glass blur strength in px; undefined = stylesheet default, applied value clamped to GLASS_BLUR_MAX_PX */
   glassBlur?: number
   /** #25: frosted-surface opacity (%); overrides --glass-tint-a live; undefined = coupled to blur */
   glassAlpha?: number
@@ -45,12 +45,42 @@ export interface Settings {
   memWarnMb?: number
   /** 内嵌终端面板被拖出的高度（px），下次启动恢复 */
   terminalHeight?: number
+  /** #26: 记住并恢复窗口尺寸/位置/最大化状态 */
+  rememberWindowBounds?: boolean
+  /** #26: 'auto' 跟随系统减少动效偏好，'on'/'off' 仅对本应用强制 */
+  reduceMotion?: 'auto' | 'on' | 'off'
+  /** #26: 容器与其托管页面安装依赖走的 npm registry；空 = 内置镜像 */
+  npmRegistry?: string
+  /** #26: 托盘菜单列出页面的程度 */
+  trayPageEntries?: 'all' | 'running' | 'off'
+  /** #26: 允许点亮托盘角标的级别 */
+  trayBadge?: 'all' | 'alert' | 'off'
 }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
   const res = await p
   if (!res.ok) throw new Error(res.error || t('common.unknownError'))
   return res.data as T
+}
+
+/* ---- #26: reduced motion -------------------------------------------------------------
+   The tri-state setting and the OS hint collapse into ONE boolean, painted as `.reduce-motion` on
+   <html>. That is deliberate: every damping rule used to sit inside
+   `@media (prefers-reduced-motion: reduce)`, which a user can't turn back off from inside the app.
+   `reduceMotion` is exported so JS-driven animations (the market's card tilt) can skip themselves
+   the same way the CSS does. */
+export const reduceMotion = ref(false)
+
+/** What the OS itself asks for — the 'auto' leg of the setting. */
+export function osPrefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+}
+
+/** Resolve setting + OS into the class + the exported flag. Undefined mode = 'auto'. */
+export function applyReduceMotion(mode?: 'auto' | 'on' | 'off'): void {
+  const on = mode !== 'off' && (mode === 'on' || osPrefersReducedMotion())
+  reduceMotion.value = on
+  document.documentElement.classList.toggle('reduce-motion', on)
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -76,7 +106,12 @@ export const useSettingsStore = defineStore('settings', () => {
     glassBlur: 30,
     glassAlpha: 60,
     memWarnMb: 800,
-    terminalHeight: 320
+    terminalHeight: 320,
+    rememberWindowBounds: true,
+    reduceMotion: 'auto',
+    npmRegistry: '',
+    trayPageEntries: 'all',
+    trayBadge: 'all'
   })
   const loaded = ref(false)
 

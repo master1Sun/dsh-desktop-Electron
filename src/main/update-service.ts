@@ -7,16 +7,28 @@ import { applyAsarUpdate, checkAsarUpdate, type ProgressCb } from './asar-update
 import { getNodeExePath } from './node-runtime'
 import { getDshStatus, repairPnpmCmd } from './dsh'
 import { openclawVersion } from './openclaw'
-import { resolveInstallDir } from './store'
+import { resolveInstallDir, getSettings } from './store'
 import { m } from './i18n'
 import {
+  NPM_REGISTRY_DEFAULT,
   type BuiltinKind,
   type PageMeta,
   type UpdateCheckResult,
   type UpdateOutcome
 } from '../shared/types'
 
-const REGISTRY = process.env.npm_config_registry || 'https://registry.npmmirror.com/'
+/**
+ * #26: the npm registry published metadata is read from / written into a generated `.npmrc`.
+ * Resolved per call so switching 镜像源 in Settings takes effect immediately; the picked value wins,
+ * a launch-time `npm_config_registry` (how this worked before the setting existed) is the fallback.
+ * The trailing slash is restored because both `new URL(spec, base)` and npm's `registry=` key need it.
+ */
+function registryUrl(): string {
+  const picked = (getSettings().npmRegistry || '').trim()
+  const base = picked || process.env.npm_config_registry || NPM_REGISTRY_DEFAULT
+  return `${base.replace(/\/+$/, '')}/`
+}
+
 const DSH_PKG = '@deepseek-ai/dsh'
 const OPENCLAW_PKG = 'openclaw'
 /** Translated at use time — this row's name is rendered in the Updates panel. */
@@ -29,7 +41,7 @@ let cache: { at: number; results: UpdateCheckResult[] } | null = null
 export async function fetchNpmLatest(name: string): Promise<string | null> {
   const url = new URL(
     encodeURIComponent(name).replace(/^%40/, '@') + '/latest',
-    REGISTRY
+    registryUrl()
   ).toString()
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(15_000) })
@@ -243,7 +255,7 @@ async function updateDshSelf(): Promise<UpdateOutcome> {
   const before = (await getDshStatus()).version
   try {
     mkdirSync(root, { recursive: true })
-    writeFileSync(join(root, '.npmrc'), `registry=${REGISTRY}\n`)
+    writeFileSync(join(root, '.npmrc'), `registry=${registryUrl()}\n`)
     const node = getNodeExePath()
     const npmCli = bundledNpmCli()
     if (!existsSync(npmCli)) throw new Error(m('upd.npmMissing', { npm: npmCli }))
@@ -304,7 +316,7 @@ async function reprovisionOpenclaw(): Promise<UpdateOutcome> {
   const before = openclawVersion()
   try {
     mkdirSync(root, { recursive: true })
-    writeFileSync(join(root, '.npmrc'), `registry=${REGISTRY}\n`)
+    writeFileSync(join(root, '.npmrc'), `registry=${registryUrl()}\n`)
     const node = getNodeExePath()
     const npmCli = bundledNpmCli()
     if (!existsSync(npmCli)) throw new Error(m('upd.npmMissing', { npm: npmCli }))

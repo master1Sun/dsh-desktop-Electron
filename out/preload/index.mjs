@@ -55,6 +55,8 @@ const IPC = {
   DshUninstallPlugin: "dsh:uninstall-plugin",
   DshUpdatePlugin: "dsh:update-plugin",
   DshUpdateAll: "dsh:update-all",
+  /** broadcast: in-flight dsh plugin ops (DshPluginOpEvent) → window top progress bar */
+  OnDshPluginOp: "dsh:plugin-op",
   DshCreatePage: "dsh:create-page",
   DshToken: "dsh:token",
   OpenclawStatus: "openclaw:status",
@@ -109,7 +111,13 @@ const IPC = {
   /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
   OnPageMetrics: "container:page-metrics",
   /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
-  OnLogLine: "container:log-line"
+  OnLogLine: "container:log-line",
+  /** #26: probe every candidate npm registry in parallel → RegistryProbe[] */
+  ProbeRegistries: "container:probe-registries",
+  /** #26: what the embedded webviews hold (cookies per domain, cache + storage bytes) → WebDataReport */
+  GetWebData: "container:get-web-data",
+  /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
+  ClearWebData: "container:clear-web-data"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
@@ -147,6 +155,11 @@ const api = {
   exportSnapshot: () => ipcRenderer.invoke(IPC.ExportSnapshot),
   importSnapshot: () => ipcRenderer.invoke(IPC.ImportSnapshot),
   runNetworkProbe: () => ipcRenderer.invoke(IPC.RunNetworkProbe),
+  // #26: latency/reachability of every candidate npm registry, for the 网络镜像 panel.
+  probeRegistries: () => ipcRenderer.invoke(IPC.ProbeRegistries),
+  // #26: embedded-webview data (cookies per domain + cache/storage bytes) and its wipe buttons.
+  getWebData: () => ipcRenderer.invoke(IPC.GetWebData),
+  clearWebData: (args) => ipcRenderer.invoke(IPC.ClearWebData, args),
   getSystemInfo: () => ipcRenderer.invoke(IPC.GetSystemInfo),
   getNetworkStats: () => ipcRenderer.invoke(IPC.GetNetworkStats),
   getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
@@ -194,6 +207,11 @@ const api = {
   dshUpdateAll: (profile) => ipcRenderer.invoke(IPC.DshUpdateAll, profile),
   dshCreatePage: (profile, port) => ipcRenderer.invoke(IPC.DshCreatePage, profile, port),
   dshToken: (profile) => ipcRenderer.invoke(IPC.DshToken, profile),
+  onDshPluginOp: (cb) => {
+    const listener = (_e, p) => cb(p);
+    ipcRenderer.on(IPC.OnDshPluginOp, listener);
+    return () => ipcRenderer.removeListener(IPC.OnDshPluginOp, listener);
+  },
   openclawStatus: () => ipcRenderer.invoke(IPC.OpenclawStatus),
   openclawToken: () => ipcRenderer.invoke(IPC.OpenclawToken),
   openclawInitToken: (rotate) => ipcRenderer.invoke(IPC.OpenclawInitToken, rotate),

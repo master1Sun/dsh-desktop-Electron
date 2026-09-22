@@ -2,7 +2,7 @@ import { createServer, createConnection } from 'node:net'
 import { get as httpGet } from 'node:http'
 import { get as httpsGet } from 'node:https'
 import { m } from './i18n'
-import type { NetProbeResult, NetProbeStep } from '../shared/types'
+import { REGISTRY_CANDIDATES, type NetProbeResult, type NetProbeStep, type RegistryProbe } from '../shared/types'
 
 /**
  * #21: one-shot network diagnostic wizard. npm/git/page-installs all hinge on the network, and
@@ -120,4 +120,21 @@ export async function runNetworkProbe(npmRegistry?: string): Promise<NetProbeRes
   // dead mirror doesn't condemn the whole network (the official registry may still be fine).
   const healthy = gateway.ok && github.ok && (npm.ok || mirror.ok)
   return { steps, proxy, healthy }
+}
+
+/**
+ * #26: probe every candidate npm mirror at once, for the 网络镜像 panel's 一键选优.
+ *
+ * `/-/ping` is the one endpoint both npmjs.org and every mirror clone implement, and it answers
+ * in a few hundred bytes — no package metadata downloaded. Candidates run in parallel (the whole
+ * point is comparing latency, so a serial walk would bias every result after the first).
+ */
+export async function probeRegistries(timeoutMs = 6000): Promise<RegistryProbe[]> {
+  const results = await Promise.all(
+    REGISTRY_CANDIDATES.map(async (c): Promise<RegistryProbe> => {
+      const p = await probeUrl(`${c.url.replace(/\/+$/, '')}/-/ping`, timeoutMs)
+      return { id: c.id, url: c.url, ok: p.ok, ms: p.ms, status: p.status, error: p.error }
+    })
+  )
+  return results
 }

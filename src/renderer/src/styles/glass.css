@@ -233,23 +233,23 @@ html.light .aurora .blob {
   }
 }
 
-/* ---- accessibility: respect reduced-motion ----------------------------------- */
-@media (prefers-reduced-motion: reduce) {
-  .reveal,
-  .aurora .blob,
-  .neon-edge::before {
-    animation: none !important;
-  }
-  .reveal {
-    opacity: 1;
-    transform: none;
-  }
-  .neon-edge:hover::before {
-    opacity: 0.55;
-  }
-  .el-button--primary {
-    transition: background-color 0.16s ease;
-  }
+/* ---- accessibility: reduced motion (#26) ----------------------------------------------
+   Driven by the `.reduce-motion` class the renderer sets from the 减少动效 setting plus the OS
+   hint, instead of a bare media query — the class form is what lets the setting say 'off'. */
+html.reduce-motion .reveal,
+html.reduce-motion .aurora .blob,
+html.reduce-motion .neon-edge::before {
+  animation: none !important;
+}
+html.reduce-motion .reveal {
+  opacity: 1;
+  transform: none;
+}
+html.reduce-motion .neon-edge:hover::before {
+  opacity: 0.55;
+}
+html.reduce-motion .el-button--primary {
+  transition: background-color 0.16s ease;
 }
 
 /* ---- frosted inputs (Element Plus) -----------------------------------------
@@ -267,11 +267,13 @@ html.dark .el-textarea__inner {
 }
 
 /* ---- compact corner toasts (ElMessage) --------------------------------------
-   Placement (bottom-right) + grouping are set globally on the ConfigProvider in
-   App.vue; EP anchors and stacks them upward there on its own. This only trims the
+   Placement (bottom-right) + grouping + showClose are set globally on the ConfigProvider
+   in App.vue; EP anchors and stacks them upward there on its own. This only trims the
    surface into a *small* toast: snug padding, 12px text, a capped width so long text
-   wraps in the corner instead of spanning the window, and a lighter shadow. Toasts
-   mount on <body>, so these rules must stay global (unscoped). */
+   wraps in the corner instead of spanning the window, and a lighter shadow. A long
+   message additionally clips into a short scrollable box (see .el-message__content) so it
+   never grows tall — the wheel reveals the rest. Toasts mount on <body>, so these rules
+   must stay global (unscoped). */
 .el-message {
   min-width: 0;
   max-width: min(340px, calc(100vw - 32px));
@@ -280,17 +282,36 @@ html.dark .el-textarea__inner {
   border-radius: 9px;
   font-size: 12px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  /* Keep the icon and the (now always-on) close button pinned to the top edge so they
+     stay aligned with the first line while a long message scrolls beneath them. */
+  align-items: flex-start;
 }
 .el-message__content,
 .el-message p {
   font-size: 12px;
   line-height: 1.5;
+  /* Truncate long toasts into a ~4-line scroll box instead of a tall corner block; the
+     wheel / scrollbar reveals the hidden remainder. */
+  max-height: 72px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}
+.el-message__content::-webkit-scrollbar {
+  width: 6px;
+}
+.el-message__content::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-dim) 40%, transparent);
+  border-radius: 3px;
 }
 .el-message .el-message__icon {
   font-size: 14px;
+  line-height: 1.5;
 }
 .el-message .el-message__closeBtn {
   font-size: 12px;
+  line-height: 1.5;
 }
 
 /* ---- vertical tab rail (`.v-tabs`) -----------------------------------------

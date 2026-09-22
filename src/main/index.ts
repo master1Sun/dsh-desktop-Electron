@@ -7,7 +7,7 @@ import { PageRegistry } from './pages'
 import { registerIpc } from './ipc'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './openclaw'
 import { pnpmBinDirs } from './dsh'
-import { getSettings, resolvePagesDir, resolveProjectDir, applyLaunchAtStartup } from './store'
+import { getSettings, resolvePagesDir, resolveProjectDir, applyLaunchAtStartup, applyNpmRegistryEnv } from './store'
 import { getNodeRuntimeInfo } from './node-runtime'
 import { m, onLocaleChanged, registerLocaleSource } from './i18n'
 import { installFileLogger } from './logger'
@@ -15,6 +15,12 @@ import { registerDownloadHandling } from './downloads'
 import { ensureAsciiUserData } from './user-data'
 import { appIconPath } from './icon'
 import { createTray, rebuildTrayMenu } from './tray'
+import {
+  flushWindowBounds,
+  resolveBounds,
+  unwatchWindowBounds,
+  watchWindowBounds
+} from './window-bounds'
 
 // Why userData must be ASCII before any path-dependent init (logger, electron-store,
 // node override): see user-data.ts. The call itself has to stay here, first thing.
@@ -108,9 +114,15 @@ function ensureUnpackedForUpdate(): void {
 }
 
 function createWindow(): void {
+  // #26: restore the last arrangement when allowed; null means "use the shipped defaults".
+  // Passing them to the constructor (instead of setBounds afterwards) avoids a visible resize
+  // flash on every launch.
+  const restored = resolveBounds(940, 600)
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: restored?.width ?? 1280,
+    height: restored?.height ?? 860,
+    x: restored?.x,
+    y: restored?.y,
     minWidth: 940,
     minHeight: 600,
     show: false,
@@ -142,8 +154,14 @@ function createWindow(): void {
   // Drop the reference so showWindow()/activate correctly build a fresh one instead of
   // calling show() on a destroyed object.
   mainWindow.on('closed', () => {
+    unwatchWindowBounds()
     mainWindow = null
   })
+
+  // #26: start persisting geometry AFTER the constructor applied the restored rect, so the
+  // restore itself is never mistaken for a user move; come back maximized when that was the state.
+  watchWindowBounds(mainWindow)
+  if (restored?.maximized) mainWindow.maximize()
 
   // push OS-maximize state (incl. snap/drag) so the custom title bar updates its icon
   const pushMaximized = (): void => {
@@ -281,6 +299,9 @@ if (!gotLock) {
     startHidden =
       process.argv.includes('--autostart') || app.getLoginItemSettings().wasOpenedAtLogin
     applyLaunchAtStartup(getSettings().launchAtStartup)
+    // #26: one env var decides which npm registry every child install uses — set it before any
+    // page can start so the very first install already goes through the picked mirror.
+    applyNpmRegistryEnv()
     app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
     // Embedded <webview> guests: keep window.open / target=_blank inside the SAME view
@@ -357,6 +378,8 @@ if (!gotLock) {
   const QUIT_FLUSH_MS = 3000
   app.on('before-quit', (e) => {
     isQuitting = true
+    // #26: a quit can arrive before the move/resize debounce fires — write the final geometry now.
+    flushWindowBounds()
     if (registry && !shutdownDone) {
       shutdownDone = true // one-shot: never reset, re-entrant quits fall through to Electron
       e.preventDefault()

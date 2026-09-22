@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import type { PageRegistry } from './pages'
 import { m } from './i18n'
 import { appIconPath } from './icon'
+import { getSettings } from './store'
 
 /**
  * System tray: icon plus the show / per-page start-stop / quit context menu built from
@@ -17,6 +18,10 @@ import { appIconPath } from './icon'
  * red dot = a hosted page sits in 'error' (crash guard died or gave up), orange = an
  * OTA update is available/staged. Computed in rebuildTrayMenu (alert, from the registry)
  * and pushed from ipc.ts (update), merged here with alert winning.
+ *
+ * #26: how much of this is shown is now configurable — `trayPageEntries` trims the per-page
+ * start/stop rows, `trayBadge` decides which tiers may light the dot at all. Both are read
+ * fresh on every rebuild so a settings change applies without recreating the tray.
  */
 
 let tray: Tray | null = null
@@ -82,36 +87,58 @@ let hooks: {
 // start/stop hot items hard to reach; full management lives in the app window.
 const TRAY_STOPPED_LIMIT = 8
 
+/** How far the tray menu lists pages; 'off' leaves only 显示窗口 / 退出. */
+function pageEntryMode(): 'all' | 'running' | 'off' {
+  return getSettings().trayPageEntries ?? 'all'
+}
+
+/**
+ * Which tier may light the dot. 'alert' keeps only the red crash signal (the two soft tiers,
+ * pending update and over-budget, are noise for some users), 'off' never paints one.
+ */
+function badgeLevel(alert: boolean): 0 | 1 | 2 | 3 {
+  const mode = getSettings().trayBadge ?? 'all'
+  if (mode === 'off') return 0
+  if (alert) return 3
+  if (mode === 'alert') return 0
+  return resourceWarn ? 2 : updatePending ? 1 : 0
+}
+
 export function rebuildTrayMenu(): void {
   const registry = hooks.getRegistry()
   if (!tray || !registry) return
+  const mode = pageEntryMode()
   const running = registry.running()
   const stopped = registry.list().filter((p) => p.status !== 'running' && !p.external)
-  const template: Electron.MenuItemConstructorOptions[] = [
-    { label: m('tray.show'), click: () => hooks.onShowWindow() },
-    { type: 'separator' },
-    ...running.map((p): Electron.MenuItemConstructorOptions => ({
+  const runningRows: Electron.MenuItemConstructorOptions[] =
+    mode === 'off' ? [] : running.map((p) => ({
       label: m('tray.stop', { name: p.name }),
       click: () => registry.stop(p.id)
-    })),
-    ...stopped.slice(0, TRAY_STOPPED_LIMIT).map((p): Electron.MenuItemConstructorOptions => ({
-      label: m('tray.start', { name: p.name }),
-      click: () => {
-        registry.start(p.id).catch((err) => console.warn('[tray] start failed:', err.message))
-      }
-    })),
-    { type: 'separator' },
-    {
-      label: m('tray.quit'),
-      click: () => hooks.onQuitRequest()
-    }
+    }))
+  const stoppedRows: Electron.MenuItemConstructorOptions[] =
+    mode !== 'all'
+      ? []
+      : stopped.slice(0, TRAY_STOPPED_LIMIT).map((p) => ({
+          label: m('tray.start', { name: p.name }),
+          click: () => {
+            registry.start(p.id).catch((err) => console.warn('[tray] start failed:', err.message))
+          }
+        }))
+  const pageRows = [...runningRows, ...stoppedRows]
+  const template: Electron.MenuItemConstructorOptions[] = [
+    { label: m('tray.show'), click: () => hooks.onShowWindow() }
   ]
+  // Only separate the two groups when the page rows exist at all — two bare separators in a row
+  // is what an 'off' setting used to render.
+  if (pageRows.length) template.push({ type: 'separator' }, ...pageRows)
+  template.push({ type: 'separator' }, { label: m('tray.quit'), click: () => hooks.onQuitRequest() })
   const alert = stopped.some((p) => p.status === 'error')
-  const level: 0 | 1 | 2 | 3 = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0
+  const level = badgeLevel(alert)
+  // The caption follows the badge: suppressing the gold dot also stops claiming "over budget".
   tray.setToolTip(
-    alert
+    level === 3
       ? m('tray.tooltipAlert')
-      : resourceWarn
+      : level === 2
         ? m('tray.tooltipResource')
         : m('tray.tooltip', { n: running.length })
   )
@@ -139,8 +166,7 @@ function refreshBadge(): void {
   if (!tray) return
   const registry = hooks.getRegistry()
   const alert = registry ? registry.list().some((p) => p.status === 'error' && !p.external) : false
-  const level: 0 | 1 | 2 | 3 = alert ? 3 : resourceWarn ? 2 : updatePending ? 1 : 0
-  const img = composeImage(level)
+  const img = composeImage(badgeLevel(alert))
   if (img) tray.setImage(img)
 }
 

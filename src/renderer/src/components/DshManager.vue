@@ -35,10 +35,17 @@ const loading = ref(false)
 const pluginUpdates = ref<DshPluginUpdate[]>([])
 const updatesLoading = ref(false)
 const updatable = computed(() => pluginUpdates.value.filter((u) => u.updateAvailable))
+/** name -> the winning update hint (latest version + channel/gitUrl to update through) */
+const updateByName = computed(() => {
+  const m: Record<string, DshPluginUpdate> = {}
+  for (const u of pluginUpdates.value) if (u.updateAvailable) m[u.name] = u
+  return m
+})
 /** map name -> latest version, for the per-row "可更新" tag */
 const latestByName = computed(() => {
   const m: Record<string, string> = {}
-  for (const u of pluginUpdates.value) if (u.updateAvailable && u.latest) m[u.name] = u.latest
+  for (const [name, u] of Object.entries(updateByName.value))
+    if (u.latest) m[name] = u.latest
   return m
 })
 
@@ -99,6 +106,8 @@ const opLabel = computed(() => {
   if (b.startsWith('install:')) return t('dshMgr.opInstalling', { spec: b.slice(8) })
   if (b.startsWith('uninstall:')) return t('dshMgr.opUninstalling', { name: b.slice(10) })
   if (b === 'update:all') return t('dshMgr.opUpdatingAll')
+  // a bare-name busy key is a single-plugin update (see the store's updatePlugin)
+  if (updateByName.value[b]) return t('dshMgr.opUpdating', { name: b })
   return ''
 })
 const opElapsed = computed(() =>
@@ -166,13 +175,13 @@ async function install(): Promise<void> {
     return
   }
   const res = await dsh.installPlugin(spec, profile.value)
+  await load()
   if (!res.ok) {
     ElMessage.error(res.error || t('dshMgr.msgInstallFail'))
     return
   }
   ElMessage.success(t('dshMgr.msgInstalled', { spec }))
   installForm.spec = ''
-  await load()
 }
 
 /**
@@ -192,17 +201,36 @@ async function loadUpdates(): Promise<void> {
   }
 }
 
-/** Update every plugin that has a newer version in a single pnpm pass, then re-sync. */
+/** Update every plugin the check flagged as behind — main walks the queue per-channel (npm/git,
+ * incl. source flips) and broadcasts each step to the top bar. Then re-sync. */
 async function updateAll(): Promise<void> {
   if (dsh.busy || !updatable.value.length) return
   const n = updatable.value.length
   const res = await dsh.updateAllPlugins(profile.value)
+  // Re-sync on failure too: a rejected op usually means the table was stale, and only a fresh
+  // read can tell the user what is actually left.
+  await load()
   if (!res.ok) {
     ElMessage.error(res.error || t('dshMgr.msgUpdateAllFail'))
     return
   }
   ElMessage.success(t('dshMgr.msgUpdatedAll', { n }))
+}
+
+/**
+ * Update ONE plugin through the channel the check picked (npm/git — the dual-source winner).
+ * The store serialises ops via `busy`, and main broadcasts the in-flight name to the top bar.
+ */
+async function updateOne(p: DshPluginInfo): Promise<void> {
+  const u = updateByName.value[p.name]
+  if (!u || dsh.busy) return
+  const res = await dsh.updatePlugin(p.name, u.channel || 'npm', profile.value, u.gitUrl)
   await load()
+  if (!res.ok) {
+    ElMessage.error(res.error || t('dshMgr.msgUpdateFail'))
+    return
+  }
+  ElMessage.success(t('dshMgr.msgUpdated'))
 }
 
 async function uninstall(p: DshPluginInfo): Promise<void> {
@@ -220,12 +248,16 @@ async function uninstall(p: DshPluginInfo): Promise<void> {
     return
   }
   const res = await dsh.uninstallPlugin(p.name, profile.value)
+  // Reload before reporting the outcome. A failure here is typically a stale row — dsh keeps a
+  // layer in its bundle stack after it stopped being a pnpm dependency, so `remove` can never
+  // succeed and the retry would fail identically. Re-reading turns the row into the truth
+  // (bundle-only, or gone) instead of inviting the same dead-end click again.
+  await load()
   if (!res.ok) {
     ElMessage.error(res.error || t('dshMgr.msgUninstallFail'))
     return
   }
   ElMessage.success(t('dshMgr.msgUninstalled', { name: p.name }))
-  await load()
 }
 
 async function openTerminal(): Promise<void> {
@@ -237,8 +269,17 @@ async function openTerminal(): Promise<void> {
   }
 }
 
-const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
-  s === 'bundle' ? 'info' : 'primary'
+const sourceTag = (p: DshPluginInfo): 'primary' | 'info' | 'warning' =>
+  p.source === 'profile' ? 'primary' : p.present === false ? 'warning' : 'info'
+const sourceLabel = (p: DshPluginInfo): string =>
+  p.source === 'profile'
+    ? t('dshMgr.sourceInstalled')
+    : p.present === false
+      ? t('dshMgr.sourceGhost')
+      : t('dshMgr.sourceBundle')
+/** A ghost layer resolved to nothing on disk, so it has no version to print. */
+const versionLabel = (p: DshPluginInfo): string =>
+  p.present === false ? t('dshMgr.versionMissing') : p.version
 </script>
 
 <template>
@@ -398,7 +439,7 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
               <template #default="{ row }">
                 <div class="cell-name">{{ row.name }}</div>
                 <div class="cell-sub">
-                  <span>{{ row.version }}</span>
+                  <span>{{ versionLabel(row) }}</span>
                   <el-tag
                     v-if="latestByName[row.name]"
                     size="small"
@@ -414,14 +455,24 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
             </el-table-column>
             <el-table-column :label="t('dshMgr.colSource')" width="90">
               <template #default="{ row }">
-                <el-tag size="small" round :type="sourceTag(row.source)">{{
-                  row.source === 'bundle' ? t('dshMgr.sourceBundle') : t('dshMgr.sourceInstalled')
-                }}</el-tag>
+                <el-tag size="small" round :type="sourceTag(row)">{{ sourceLabel(row) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column :label="t('dshMgr.colActions')" width="120" align="right">
+            <el-table-column :label="t('dshMgr.colActions')" width="150" align="right">
               <template #default="{ row }">
                 <template v-if="row.source === 'profile'">
+                  <el-button
+                    v-if="updateByName[row.name]"
+                    size="small"
+                    text
+                    type="primary"
+                    :loading="dsh.busy === row.name"
+                    :disabled="!!dsh.busy && dsh.busy !== row.name"
+                    :title="t('dshMgr.updatableTip')"
+                    @click="updateOne(row)"
+                  >
+                    {{ t('dshMgr.update') }}
+                  </el-button>
                   <el-button
                     size="small"
                     text
@@ -432,7 +483,9 @@ const sourceTag = (s: DshPluginInfo['source']): 'primary' | 'info' =>
                     {{ t('dshMgr.uninstall') }}
                   </el-button>
                 </template>
-                <span v-else class="cell-sub">{{ t('dshMgr.bundleOnly') }}</span>
+                <span v-else class="cell-sub">{{
+                  row.present === false ? t('dshMgr.ghostOnly') : t('dshMgr.bundleOnly')
+                }}</span>
               </template>
             </el-table-column>
           </el-table>

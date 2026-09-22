@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { dirname, join, basename, extname } from 'node:path'
 import Store from 'electron-store'
 import type { ContainerSettings, DefaultView } from '../shared/types'
+import { NPM_REGISTRY_DEFAULT } from '../shared/types'
 
 const DEFAULTS: ContainerSettings = {
   defaultView: { kind: 'none' },
@@ -35,7 +36,8 @@ const DEFAULTS: ContainerSettings = {
   systemNotifications: true,
   // #25: '' keeps each theme's CSS-defined accent; a hex overrides it live in both modes.
   accentColor: '',
-  // #25: matches the stylesheet default (.glass blur 30px); slider overrides --glass-blur live.
+  // #25: frosted-blur px; the slider overrides --glass-blur live, clamped to GLASS_BLUR_MAX_PX
+  // (25) at apply time — this default sits at that ceiling, i.e. the heaviest frost.
   glassBlur: 30,
   // #25: frosted-surface opacity (%); slider overrides --glass-tint-a live (independent of blur).
   glassAlpha: 60,
@@ -43,7 +45,17 @@ const DEFAULTS: ContainerSettings = {
   memWarnMb: 800,
   // bottom-docked terminal height the user dragged out; keep the default in sync with
   // TerminalDrawer's DEFAULT_H.
-  terminalHeight: 320
+  terminalHeight: 320,
+  // #26: restore the last window geometry/maximized state. On by default: a container that
+  // relaunches at 1280x860 every time is annoying once you've arranged it beside other windows.
+  rememberWindowBounds: true,
+  // #26: 'auto' keeps the previous behaviour of following the OS reduced-motion preference.
+  reduceMotion: 'auto',
+  // #26: '' = the built-in mirror (NPM_REGISTRY_DEFAULT), i.e. the pre-setting behaviour.
+  npmRegistry: '',
+  // #26: tray defaults mirror what the menu/badge did before they were configurable.
+  trayPageEntries: 'all',
+  trayBadge: 'all'
 }
 
 let store: Store<ContainerSettings> | null = null
@@ -306,6 +318,50 @@ export function defaultDownloadDir(): string {
 export function resolveDownloadDir(): string {
   const override = (getSettings().downloadDir || '').trim()
   return override ? expandHome(override) : defaultDownloadDir()
+}
+
+/**
+ * #26: the npm registry every install the container drives goes through — `npm view`, dsh plugin
+ * add/update, and the `npm_config_registry` injected into hosted pages. The user override wins
+ * (trailing slashes stripped, since npm is picky about them); empty falls back to the built-in
+ * mirror so an untouched install behaves exactly as it did before the setting existed.
+ */
+export function resolveNpmRegistry(): string {
+  const override = (getSettings().npmRegistry || '').trim().replace(/\/+$/, '')
+  return override || NPM_REGISTRY_DEFAULT
+}
+
+/**
+ * npm's own default is `https://registry.npmjs.org/`, and it resolves package metadata by URL
+ * joining — so both `npm_config_registry` and `--registry` get the trailing slash back. The bare
+ * form ({@link resolveNpmRegistry}) is what the UI lists and compares against.
+ */
+export function npmRegistryWithSlash(): string {
+  return `${resolveNpmRegistry()}/`
+}
+
+/**
+ * #26: drop the remembered window geometry. `updateSettings` skips undefined values by design, so
+ * forgetting a key has to go through the store's own delete.
+ */
+export function clearWindowBounds(): void {
+  getStore().delete('windowBounds')
+}
+
+/**
+ * Publish the resolved registry to the process environment as `npm_config_registry`.
+ *
+ * Why an env var instead of writing an `.npmrc`: the installed app lives under Program Files,
+ * where the process has no write permission, and a user-level `~/.npmrc` is shared with their
+ * own terminal — rewriting it would silently follow the container's setting everywhere. npm and
+ * pnpm both rank `npm_config_*` above every `.npmrc` file, so one assignment here reaches
+ * everything the container spawns: its own `npm view` probes, dsh plugin installs (via
+ * {@link bundledEnv}/`envWithPATH`, which both spread `process.env`) and the hosted pages' builds.
+ */
+export function applyNpmRegistryEnv(): string {
+  const url = npmRegistryWithSlash()
+  process.env.npm_config_registry = url
+  return url
 }
 
 /**

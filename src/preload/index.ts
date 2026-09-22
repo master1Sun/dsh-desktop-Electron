@@ -4,13 +4,15 @@ import {
   IPC,
   type BuiltinKind,
   type DownloadProgress,
+  type DshPluginOpEvent,
   type InstallProgress,
   type PageProgress,
   type ReadLogsArgs,
   type UpdateCheckResult,
   type UpdateProgress,
   type LogLineEvent,
-  type PageMetrics
+  type PageMetrics,
+  type WebDataClearArgs
 } from '../shared/types'
 
 const api = {
@@ -52,6 +54,11 @@ const api = {
   exportSnapshot: () => ipcRenderer.invoke(IPC.ExportSnapshot),
   importSnapshot: () => ipcRenderer.invoke(IPC.ImportSnapshot),
   runNetworkProbe: () => ipcRenderer.invoke(IPC.RunNetworkProbe),
+  // #26: latency/reachability of every candidate npm registry, for the 网络镜像 panel.
+  probeRegistries: () => ipcRenderer.invoke(IPC.ProbeRegistries),
+  // #26: embedded-webview data (cookies per domain + cache/storage bytes) and its wipe buttons.
+  getWebData: () => ipcRenderer.invoke(IPC.GetWebData),
+  clearWebData: (args: WebDataClearArgs) => ipcRenderer.invoke(IPC.ClearWebData, args),
   getSystemInfo: () => ipcRenderer.invoke(IPC.GetSystemInfo),
   getNetworkStats: () => ipcRenderer.invoke(IPC.GetNetworkStats),
   getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
@@ -104,6 +111,11 @@ const api = {
   dshCreatePage: (profile: string, port?: number) =>
     ipcRenderer.invoke(IPC.DshCreatePage, profile, port),
   dshToken: (profile?: string) => ipcRenderer.invoke(IPC.DshToken, profile),
+  onDshPluginOp: (cb: (p: DshPluginOpEvent) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, p: DshPluginOpEvent): void => cb(p)
+    ipcRenderer.on(IPC.OnDshPluginOp, listener)
+    return () => ipcRenderer.removeListener(IPC.OnDshPluginOp, listener)
+  },
   openclawStatus: () => ipcRenderer.invoke(IPC.OpenclawStatus),
   openclawToken: () => ipcRenderer.invoke(IPC.OpenclawToken),
   openclawInitToken: (rotate?: boolean) => ipcRenderer.invoke(IPC.OpenclawInitToken, rotate),

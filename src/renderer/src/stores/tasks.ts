@@ -115,6 +115,26 @@ export const useTasksStore = defineStore('tasks', () => {
     })
   })
 
+  // dsh plugin ops (install / update, incl. the per-plugin steps of 全部更新 broadcast by main).
+  // Each in-flight plugin owns one row; a batch start event carries index/total (1-based queue
+  // position), which drives a near-determinate bar ((i-1)/N done share) over the otherwise
+  // striped indeterminate single-op row. npm/git steps report no byte progress.
+  window.container?.onDshPluginOp?.((p) => {
+    const id = 'dsh:' + p.name
+    if (p.done) {
+      remove(id)
+      return
+    }
+    upsert(id, {
+      label: t('topbar.dshPlugin'),
+      percent:
+        p.total && p.index != null
+          ? Math.min(99, Math.round(((p.index - 1) / p.total) * 100))
+          : null,
+      message: t('topbar.pluginUpdating', { name: p.name })
+    })
+  })
+
   const list = computed<ProgressTask[]>(() => Object.values(tasks))
   const active = computed(() => list.value.length > 0)
   /** True while a specific built-in runtime install is in flight — drives the button spinner. */

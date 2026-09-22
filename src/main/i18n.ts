@@ -119,6 +119,8 @@ const zh: Dict = {
   'dsh.gitNeedsUrl': 'git 更新需要提供仓库地址',
   'dsh.updatedTo': '已更新至 {spec}',
   'dsh.npmUpdated': '已通过 npm 更新 {spec}',
+  'dsh.notADependency':
+    '{name} 并非本 profile 的已安装依赖（已被卸载，或仅是 dsh 遗留的 bundle 层），无需卸载；插件列表已重新读取',
   'dsh.illegalRepoChars': '仓库地址包含非法字符',
   'dsh.lsRemoteFail': 'git ls-remote 失败',
   'dsh.remoteHeadFail': '无法解析远端 HEAD',
@@ -317,6 +319,8 @@ const en: Dict = {
   'dsh.gitNeedsUrl': 'A git update requires a repository URL',
   'dsh.updatedTo': 'Updated to {spec}',
   'dsh.npmUpdated': 'Updated {spec} via npm',
+  'dsh.notADependency':
+    '{name} is not an installed dependency of this profile (already removed, or just a leftover dsh bundle layer) — nothing to uninstall; the plugin list has been re-read',
   'dsh.illegalRepoChars': 'The repository URL contains illegal characters',
   'dsh.lsRemoteFail': 'git ls-remote failed',
   'dsh.remoteHeadFail': 'Could not resolve the remote HEAD',

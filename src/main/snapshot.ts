@@ -2,8 +2,9 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, dialog } from 'electron'
-import { getSettings, updateSettings, resolvePagesDir, resolveExportPath } from './store'
+import { getSettings, updateSettings, resolvePagesDir, resolveExportPath, applyNpmRegistryEnv } from './store'
 import { extractZip } from './node-updater'
+import { rebuildTrayMenu } from './tray'
 import { m } from './i18n'
 import type { PageRegistry } from './pages'
 import type { ContainerSettings, SnapshotResult } from '../shared/types'
@@ -52,7 +53,15 @@ function captureSettings(): Partial<ContainerSettings> {
     systemNotifications: s.systemNotifications,
     accentColor: s.accentColor,
     glassBlur: s.glassBlur,
-    memWarnMb: s.memWarnMb
+    glassAlpha: s.glassAlpha,
+    memWarnMb: s.memWarnMb,
+    terminalHeight: s.terminalHeight,
+    // #26: preferences (the remembered `windowBounds` stays out on purpose — it is machine-local).
+    rememberWindowBounds: s.rememberWindowBounds,
+    reduceMotion: s.reduceMotion,
+    npmRegistry: s.npmRegistry,
+    trayPageEntries: s.trayPageEntries,
+    trayBadge: s.trayBadge
   }
 }
 
@@ -183,6 +192,10 @@ export async function importSnapshot(registry: PageRegistry): Promise<SnapshotRe
     if (manifest.settings && typeof manifest.settings === 'object') {
       // Bring the archived auto-start lists verbatim; the pin diff is for live user toggles only.
       updateSettings(manifest.settings, { syncAutoStartPin: false })
+      // #26: a restored 镜像源 has to reach process.env too, or this run keeps using the old one.
+      applyNpmRegistryEnv()
+      // …and the tray menu/badge, which are rendered from trayPageEntries / trayBadge.
+      rebuildTrayMenu()
     }
 
     // 2) per-page container.json under the live pages dir.
