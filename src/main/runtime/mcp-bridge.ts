@@ -55,11 +55,13 @@ export interface McpBridgeCatalog {
 }
 
 /**
- * Snapshot the hub into a standalone document. Only enabled specs travel: a
- * disabled row is the user saying "not this one", and a stopped server still
- * contributes its command line (agents spawn their own children). Tool lists ride
- * only on connected rows — a catalog that handed out a stopped server's tools
- * would advertise calls that cannot land.
+ * Snapshot the hub into a standalone document. Only `autoStart` (and enabled) specs
+ * travel to agents: 自动启动 is the user's opt-in that "this server is ready for agents
+ * to use", so an enabled-but-not-auto-started row stays a panel-only entry and never
+ * reaches the codex/openclaw/dsh configs or the exported files. A stopped server still
+ * contributes its command line (agents spawn their own children). Tool lists ride only
+ * on connected rows — a catalog that handed out a stopped server's tools would advertise
+ * calls that cannot land.
  */
 export function buildCatalog(
   servers: Array<{ spec: McpServerSpec; status: string }>,
@@ -69,7 +71,7 @@ export function buildCatalog(
     version: 1,
     generatedAt: new Date().toISOString(),
     servers: servers
-      .filter((s) => s.spec.enabled !== false)
+      .filter((s) => s.spec.enabled !== false && s.spec.autoStart === true)
       .map((s) => ({
         ...s.spec,
         status: s.status,
@@ -203,4 +205,129 @@ export function syncCodexConfig(servers: McpBridgeCatalog['servers'], home?: str
   const existing = existsSync(file) ? readFileSync(file, 'utf8') : ''
   writeText(file, mergeCodexToml(existing, servers))
   return file
+}
+
+/* ---- native adapter: openclaw (mcp.servers in openclaw.json) ---- */
+
+/** openclaw reads a first-class MCP client registry from the top-level `mcp.servers`
+    map in `openclaw.json`, and the embedded runtime connects them at boot. We write
+    our generated entries under this namespace so a later sync can prune exactly the
+    container-managed set and never touch the user's own `mcp.servers`. */
+export const OPENCLAW_MCP_PREFIX = 'dsh__'
+
+/** Collapse a hub id to a namespace-safe slug, dropping a redundant leading `dsh[-_]` so
+    the shared-context server (id `dsh-workspace`) doesn't double-prefix into
+    `dsh__dsh-workspace` (openclaw) / `dsh_dsh-workspace` (dsh). Shared by both adapters. */
+function mcpNamespaceSlug(id: string): string {
+  return id.replace(/[^A-Za-z0-9_-]/g, '_').replace(/^dsh[-_]+/i, '')
+}
+
+function openclawServerKey(id: string): string {
+  return `${OPENCLAW_MCP_PREFIX}${mcpNamespaceSlug(id)}`
+}
+
+/** Merge the hub's stdio servers into an existing openclaw config object (pure, so the
+    shadowing rules are unit-testable). Preserves every unrelated key and the user's own
+    `mcp.servers`; replaces only the previously-written `dsh__*` entries. */
+export function mergeOpenclawMcpConfig(
+  cfg: Record<string, unknown>,
+  servers: McpBridgeCatalog['servers']
+): Record<string, unknown> {
+  const mcp = (
+    cfg.mcp && typeof cfg.mcp === 'object' && !Array.isArray(cfg.mcp)
+      ? (cfg.mcp as Record<string, unknown>)
+      : {}
+  ) as Record<string, unknown>
+  const cur = (
+    mcp.servers && typeof mcp.servers === 'object' && !Array.isArray(mcp.servers)
+      ? (mcp.servers as Record<string, unknown>)
+      : {}
+  ) as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(cur)) if (!k.startsWith(OPENCLAW_MCP_PREFIX)) out[k] = v
+  for (const s of servers) {
+    out[openclawServerKey(s.id)] = {
+      command: s.command,
+      ...(s.args?.length ? { args: s.args } : {}),
+      ...(s.cwd ? { cwd: s.cwd } : {}),
+      ...(s.env && Object.keys(s.env).length ? { env: s.env } : {}),
+      enabled: true
+    }
+  }
+  return { ...cfg, mcp: { ...mcp, servers: out } }
+}
+
+/**
+ * openclaw-only: compile the hub into the page's openclaw.json right before it spawns.
+ * Best-effort and non-destructive: a config we can't parse (hand-edited JSON5) is left
+ * untouched so openclaw keeps its own servers — mirroring the token seeder's discipline.
+ */
+export function syncOpenclawMcpConfig(
+  servers: McpBridgeCatalog['servers'],
+  cfgPath: string
+): string {
+  let cfg: Record<string, unknown> = {}
+  if (existsSync(cfgPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        cfg = parsed as Record<string, unknown>
+      }
+    } catch {
+      return cfgPath // unparseable (comments/JSON5): never clobber the user's file
+    }
+  }
+  writeText(cfgPath, JSON.stringify(mergeOpenclawMcpConfig(cfg, servers), null, 2) + '\n')
+  return cfgPath
+}
+
+/* ---- native adapter: dsh (Cordis --patch overlay of dsh-mcp-client entries) ---- */
+
+/** dsh is not a JSON-config MCP client: it is a Cordis plugin host, and MCP servers are
+    contributed by the `@deepseek-ai/dsh-mcp-client` plugin — one patch entry per server,
+    delivered as a non-destructive `--patch <file>` overlay (never the user's own
+    cordis.patch.yml). The overlay is emitted as a JSON array, which is also valid YAML,
+    so the plugin's YAML loader parses it without a YAML serializer dependency. */
+export function dshMcpPatchFile(): string {
+  return join(bridgeDir(), 'dsh-mcp.patch.json')
+}
+
+/** dsh requires `[A-Za-z0-9_-]{1,32}`, unique per scope; the derived name is also the
+    tool namespace (`mcp__<serverName>__<tool>`). */
+function dshServerName(id: string): string {
+  return `dsh_${mcpNamespaceSlug(id)}`.slice(0, 32)
+}
+
+/**
+ * One `dsh-mcp-client` plugin definition per enabled hub server (pure, testable).
+ *
+ * Shape matters: dsh's patch engine (`app-boot applyPatches`) reads a top-level array as
+ * a list of *patches*, each matched to an existing node by `id` — so a bare
+ * `[{id,name,config}]` fails every entry with "patch: entry <id> not found". To ADD new
+ * plugin nodes we emit a single `insert` patch (no top-level id → `data.push(...insert)`
+ * at the tree root). The document is a JSON array, which is also valid YAML.
+ */
+export function renderDshMcpPatch(servers: McpBridgeCatalog['servers']): unknown[] {
+  const entries = servers.map((s) => ({
+    id: `dsh-mcp-${mcpNamespaceSlug(s.id)}`,
+    name: '@deepseek-ai/dsh-mcp-client',
+    config: {
+      serverName: dshServerName(s.id),
+      transport: 'stdio',
+      command: s.command,
+      ...(s.args?.length ? { args: s.args } : {}),
+      ...(s.cwd ? { cwd: s.cwd } : {}),
+      ...(s.env && Object.keys(s.env).length ? { env: s.env } : {})
+    }
+  }))
+  return entries.length ? [{ insert: entries }] : []
+}
+
+/** Write the overlay file and return its path, or null when there is nothing to bridge
+    (an empty patch would still make dsh load the plugin, so we skip the `--patch` flag). */
+export function syncDshMcpPatch(servers: McpBridgeCatalog['servers']): string | null {
+  const entries = renderDshMcpPatch(servers)
+  if (!entries.length) return null
+  writeText(dshMcpPatchFile(), JSON.stringify(entries, null, 2))
+  return dshMcpPatchFile()
 }

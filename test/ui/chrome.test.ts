@@ -76,7 +76,7 @@ function makeContainerMock(): Record<string, unknown> {
       return Promise.resolve(ok({ ...persistedSettings }))
     },
     checkUpdates: () => Promise.resolve(ok([])),
-    getEnvRoot: () => Promise.resolve(ok({ envRoot: '/env', installDir: '/', custom: false })),
+    getEnvRoot: () => Promise.resolve(ok({ envRoot: '/env', installDir: '/', home: '/' })),
     getNativeTheme: () => Promise.resolve(ok(true)), // pretend OS is dark
     setNativeTheme: () => Promise.resolve(ok(true)),
     onNativeTheme: () => () => undefined,
@@ -179,7 +179,7 @@ describe('shell chrome theme + layout', () => {
     expect(document.querySelector('.pagetabs')).toBeNull()
   })
 
-  it('row ⚙配置 dialog shows port + the env dirs this project declares', async () => {
+  it('row ⚙配置 dialog shows the port; declared env dirs live in the 环境目录 tab', async () => {
     await mountApp()
     const sysTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
       b.textContent?.includes('系统')
@@ -203,10 +203,26 @@ describe('shell chrome theme + layout', () => {
     const dlg = dlgs.find((d) => d.textContent?.includes('· 配置'))
     expect(dlg).not.toBeNull()
     expect(dlg?.textContent).toContain('DSH (web) · 配置')
-    // dynamic: the container.json-declared env var renders its own input
-    expect(dlg?.textContent).toContain('DSH Home')
-    expect(dlg?.textContent).toContain('profile 容器目录')
-    expect(dlg?.querySelectorAll('input').length).toBeGreaterThanOrEqual(2)
+    // The ⚙ dialog keeps only the generic knobs: port + 自动启动 + free KEY=VALUE.
+    expect(dlg?.textContent).toContain('端口（留空 = 项目声明端口）')
+    expect(dlg?.textContent).toContain('项目声明端口 :8899')
+    // Declared env dirs moved out of the ⚙ dialog into the aggregated 环境目录 tab, where
+    // DSH_HOME renders as the two-choice directory card (label + manifest note + 独立/系统通用).
+    const envTab = [...document.querySelectorAll('.el-tabs__item')].find((b) =>
+      b.textContent?.includes('环境目录')
+    )
+    expect(envTab).not.toBeNull()
+    await click(envTab ?? null)
+    await new Promise((r) => setTimeout(r, 80))
+    const section = [...document.querySelectorAll('.env-section')].find((s) =>
+      s.textContent?.includes('DSH Home')
+    )
+    expect(section).not.toBeNull()
+    expect(section?.textContent).toContain('DSH (web)')
+    expect(section?.textContent).toContain('独立目录')
+    expect(section?.textContent).toContain('系统通用目录')
+    // the manifest description survives as the row's visible note under the label
+    expect(section?.querySelector('.env-desc')?.textContent).toContain('profile 容器目录')
   })
 
   it('list groups toggle a drop list; 系统 rows open the settings/pages panels', async () => {

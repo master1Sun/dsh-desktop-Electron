@@ -17,8 +17,8 @@
       },
       "defaultPath": "~/.openclaw",
       "description": {
-        "zh": "留空即使用 openclaw CLI 的默认目录 ~/.openclaw，与终端共用同一套配置",
-        "en": "Empty uses openclaw’s default ~/.openclaw — the same config store the CLI uses"
+        "zh": "默认使用独立目录（容器独占，环境根目录下的 .openclaw 子目录）；若未手动改动且 ~/.openclaw 已有配置会自动沿用以免丢失；选系统通用目录则与终端共用同一套配置（~/.openclaw）",
+        "en": "Uses a container-owned .openclaw subfolder of the env root by default; until you change it, an existing ~/.openclaw config is kept automatically so nothing is lost. Pick the system-common folder to share the CLI config store (~/.openclaw)"
       }
     }
   ]

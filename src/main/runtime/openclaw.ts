@@ -11,7 +11,8 @@ import {
   updateSettings
 } from '../shell/store'
 import { getNodeExePath, bundledEnv } from './node-runtime'
-import { bridgeEnvVars } from './mcp-bridge'
+import { bridgeEnvVars, syncOpenclawMcpConfig, type McpBridgeCatalog } from './mcp-bridge'
+import { workspaceEnvVars } from './workspace'
 import type { ContainerManifest } from './pages'
 import { m, msgIn } from '../shell/i18n'
 import { OPENCLAW_DEFAULT_PORT } from '../../shared/types'
@@ -80,7 +81,13 @@ function resolveOpenclawCommand(): { cmd: string; script: string } | null {
 function openclawEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // The MCP bridge pointers ride along too: openclaw discovers the hub's tool catalog
   // through DSH_MCP_CATALOG instead of the container guessing its config format.
-  return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...bridgeEnvVars(), ...extra })
+  return bundledEnv({
+    OPENCLAW_STATE_DIR: resolveOpenclawHome(),
+    ...bridgeEnvVars(),
+    // and the shared workspace pointers, so openclaw reads/writes the one container context
+    ...workspaceEnvVars(),
+    ...extra
+  })
 }
 
 /**
@@ -197,24 +204,56 @@ export function createOpenclawPage(port = OPENCLAW_DEFAULT_PORT): string {
   return id
 }
 
+/**
+ * The shipped envVars specs for a builtin page drifted from what an existing container.json
+ * holds (an old defaultPath, or the pre-two-choice "留空即默认" wording): rewrite just that
+ * field so the 环境目录 rows stay truthful without touching anything the user owns. The whole
+ * array is compared, so a matching file is never rewritten.
+ */
+function refreshBuiltinEnvVars(
+  id: string,
+  envVars: NonNullable<ContainerManifest['envVars']>
+): void {
+  const metaFile = join(resolvePagesDir(), id, 'container.json')
+  if (!existsSync(metaFile)) return
+  try {
+    const raw = JSON.parse(readFileSync(metaFile, 'utf-8')) as Record<string, unknown>
+    const cur = Array.isArray(raw.envVars) ? raw.envVars : []
+    if (JSON.stringify(cur) === JSON.stringify(envVars)) return
+    writeFileSync(metaFile, JSON.stringify({ ...raw, envVars }, null, 2))
+  } catch {
+    /* unreadable meta: leave the user's file untouched */
+  }
+}
+
+/**
+ * Env vars declared by the managed dsh profile page — the dsh twin of openclawEnvVars, kept
+ * in sync with pages/dsh-web/container.json (both the code seed and the file backfill read it).
+ */
+function dshEnvVars(): NonNullable<ContainerManifest['envVars']> {
+  return [
+    {
+      key: 'DSH_HOME',
+      label: {
+        zh: msgIn('zh', 'dsh.homeLabel'),
+        en: msgIn('en', 'dsh.homeLabel')
+      },
+      defaultPath: '~/.dsh',
+      description: {
+        zh: msgIn('zh', 'dsh.homeDesc'),
+        en: msgIn('en', 'dsh.homeDesc')
+      }
+    }
+  ]
+}
+
 /** ensure the default page exists once per install so "自带 openclaw" is visible without manual steps. */
 export function ensureDefaultOpenclawPage(): void {
   const metaFile = join(resolvePagesDir(), 'openclaw', 'container.json')
   if (existsSync(metaFile)) {
-    // Backfill: metas written before envVars existed hide the openclaw 环境目录 input;
-    // metas with the old {envRoot} default also need refreshing (home now defaults to ~/.openclaw).
-    try {
-      const raw = JSON.parse(readFileSync(metaFile, 'utf-8')) as Record<string, unknown>
-      const vars = Array.isArray(raw.envVars) ? (raw.envVars as Array<Record<string, unknown>>) : []
-      const stale =
-        !vars.length ||
-        vars.some((v) => v?.key === 'OPENCLAW_HOME' && v?.defaultPath === '{envRoot}/openclaw')
-      if (stale) {
-        writeFileSync(metaFile, JSON.stringify({ ...raw, envVars: openclawEnvVars() }, null, 2))
-      }
-    } catch {
-      /* unreadable meta: leave the user's file untouched */
-    }
+    // Backfill: metas written before envVars existed hide the openclaw 环境目录 row, and
+    // older wordings (the {envRoot} default, the pre-two-choice "留空" hint) get refreshed here.
+    refreshBuiltinEnvVars('openclaw', openclawEnvVars())
     return
   }
   try {
@@ -242,20 +281,7 @@ function createDshWebPage(): void {
     },
     kind: 'dsh',
     dsh: { profile: 'web', port: 8899 },
-    envVars: [
-      {
-        key: 'DSH_HOME',
-        label: {
-          zh: msgIn('zh', 'dsh.homeLabel'),
-          en: msgIn('en', 'dsh.homeLabel')
-        },
-        defaultPath: '~/.dsh',
-        description: {
-          zh: msgIn('zh', 'dsh.homeDesc'),
-          en: msgIn('en', 'dsh.homeDesc')
-        }
-      }
-    ]
+    envVars: dshEnvVars()
   }
   writeFileSync(join(dir, 'container.json'), JSON.stringify(manifest, null, 2))
 }
@@ -287,6 +313,9 @@ export function ensureBuiltinPages(): void {
   // Dev's copy-source IS the destination (a 重置 just deleted both) — fall back to the
   // code-side manifest so the builtin page can never vanish from the list.
   if (!existsSync(join(destRoot, 'dsh-web', 'container.json'))) createDshWebPage()
+  // Backfill: an install copied before the two-choice 环境目录 UI ships keeps the old
+  // "留空即默认" hint in its dsh-web manifest — refresh the declared envVars in place.
+  refreshBuiltinEnvVars('dsh-web', dshEnvVars())
   // A persisted default view / auto-start pointing at a page that no longer exists would
   // leave the shell on an empty market screen with no hint — drop the dead references.
   try {
@@ -306,8 +335,16 @@ export function ensureBuiltinPages(): void {
  * server page (the market is now a renderer built-in view, MarketView.vue). Upgrades
  * may still carry their dirs plus persisted settings references — remove the dirs and
  * drop the stale settings so they don't linger as broken rows. Best-effort, never throws.
+ *
+ * This is a ONE-SHOT transitional cleanup, keyed off `legacyBuiltinPagesPruned`: those retired
+ * ids live in the same userData/pages root a user's own imports land in, so `codex` here is
+ * indistinguishable from a page the user imported into a folder named `codex`. Pruning on every
+ * launch would wipe that import on the next restart. Running it once at first launch — before any
+ * import can collide — still clears the leftover builtin from an upgraded install, and the flag
+ * then keeps later imports safe.
  */
 function removeLegacyBuiltinPages(): void {
+  if (getSettings().legacyBuiltinPagesPruned) return
   const retired = ['codex', 'dsh-plugin-market']
   for (const id of retired) {
     const dir = join(resolvePagesDir(), id)
@@ -330,6 +367,12 @@ function removeLegacyBuiltinPages(): void {
   } catch {
     /* settings cleanup is best-effort */
   }
+  // Mark the transitional cleanup done so a later user import sharing a retired id survives.
+  try {
+    updateSettings({ legacyBuiltinPagesPruned: true })
+  } catch {
+    /* if the store write fails we simply retry the (idempotent) prune next launch */
+  }
 }
 
 /**
@@ -337,7 +380,10 @@ function removeLegacyBuiltinPages(): void {
  * `gateway` subcommand on the given port under the bundled Node. The Control UI
  * then serves on http://127.0.0.1:<port>. Auth may be required — see README.
  */
-export function openclawSpawnSpec(port: number): {
+export function openclawSpawnSpec(
+  port: number,
+  mcpServers: McpBridgeCatalog['servers'] = []
+): {
   cmd: string
   args: string[]
   cwd: string
@@ -360,6 +406,15 @@ export function openclawSpawnSpec(port: number): {
     // A config we can't parse must not block the gateway: openclaw falls back to its own
     // runtime token and the panel still reveals it, so this is only a logged degradation.
     console.warn('[openclaw] durable gateway token seed failed:', (err as Error).message)
+  }
+  // Compile the hub's enabled MCP servers into openclaw.json's `mcp.servers` so the embedded
+  // gateway connects them at boot — the openclaw twin of the codex config.toml sync. The
+  // container-managed `dsh__*` entries are pruned/rewritten; user-authored servers stay. A
+  // failure here must not block the gateway (openclaw then just runs without the bridge).
+  try {
+    syncOpenclawMcpConfig(mcpServers, openclawConfigPath())
+  } catch (err) {
+    console.warn('[openclaw] mcp bridge sync failed:', (err as Error).message)
   }
   return {
     cmd: resolved.cmd,

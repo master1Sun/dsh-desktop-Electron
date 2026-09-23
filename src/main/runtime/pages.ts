@@ -12,7 +12,15 @@ import { logPageLine } from '../shell/logger'
 import { logEvent } from '../shell/events'
 import { findPortHolder } from './port-holder'
 import { notifyEvent } from '../shell/notifications'
-import { bridgeEnvVars, buildCatalog, detectMcpAgent, exportBridgeFiles, syncCodexConfig } from './mcp-bridge'
+import {
+  bridgeEnvVars,
+  buildCatalog,
+  detectMcpAgent,
+  exportBridgeFiles,
+  syncCodexConfig,
+  syncDshMcpPatch
+} from './mcp-bridge'
+import { workspaceEnvVars } from './workspace'
 import { listServers, listTools } from './mcp-hub'
 // aliased: `m` is already a local identifier in this file (regex match / map callback)
 import { m as msg, resolveText } from '../shell/i18n'
@@ -663,9 +671,9 @@ export function buildPageEnv(meta: PageMeta): Record<string, string> {
     }
     const v = resolvePageEnv(meta.id, spec.key, spec.defaultPath, spec.legacyPath)
     if (!v) continue
-    // A declared defaultPath means the var names a directory (CODEX_HOME, …); make it
-    // exist so a first-launch runtime doesn't refuse to start.
-    if (spec.defaultPath) ensureEnvDir(v)
+    // Whatever the two-choice resolution landed on names a home directory (CODEX_HOME, an
+    // '@install' dir, …); make it exist so a first-launch runtime doesn't refuse to start.
+    ensureEnvDir(v)
     out[spec.key] = v
   }
   // The user's free-form KEY=VALUE rows win last: they are deliberate overrides, and a
@@ -686,7 +694,9 @@ export function buildPageEnv(meta: PageMeta): Record<string, string> {
       console.warn('[mcp-bridge] codex sync failed:', (err as Error).message)
     }
   }
-  return { ...bridgeEnvVars(), ...merged }
+  // The shared workspace pointers ride along too: every spawnable agent discovers the one
+  // container-owned context (working dir + context.json) the same way it finds the MCP catalog.
+  return { ...bridgeEnvVars(), ...workspaceEnvVars(), ...merged }
 }
 
 export function expandStartCommand(cmd: string): string {
@@ -802,7 +812,9 @@ export class PageRegistry extends EventEmitter {
   }
 
   logs(id: string): string[] {
-    return [...(this.entries.get(id)?.logs ?? [])]
+    const e = this.entries.get(id)
+    if (!e) return []
+    return [...e.logs]
   }
 
   /**
@@ -915,35 +927,48 @@ export class PageRegistry extends EventEmitter {
     e.portHolder = null
     this.emitProgress(e, 'spawning')
 
-    let proc: ChildProcessWithoutNullStreams
+    // dsh/openclaw kinds don't run through buildPageEnv (they pin their own homes), so the
+    // hub→native compile the codex path does there happens here: snapshot the enabled servers
+    // once, refresh the shared exports, and let each adapter write its own native config
+    // (openclaw.json mcp.servers / dsh --patch overlay) right before the spawn.
+    let mcpServers: ReturnType<typeof buildCatalog>['servers'] = []
+    if (isDsh || isOpenclaw) {
+      try {
+        const states = listServers()
+        const tools = listTools()
+        exportBridgeFiles(states, tools)
+        mcpServers = buildCatalog(states, tools).servers
+      } catch (err) {
+        console.warn('[mcp-bridge] agent snapshot failed:', (err as Error).message)
+      }
+    }
+    // Each kind resolves its own command line; the ACTUAL launch is dispatched once below so the
+    // Windows hidden-launcher path and the POSIX/piped spawn path share one readiness/handlers flow.
+    let launch: { cmd: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
     if (isDsh) {
       // dynamic import avoids a cycle at module load (dsh.ts imports store only)
       const { dshSpawnCommand } = await import('./dsh')
-      const spec = await dshSpawnCommand(e.meta.dshProfile || 'web', port)
+      let spec
       try {
-        proc = spawn(spec.cmd, spec.args, {
-          cwd: spec.cwd,
-          env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) },
-          windowsHide: true,
-          shell: false
-        })
+        spec = await dshSpawnCommand(e.meta.dshProfile || 'web', port, syncDshMcpPatch(mcpServers))
       } catch (err) {
         this.fail(e, msg('page.dshStartFail', { err: (err as Error).message }))
         throw new Error(e.lastError)
       }
+      launch = {
+        cmd: spec.cmd,
+        args: spec.args,
+        cwd: spec.cwd,
+        env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) }
+      }
     } else if (isOpenclaw) {
       const { openclawSpawnSpec } = await import('./openclaw')
-      const spec = openclawSpawnSpec(port)
-      try {
-        proc = spawn(spec.cmd, spec.args, {
-          cwd: spec.cwd,
-          env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) },
-          windowsHide: true,
-          shell: false
-        })
-      } catch (err) {
-        this.fail(e, msg('page.openclawStartFail', { err: (err as Error).message }))
-        throw new Error(e.lastError)
+      const spec = openclawSpawnSpec(port, mcpServers)
+      launch = {
+        cmd: spec.cmd,
+        args: spec.args,
+        cwd: spec.cwd,
+        env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) }
       }
     } else {
       // Terminal kinds are interactive CLIs that need a PTY; a detached spawn exits
@@ -955,17 +980,29 @@ export class PageRegistry extends EventEmitter {
       }
       const [cmd, ...args] = expandStartCommand(e.meta.startCommand).split(/\s+/)
       const executable = cmd === 'node' ? getNodeExePath() : cmd
-      try {
-        proc = spawn(executable, args, {
-          cwd: e.meta.dir,
-          env: bundledEnv({ PORT: String(port), ...buildPageEnv(e.meta) }),
-          windowsHide: true,
-          shell: false
-        })
-      } catch (err) {
-        this.fail(e, msg('page.spawnFail', { err: (err as Error).message }))
-        throw new Error(e.lastError)
+      launch = {
+        cmd: executable,
+        args,
+        cwd: e.meta.dir,
+        env: bundledEnv({ PORT: String(port), ...buildPageEnv(e.meta) })
       }
+    }
+
+    // Spawn the child as a piped subprocess owned by the main process: readiness, crash
+    // detection and stop all run off this handle, and it dies with the client (tree-killed on quit).
+    let proc: ChildProcessWithoutNullStreams
+    try {
+      proc = spawn(launch.cmd, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        windowsHide: true,
+        shell: false,
+        stdio: 'pipe'
+      }) as ChildProcessWithoutNullStreams
+    } catch (err) {
+      const failKey = isDsh ? 'page.dshStartFail' : isOpenclaw ? 'page.openclawStartFail' : 'page.spawnFail'
+      this.fail(e, msg(failKey, { err: (err as Error).message }))
+      throw new Error(e.lastError)
     }
 
     e.proc = proc
@@ -975,69 +1012,16 @@ export class PageRegistry extends EventEmitter {
     proc.stdout.on('data', (d) => this.appendLog(e, d))
     proc.stderr.on('data', (d) => this.appendLog(e, d))
     proc.on('error', (err) => this.fail(e, err.message))
-    proc.on('close', (code) => {
-      const wasRunning = e.status === 'running'
-      if (e.status === 'starting' || e.status === 'running') {
-        this.setStatus(e, code === 0 || this.quitting ? 'stopped' : 'error')
-        e.exitCode = code
-        if (code !== 0 && !this.quitting) {
-          e.lastError = msg('page.processExited', { code: code ?? '' })
-          e.logs.push(`[container] ${e.lastError}`)
-        }
-      }
-      // Health guard: only a process that had *reached running* and then died on its
-      // own counts as a crash — startup failures are config problems the user retries.
-      if (
-        wasRunning &&
-        code !== 0 &&
-        !this.quitting &&
-        e.meta.kind !== 'terminal' &&
-        getSettings().crashAutoRestart !== false
-      ) {
-        // #18 tier the exit so a doomed restart doesn't burn the budget or spam the toast:
-        // - EBADENGINE (dependency needs a different Node): restarting can't help — fail fast.
-        // - exit 78 (EX_CONFIG / resource busy, e.g. a lost state-dir lock): reclaim the
-        //   orphan and retry immediately WITHOUT consuming a crash rung.
-        // - anything else: the normal backoff ladder.
-        if (detectEngineMismatch(e)) {
-          e.lastError = msg('page.logEngineMismatch')
-          e.logs.push(`[container] ${e.lastError}`)
-          console.warn(`[pages] ${e.meta.id}: EBADENGINE — not restarting (engine mismatch)`)
-          logEvent({ level: 'error', kind: 'page.engineMismatch', pageId: e.meta.id })
-        } else if (code === 78 && (e.reclaimRetries ?? 0) < MAX_RECLAIM_RETRIES) {
-          e.reclaimRetries = (e.reclaimRetries ?? 0) + 1
-          e.logs.push(`[container] ${msg('page.logReclaimRetry')}`)
-          logEvent({
-            level: 'warn',
-            kind: 'page.reclaim',
-            pageId: e.meta.id,
-            meta: { attempt: e.reclaimRetries }
-          })
-          this.scheduleReclaimRestart(e)
-        } else {
-          e.crashes++
-          logEvent({
-            level: 'warn',
-            kind: 'page.crash',
-            pageId: e.meta.id,
-            meta: { code: code ?? 'n/a', attempt: e.crashes }
-          })
-          this.scheduleCrashRestart(e, code)
-        }
-      }
-      e.proc = undefined
-      e.pid = undefined
-      this.emitChanged()
-    })
+    proc.on('close', (code) => this.handleProcessDeath(e, code))
 
     try {
       this.emitProgress(e, 'port')
-      const { port, url } = await this.waitReady(e, proc, isDsh, isOpenclaw, isTerminal)
-      e.resolvedPort = port
+      const { port: boundPort, url } = await this.waitReady(e, proc, isDsh, isOpenclaw, isTerminal)
+      e.resolvedPort = boundPort
       // A declared healthUrl must answer before we call the page running — a port that
       // binds but never serves is exactly the false-green this catches (see below).
       if (e.meta.healthUrl) {
-        const target = healthTarget(e.meta, port)
+        const target = healthTarget(e.meta, boundPort)
         if (target && !(await waitHealth(target, HEALTH_READY_TIMEOUT_MS))) {
           throw new Error(msg('page.healthFail', { url: target }))
         }
@@ -1055,14 +1039,14 @@ export class PageRegistry extends EventEmitter {
         launchUrl = (await resolveOpenclawLaunchUrl()) || url
       }
       e.launchUrl = launchUrl
-      e.logs.push(msg('page.logReady', { port }))
+      e.logs.push(msg('page.logReady', { port: boundPort }))
       this.setStatus(e, 'running')
       // Timeline entry per successful boot — the anchor the crash rows are read against.
       logEvent({
         level: 'info',
         kind: 'page.running',
         pageId: e.meta.id,
-        meta: { port, ms: e.startedAt ? Date.now() - e.startedAt : 0 }
+        meta: { port: boundPort, ms: e.startedAt ? Date.now() - e.startedAt : 0 }
       })
       // Refill the crash budget once the page has stayed up; re-arm per run so a page
       // that survives its first minutes isn't throttled by weeks-old crashes.
@@ -1208,17 +1192,34 @@ export class PageRegistry extends EventEmitter {
       const cleanup = (): void => {
         clearInterval(timer)
         proc.stdout.off('data', onChunk)
+        proc.stderr.off('data', onChunk)
         proc.off('close', onExit)
       }
+      // dsh may announce its token-bearing launch URL on either stream. The persistent/detached
+      // paths merge stdout+stderr into one tailed file and always see the line; the piped path
+      // gets two separate streams, so listen on BOTH. Reading only stdout misses a stderr
+      // announcement, leaving `launchUrl` empty — the webview then opens a token-less bare origin
+      // and dsh 401s with "authentication required; reopen the URL printed by dsh web".
       proc.stdout.on('data', onChunk)
+      proc.stderr.on('data', onChunk)
       proc.once('close', onExit)
-      // fallback: the declared port may come up without a parsable announcement
+      // fallback: the declared port may come up before the token line reaches us. dsh *requires*
+      // the token in the launch URL, so a bare origin is a guaranteed 401 — never hand one back the
+      // moment the short grace lapses. Keep waiting for the announcement (matching the detached
+      // paths, which tail the merged stdout+stderr file for ANNOUNCE_GRACE_MS*4) so a late line on
+      // either stream still wins; only settle for `announced?.url` once we've given it that window.
       waitPortReady(wantPort, timeoutMs).then(
-        (port) =>
-          setTimeout(() => {
+        (port) => {
+          const settleDeadline = Date.now() + ANNOUNCE_GRACE_MS * 4
+          const settle = (): void => {
+            clearInterval(poll)
             cleanup()
             resolve({ port, url: announced?.url })
-          }, ANNOUNCE_GRACE_MS),
+          }
+          const poll = setInterval(() => {
+            if (announced || Date.now() > settleDeadline) settle()
+          }, 150)
+        },
         failWith
       )
     })
@@ -1240,7 +1241,13 @@ export class PageRegistry extends EventEmitter {
       }
       return
     }
-    if (!e?.proc) return
+    if (!e?.proc) {
+      // No live child handle: there is no detached/persistent process to reach by pid anymore, so
+      // a real death already settled the row through the close handler. Just make sure a stuck
+      // running/starting row flips to stopped, then return.
+      if (e && (e.status === 'running' || e.status === 'starting')) this.setStatus(e, 'stopped')
+      return
+    }
     const proc = e.proc
     e.logs.push(msg('page.logStopping'))
     // mark intentional kill so the close handler doesn't flip to 'error'
@@ -1262,7 +1269,11 @@ export class PageRegistry extends EventEmitter {
   stopAndWait(id: string, timeoutMs = 8000): Promise<void> {
     const e = this.entries.get(id)
     const proc = e?.proc
-    if (!proc) return Promise.resolve()
+    if (!proc) {
+      // No child handle to await: nothing detached/persistent to tree-kill by pid anymore, so the
+      // close handler has already settled the row. Resolve immediately.
+      return Promise.resolve()
+    }
     this.stop(id)
     return new Promise((resolve) => {
       const done = (): void => {
@@ -1515,6 +1526,14 @@ export class PageRegistry extends EventEmitter {
           await this.startWithDeps(id)
         } catch (err) {
           console.warn(`[pages] auto-start ${id} failed:`, (err as Error).message)
+          // Make the failure visible in the activity timeline — a hidden cold-start that dies
+          // with `code=1` was previously only a console.warn nobody saw.
+          logEvent({
+            level: 'warn',
+            kind: 'page.autostartFail',
+            pageId: id,
+            detail: (err as Error).message
+          })
         }
       })
     )
@@ -1531,7 +1550,68 @@ export class PageRegistry extends EventEmitter {
    * quit paths that don't await this can orphan grandchildren on slow machines. */
   async shutdownAll(): Promise<void> {
     this.quitting = true
-    await Promise.all([...this.entries.keys()].map((id) => this.stopAndWait(id)))
+    const ids = [...this.entries.keys()]
+    await Promise.all(ids.map((id) => this.stopAndWait(id)))
+  }
+
+  /**
+   * Shared death path for anything with a real child handle (piped / POSIX-detached spawns). A
+   * hidden launch has no handle and reaches this via the pid-liveness poll with `code = null`.
+   * Marks the row stopped/error, then runs the crash health-guard for an unscheduled death.
+   */
+  private handleProcessDeath(e: RuntimeEntry, code: number | null): void {
+    const wasRunning = e.status === 'running'
+    if (e.status === 'starting' || e.status === 'running') {
+      this.setStatus(e, code === 0 || this.quitting ? 'stopped' : 'error')
+      e.exitCode = code
+      if (code !== 0 && !this.quitting) {
+        e.lastError = msg('page.processExited', { code: code ?? '' })
+        e.logs.push(`[container] ${e.lastError}`)
+      }
+    }
+    // Health guard: only a process that had *reached running* and then died on its
+    // own counts as a crash — startup failures are config problems the user retries.
+    if (
+      wasRunning &&
+      code !== 0 &&
+      !this.quitting &&
+      e.meta.kind !== 'terminal' &&
+      getSettings().crashAutoRestart !== false
+    ) {
+      // #18 tier the exit so a doomed restart doesn't burn the budget or spam the toast:
+      // - EBADENGINE (dependency needs a different Node): restarting can't help — fail fast.
+      // - exit 78 (EX_CONFIG / resource busy, e.g. a lost state-dir lock): reclaim the
+      //   orphan and retry immediately WITHOUT consuming a crash rung.
+      // - anything else: the normal backoff ladder.
+      if (detectEngineMismatch(e)) {
+        e.lastError = msg('page.logEngineMismatch')
+        e.logs.push(`[container] ${e.lastError}`)
+        console.warn(`[pages] ${e.meta.id}: EBADENGINE — not restarting (engine mismatch)`)
+        logEvent({ level: 'error', kind: 'page.engineMismatch', pageId: e.meta.id })
+      } else if (code === 78 && (e.reclaimRetries ?? 0) < MAX_RECLAIM_RETRIES) {
+        e.reclaimRetries = (e.reclaimRetries ?? 0) + 1
+        e.logs.push(`[container] ${msg('page.logReclaimRetry')}`)
+        logEvent({
+          level: 'warn',
+          kind: 'page.reclaim',
+          pageId: e.meta.id,
+          meta: { attempt: e.reclaimRetries }
+        })
+        this.scheduleReclaimRestart(e)
+      } else {
+        e.crashes++
+        logEvent({
+          level: 'warn',
+          kind: 'page.crash',
+          pageId: e.meta.id,
+          meta: { code: code ?? 'n/a', attempt: e.crashes }
+        })
+        this.scheduleCrashRestart(e, code)
+      }
+    }
+    e.proc = undefined
+    e.pid = undefined
+    this.emitChanged()
   }
 
   private setStatus(e: RuntimeEntry, status: PageStatus): void {

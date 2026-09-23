@@ -116,6 +116,8 @@ const IPC = {
   GetNetworkStats: "container:get-network-stats",
   /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
   OnPageMetrics: "container:page-metrics",
+  /** broadcast: top-bar live network sample (NetSample) — rates + latency + online ports */
+  OnNetSample: "container:net-sample",
   /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
   OnLogLine: "container:log-line",
   /** #26: probe every candidate npm registry in parallel → RegistryProbe[] */
@@ -156,7 +158,13 @@ const IPC = {
   /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
   McpBridgeInfo: "container:mcp-bridge-info",
   /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
-  McpPackagesStatus: "container:mcp-packages-status"
+  McpPackagesStatus: "container:mcp-packages-status",
+  /** shared workspace: read the container-owned context + its locations → WorkspaceInfo */
+  WorkspaceGet: "container:workspace-get",
+  /** shared workspace: persist a partial edit ({ task?, notes? }) → WorkspaceContext */
+  WorkspaceSave: "container:workspace-save",
+  /** shared workspace: push the current task to running agents (bump revision + log a note) → WorkspaceContext */
+  WorkspaceBroadcast: "container:workspace-broadcast"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
@@ -334,6 +342,12 @@ const api = {
     ipcRenderer.on(IPC.OnPageMetrics, listener);
     return () => ipcRenderer.removeListener(IPC.OnPageMetrics, listener);
   },
+  // top-bar network indicator: shared live sample (rates + latency + online ports) from main.
+  onNetSample: (cb) => {
+    const listener = (_e, sample) => cb(sample);
+    ipcRenderer.on(IPC.OnNetSample, listener);
+    return () => ipcRenderer.removeListener(IPC.OnNetSample, listener);
+  },
   // MCP Client Hub: registry CRUD + connect lifecycle + tool catalog/calls.
   mcpListServers: () => ipcRenderer.invoke(IPC.McpListServers),
   mcpSaveServer: (spec) => ipcRenderer.invoke(IPC.McpSaveServer, spec),
@@ -344,6 +358,10 @@ const api = {
   mcpCallTool: (args) => ipcRenderer.invoke(IPC.McpCallTool, args),
   mcpBridgeInfo: () => ipcRenderer.invoke(IPC.McpBridgeInfo),
   mcpPackagesStatus: () => ipcRenderer.invoke(IPC.McpPackagesStatus),
+  // shared workspace: the one container-owned context every hosted agent reads/writes
+  workspaceGet: () => ipcRenderer.invoke(IPC.WorkspaceGet),
+  workspaceSave: (patch) => ipcRenderer.invoke(IPC.WorkspaceSave, patch),
+  workspaceBroadcast: () => ipcRenderer.invoke(IPC.WorkspaceBroadcast),
   onMcpStateChanged: (cb) => {
     const listener = (_e, states) => cb(states);
     ipcRenderer.on(IPC.OnMcpStateChanged, listener);

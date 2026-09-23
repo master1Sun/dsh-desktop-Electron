@@ -22,7 +22,7 @@ interface HttpProbe {
 }
 
 /** GET a URL, resolving on the first response head (never downloads the body). */
-function probeUrl(url: string, timeoutMs = 8000): Promise<HttpProbe> {
+export function probeUrl(url: string, timeoutMs = 8000): Promise<HttpProbe> {
   return new Promise((resolve) => {
     const start = Date.now()
     const getter = url.startsWith('https:') ? httpsGet : httpGet

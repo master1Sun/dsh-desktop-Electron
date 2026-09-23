@@ -23,6 +23,7 @@ import { resolveDownloadDir } from '../shell/store'
 import { getNodeExePath } from './node-runtime'
 import { BUILTIN_MCP_PKG, resolveMcpPkgEntry } from './mcp-packages'
 import { exportBridgeFiles } from './mcp-bridge'
+import { WORKSPACE_MCP_ID, workspaceMcpSpec } from './workspace-mcp'
 import type {
   McpCallToolArgs,
   McpCallToolResult,
@@ -182,7 +183,7 @@ function persistSpecs(list: McpServerSpec[]): void {
   // Locked rows are owned by code, never the store: dropping them keeps the persisted file
   // free of entries a snapshot/restore could otherwise clobber or duplicate. Seeds DO persist
   // (they are ordinary user rows) — a dismissed tombstone keeps them seeding only once.
-  mcpStore().set('servers', list.filter((s) => !LOCKED_MCP_IDS.has(s.id)) as never)
+  mcpStore().set('servers', list.filter((s) => !isCodeOwnedId(s.id)) as never)
 }
 
 /* ---- curated servers: one locked built-in + a set of editable seeded defaults ---- */
@@ -243,6 +244,22 @@ function curatedSpec(def: CuratedDef): McpServerSpec {
 /** The locked, code-owned rows, rebuilt every reconcile (command/name follow the locale). */
 export function lockedMcpSpecs(): McpServerSpec[] {
   return LOCKED_MCP_DEFS.map(curatedSpec)
+}
+
+/**
+ * Ids the container owns in code and never persists or lets the user edit: the curated locked
+ * rows plus the shared-context server. The workspace row is kept out of LOCKED_MCP_IDS on purpose
+ * — that set drives the curated *npm* provisioning (CURATED_MCP_IDS), which a container script
+ * must not join.
+ */
+function isCodeOwnedId(id: string): boolean {
+  return LOCKED_MCP_IDS.has(id) || id === WORKSPACE_MCP_ID
+}
+
+/** Code-owned rows handed to the hub each reconcile: curated locked + the shared-context server. */
+function codeOwnedSpecs(): McpServerSpec[] {
+  const ws = workspaceMcpSpec()
+  return ws ? [...lockedMcpSpecs(), ws] : lockedMcpSpecs()
 }
 
 /** Still the untouched curated invocation? (a user who edited command/args owns it outright). */
@@ -309,12 +326,17 @@ function reconcile(): void {
   // Locked rows lead and are authoritative; a user row sharing a locked id is masked (the
   // locked one wins). Seeds are ordinary persisted rows, so they ride in via loadSpecs().
   const specs = [
-    ...lockedMcpSpecs(),
-    ...loadSpecs().filter((s) => !LOCKED_MCP_IDS.has(s.id))
+    ...codeOwnedSpecs(),
+    ...loadSpecs().filter((s) => !isCodeOwnedId(s.id))
   ]
   const alive = new Set(specs.map((s) => s.id))
   for (const id of [...entries.keys()]) {
-    if (!alive.has(id)) void disconnect(id).catch(() => undefined)
+    if (!alive.has(id)) {
+      // The spec is gone (e.g. the shared-workspace switch was turned off): drop the row entirely
+      // so a stale stopped entry does not linger in the snapshot.
+      void disconnect(id).catch(() => undefined)
+      entries.delete(id)
+    }
   }
   for (const spec of specs) {
     const existing = entries.get(spec.id)
@@ -342,7 +364,7 @@ export function refreshBuiltinPackages(): void {
 export async function saveServer(raw: unknown): Promise<McpServerState[]> {
   const { spec, errors } = sanitizeMcpSpec(raw)
   if (!spec) throw new Error(errors.join('; '))
-  if (LOCKED_MCP_IDS.has(spec.id)) throw new Error(m('mcp.errBuiltinEdit'))
+  if (isCodeOwnedId(spec.id)) throw new Error(m('mcp.errBuiltinEdit'))
   const specs = loadSpecs()
   const idx = specs.findIndex((s) => s.id === spec.id)
   if (idx >= 0) specs[idx] = spec
@@ -358,7 +380,7 @@ export async function saveServer(raw: unknown): Promise<McpServerState[]> {
 }
 
 export async function removeServer(id: string): Promise<McpServerState[]> {
-  if (LOCKED_MCP_IDS.has(id)) throw new Error(m('mcp.errBuiltinRemove'))
+  if (isCodeOwnedId(id)) throw new Error(m('mcp.errBuiltinRemove'))
   await disconnect(id).catch(() => undefined)
   entries.delete(id)
   persistSpecs(loadSpecs().filter((s) => s.id !== id))

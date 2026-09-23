@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { t } from '../i18n'
 import { reduceMotion } from '../stores/settings'
+import { usePagesStore } from '../stores/pages'
+import type { IpcResult, SystemInfo } from '@shared/types'
 
 /**
  * 默认工作台 = 内置插件市场静态页（原 pages/dsh-plugin-market 的 node server 版本已移除）。
@@ -125,6 +127,110 @@ function openPanel(kind: string): void {
   emit('open-panel', kind)
 }
 
+/* ---- live system + program status readout for the hero terminal ----
+ * Pulls a real SystemInfo snapshot from the main process (re-polled on a timer so
+ * uptime/memory stay current) and joins it with the shared pages store for the
+ * running/total page counters. Degrades to a dimmed placeholder until the first
+ * snapshot lands — and in plain-browser dev / unit tests where the bridge is absent. */
+const pagesStore = usePagesStore()
+const sysInfo = ref<SystemInfo | null>(null)
+let sysTimer: number | undefined
+
+async function loadSysInfo(): Promise<void> {
+  try {
+    // Optional-call chain: a missing/older bridge method short-circuits to undefined, never rejects.
+    const res = (await window.container?.getSystemInfo?.()) as IpcResult<SystemInfo> | undefined
+    if (res?.ok && res.data) sysInfo.value = res.data
+  } catch {
+    /* keep the last snapshot; a missing bridge just leaves the placeholder */
+  }
+}
+
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
+}
+function fmtDuration(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (d) return `${d}d ${h}h ${m}m`
+  if (h) return `${h}h ${m}m`
+  return `${m}m ${s % 60}s`
+}
+
+interface StatusLine {
+  label: string
+  value: string
+}
+/* The container ships its own standalone Node (resources/node) that hosts every page —
+ * distinct from the Node embedded in the Electron main process (SystemInfo.node). The
+ * hero readout reports the *built-in* one, surfaced by the main process via getNodeInfo
+ * and kept on the shared pages store. Falls back to an em dash until it resolves. */
+const builtinNode = computed(() => {
+  const v = pagesStore.nodeInfo.version
+  return v ? v.replace(/^v/i, '') : '—'
+})
+const statusLines = computed<StatusLine[]>(() => {
+  const si = sysInfo.value
+  if (!si) return [{ label: '…', value: t('market.sysLoading') }]
+  const used = Math.max(0, si.totalMem - si.freeMem)
+  return [
+    {
+      label: t('market.sysLblOs'),
+      value: t('market.sysOsVal', { type: si.osType, release: si.osRelease, arch: si.arch })
+    },
+    {
+      label: t('market.sysLblHw'),
+      value: t('market.sysHwVal', {
+        cores: si.cpuCores,
+        used: fmtBytes(used),
+        total: fmtBytes(si.totalMem)
+      })
+    },
+    {
+      label: t('market.sysLblRt'),
+      value: t('market.sysRtVal', {
+        app: si.appVersion,
+        electron: si.electron,
+        node: builtinNode.value,
+        chrome: si.chrome
+      })
+    },
+    {
+      label: t('market.sysLblConsole'),
+      value: t('market.sysConsoleVal', {
+        modules: consoleModules.value.length,
+        running: pagesStore.runningPages.length,
+        total: pagesStore.pages.length
+      })
+    },
+    {
+      label: t('market.sysLblUptime'),
+      value: t('market.sysUptimeVal', {
+        app: fmtDuration(si.appUptimeSec),
+        os: fmtDuration(si.osUptimeSec)
+      })
+    }
+  ]
+})
+
+onMounted(() => {
+  void loadSysInfo()
+  sysTimer = window.setInterval(() => void loadSysInfo(), 5000)
+  // The built-in Node version rides on the pages store (refreshed at app boot). Land it here
+  // too so the hero readout is correct even when this view mounts before that boot refresh.
+  if (!pagesStore.nodeInfoLoaded) void pagesStore.refresh().catch(() => undefined)
+})
+
 /* ---- per-kind neon theme + live status for the console module cards ----
  * statusOf() is a placeholder mapping; wire it to real runtime config state
  * (e.g. pages installed / dsh & openclaw configured) when the host exposes it. */
@@ -224,6 +330,7 @@ onBeforeUnmount(() => {
   io = null
   detachTilt()
   window.clearTimeout(copyTimer)
+  if (sysTimer) window.clearInterval(sysTimer)
 })
 </script>
 
@@ -255,10 +362,15 @@ onBeforeUnmount(() => {
             <div class="term-body">
               <div>
                 <span class="prompt">$</span>
-                <span class="typed">dsh</span>
+                <span class="typed">{{ t('market.termCmd') }}</span>
                 <span class="caret" />
               </div>
-              <div class="out-line">{{ t('market.termOut') }}</div>
+              <div class="status-readout">
+                <div v-for="line in statusLines" :key="line.label" class="status-row">
+                  <span class="s-label">{{ line.label }}</span>
+                  <span class="s-value">{{ line.value }}</span>
+                </div>
+              </div>
               <span class="ok-badge">&#10003; {{ t('market.okBadge') }}</span>
             </div>
           </div>
@@ -644,6 +756,33 @@ h1.title {
 }
 .out-line {
   color: var(--mp-muted);
+}
+/* ── live status readout (system + program) ──────── */
+.status-readout {
+  margin: 6px 0 2px;
+  display: grid;
+  gap: 3px;
+}
+.status-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.s-label {
+  flex: 0 0 auto;
+  min-width: 5em;
+  color: var(--mp-accent-text);
+}
+.s-label::after {
+  content: ':';
+  color: var(--mp-muted);
+}
+.s-value {
+  color: var(--mp-tagline);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ok-badge {
   display: inline-block;

@@ -23,6 +23,13 @@
      blur 0↔60 indistinguishable). rgb channels + a plain alpha keep the calc simple. */
   --glass-tint-rgb: 255 255 255;
   --glass-tint-a: clamp(0.6, calc(0.85 - var(--glass-blur-n, 30) / 150), 0.85);
+  /* Shared translucent fills for in-panel surfaces, so they track the 毛玻璃 slider
+     (which drives --glass-tint-a) instead of sitting as an opaque --surface block.
+     Resolved lazily against the theme-flipped --glass-tint-rgb, so one definition
+     serves light and dark. --glass-well = content wells (log/chart/list/box); the
+     lighter --glass-chip = inline code/kbd tags and small value chips. */
+  --glass-well: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.5));
+  --glass-chip: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.38));
   --bg: #f3f5fa;
   --surface: #ffffff;
   --surface-2: #f7f9fc;

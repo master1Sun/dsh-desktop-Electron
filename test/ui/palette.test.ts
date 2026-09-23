@@ -61,7 +61,7 @@ function makeContainerMock(): Record<string, unknown> {
     },
     setPagePort: () => Promise.resolve(ok(true)),
     checkUpdates: () => Promise.resolve(ok([])),
-    getEnvRoot: () => Promise.resolve(ok({ envRoot: '/env', installDir: '/', custom: false })),
+    getEnvRoot: () => Promise.resolve(ok({ envRoot: '/env', installDir: '/', home: '/' })),
     getNativeTheme: () => Promise.resolve(ok(true)),
     setNativeTheme: () => Promise.resolve(ok(true)),
     onNativeTheme: () => () => undefined,

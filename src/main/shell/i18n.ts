@@ -70,6 +70,7 @@ const zh: Dict = {
   'mcp.builtin.playwright.name': '浏览器自动化 Playwright',
   'mcp.builtin.github.name': 'GitHub（需密钥）',
   'mcp.builtin.brave-search.name': 'Brave 搜索（需密钥）',
+  'mcp.builtin.dsh-workspace.name': '共享上下文 Workspace',
 
   'download.doneTitle': '下载完成',
   'download.doneBody': '{name} 已保存到 {dir}',
@@ -147,7 +148,8 @@ const zh: Dict = {
   'dsh.exitCode': 'dsh 退出码 {code}',
   'dsh.pageExists': 'pages/{id} 已存在',
   'dsh.homeLabel': 'DSH 配置目录',
-  'dsh.homeDesc': '留空即使用 dsh CLI 的默认目录 ~/.dsh，与终端里的 dsh 共用同一套 profile',
+  'dsh.homeDesc':
+    '默认使用独立目录（容器独占，环境根目录下的 .dsh 子目录）；若未手动改动且 ~/.dsh 已有登录会自动沿用以免丢失；选系统通用目录则与终端共用同一套 profile（~/.dsh）',
   'dsh.profilePageDesc':
     '由容器管理的 @deepseek-ai/dsh profile「{profile}」，插件在本机 userData 的 profile 目录内管理',
   'dsh.invalidSpec': '非法包名/地址: {spec}',
@@ -167,7 +169,8 @@ const zh: Dict = {
   'openclaw.versionFail': 'openclaw --version 退出码 {code}',
   'openclaw.unavailable': 'openclaw 不可用：{err}',
   'openclaw.homeLabel': 'OPENCLAW 配置目录',
-  'openclaw.homeDesc': '留空即使用 openclaw CLI 的默认目录 ~/.openclaw，与终端共用同一套配置',
+  'openclaw.homeDesc':
+    '默认使用独立目录（容器独占，环境根目录下的 .openclaw 子目录）；若未手动改动且 ~/.openclaw 已有配置会自动沿用以免丢失；选系统通用目录则与终端共用同一套配置（~/.openclaw）',
   'openclaw.pageDesc':
     '由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置目录默认 ~/.openclaw',
   'openclaw.configUnreadable': '无法解析 openclaw 配置（{path}），已中止以免覆盖：{err}',
@@ -315,6 +318,7 @@ const en: Dict = {
   'mcp.builtin.playwright.name': 'Playwright (browser automation)',
   'mcp.builtin.github.name': 'GitHub (needs token)',
   'mcp.builtin.brave-search.name': 'Brave Search (needs key)',
+  'mcp.builtin.dsh-workspace.name': 'Shared context (Workspace)',
 
   'download.doneTitle': 'Download complete',
   'download.doneBody': '{name} saved to {dir}',
@@ -402,7 +406,8 @@ const en: Dict = {
   'dsh.exitCode': 'dsh exited with code {code}',
   'dsh.pageExists': 'pages/{id} already exists',
   'dsh.homeLabel': 'DSH config directory',
-  'dsh.homeDesc': "Leave empty to use dsh's default ~/.dsh — the same profile store the CLI uses",
+  'dsh.homeDesc':
+    'Uses a container-owned .dsh subfolder of the env root by default; until you change it, an existing ~/.dsh login is kept automatically so nothing is lost. Pick the system-common folder to share the CLI profile store (~/.dsh)',
   'dsh.profilePageDesc':
     'Container-managed @deepseek-ai/dsh profile "{profile}"; plugins are managed in this machine’s userData profile directory',
   'dsh.invalidSpec': 'Invalid package name / URL: {spec}',
@@ -423,7 +428,7 @@ const en: Dict = {
   'openclaw.unavailable': 'openclaw is unavailable: {err}',
   'openclaw.homeLabel': 'OPENCLAW config dir',
   'openclaw.homeDesc':
-    'Empty uses openclaw’s default ~/.openclaw — the same config store the CLI uses',
+    'Uses a container-owned .openclaw subfolder of the env root by default; until you change it, an existing ~/.openclaw config is kept automatically so nothing is lost. Pick the system-common folder to share the CLI config store (~/.openclaw)',
   'openclaw.pageDesc':
     'Container-managed openclaw gateway (bundled latest); the main window embeds its Control UI; the config dir defaults to ~/.openclaw',
   'openclaw.configUnreadable':

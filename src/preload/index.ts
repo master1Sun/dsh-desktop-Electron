@@ -17,8 +17,10 @@ import {
   type UpdateCheckResult,
   type UpdateProgress,
   type LogLineEvent,
+  type NetSample,
   type PageMetrics,
-  type WebDataClearArgs
+  type WebDataClearArgs,
+  type WorkspaceNote
 } from '../shared/types'
 
 const api = {
@@ -221,6 +223,12 @@ const api = {
     ipcRenderer.on(IPC.OnPageMetrics, listener)
     return () => ipcRenderer.removeListener(IPC.OnPageMetrics, listener)
   },
+  // top-bar network indicator: shared live sample (rates + latency + online ports) from main.
+  onNetSample: (cb: (sample: NetSample) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, sample: NetSample): void => cb(sample)
+    ipcRenderer.on(IPC.OnNetSample, listener)
+    return () => ipcRenderer.removeListener(IPC.OnNetSample, listener)
+  },
   // MCP Client Hub: registry CRUD + connect lifecycle + tool catalog/calls.
   mcpListServers: () => ipcRenderer.invoke(IPC.McpListServers),
   mcpSaveServer: (spec: McpServerSpec) => ipcRenderer.invoke(IPC.McpSaveServer, spec),
@@ -231,6 +239,11 @@ const api = {
   mcpCallTool: (args: McpCallToolArgs) => ipcRenderer.invoke(IPC.McpCallTool, args),
   mcpBridgeInfo: () => ipcRenderer.invoke(IPC.McpBridgeInfo),
   mcpPackagesStatus: () => ipcRenderer.invoke(IPC.McpPackagesStatus),
+  // shared workspace: the one container-owned context every hosted agent reads/writes
+  workspaceGet: () => ipcRenderer.invoke(IPC.WorkspaceGet),
+  workspaceSave: (patch: { task?: string; notes?: WorkspaceNote[] }) =>
+    ipcRenderer.invoke(IPC.WorkspaceSave, patch),
+  workspaceBroadcast: () => ipcRenderer.invoke(IPC.WorkspaceBroadcast),
   onMcpStateChanged: (cb: (states: unknown[]) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, states: unknown[]): void => cb(states)
     ipcRenderer.on(IPC.OnMcpStateChanged, listener)

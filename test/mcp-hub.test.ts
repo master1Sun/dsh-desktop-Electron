@@ -127,6 +127,19 @@ describe('curated MCP servers (one locked + seeded editable defaults)', () => {
   })
 })
 
+describe('shared-context server row (code-owned, not a curated npm package)', () => {
+  it('is listed as a builtin row while the switch is on, and cannot be edited or removed', async () => {
+    const ws = listServers().find((s) => s.spec.id === 'dsh-workspace')
+    expect(ws, 'dsh-workspace should be listed while sharedWorkspace is on').toBeTruthy()
+    expect(ws!.spec.builtin).toBe(true)
+    await expect(saveServer({ id: 'dsh-workspace', command: 'node' })).rejects.toThrow(/内置|built-in/)
+    await expect(removeServer('dsh-workspace')).rejects.toThrow(/内置|built-in/)
+    // it is code-owned but NOT part of the curated npm set (that would trigger a package download)
+    expect(LOCKED_MCP_IDS.has('dsh-workspace')).toBe(false)
+    expect(CURATED_MCP_IDS.has('dsh-workspace')).toBe(false)
+  })
+})
+
 describe('isValidMcpId', () => {
   it('accepts slug-safe ids', () => {
     for (const id of ['fs', 'file-system', 'server_1', 'A2']) {

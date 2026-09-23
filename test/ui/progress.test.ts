@@ -41,7 +41,7 @@ function makeContainerMock(): Record<string, unknown> {
         })
       ),
     updateSettings: (partial: Record<string, unknown>) => Promise.resolve(ok(partial)),
-    getEnvRoot: () => Promise.resolve(ok({ envRoot: '/env', installDir: '/', custom: false })),
+    getEnvRoot: () => Promise.resolve(ok({ envRoot: '/env', installDir: '/', home: '/' })),
     getNativeTheme: () => Promise.resolve(ok(false)),
     setNativeTheme: () => Promise.resolve(ok(true)),
     onNativeTheme: () => () => undefined,
@@ -100,19 +100,27 @@ describe('window-level top progress bar', () => {
     expect(document.querySelector('.topbar-progress')).toBeNull()
   })
 
-  it('shows a single task inline and drops it on done', async () => {
+  it('shows a slim bar for a single task and its detail on hover', async () => {
     await mountApp()
     listeners.node?.({ name: 'Node', phase: 'fetch', percent: 40, message: 'downloading' })
     await settle()
     const bar = document.querySelector('.topbar-progress')
     expect(bar).not.toBeNull()
-    expect(bar?.textContent).toContain('40%')
+    // Collapsed: only the bar — no inline percentage text.
+    expect(bar?.textContent).not.toContain('%')
+    // The detail card is hover-only.
+    expect(document.querySelector('.tb-drop')).toBeNull()
+    bar?.dispatchEvent(new Event('mouseenter'))
+    await settle()
+    const card = document.querySelector('.tb-card')
+    expect(card?.textContent).toContain('40%')
+    expect(card?.textContent).toContain('Node')
     listeners.node?.({ name: 'Node', phase: 'done' })
     await settle()
     expect(document.querySelector('.topbar-progress')).toBeNull()
   })
 
-  it('collapses multiple tasks into a summary with a hover dropdown', async () => {
+  it('collapses multiple tasks into one bar with a hover card list', async () => {
     await mountApp()
     listeners.node?.({ name: 'Node', phase: 'fetch', percent: 30, message: 'node' })
     listeners.update?.({ name: '桌面控制台', phase: 'extract', percent: 60, message: 'asar' })
@@ -120,14 +128,14 @@ describe('window-level top progress bar', () => {
     await settle()
     const bar = document.querySelector('.topbar-progress')
     expect(bar).not.toBeNull()
-    expect(bar?.textContent).toContain('3')
-    // No dropdown until hover.
+    // Collapsed: a single aggregate bar, no per-task text until hover.
+    expect(bar?.textContent).not.toContain('%')
     expect(document.querySelector('.tb-drop')).toBeNull()
     bar?.dispatchEvent(new Event('mouseenter'))
     await settle()
     const drop = document.querySelector('.tb-drop')
     expect(drop).not.toBeNull()
-    expect(drop?.querySelectorAll('.tb-item').length).toBe(3)
+    expect(drop?.querySelectorAll('.tb-card').length).toBe(3)
   })
 
   it('marks an indeterminate step (no percentage) with a flowing bar', async () => {

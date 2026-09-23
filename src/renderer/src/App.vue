@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import MenuBar, { type PanelKind } from './components/MenuBar.vue'
+import MenuBar, { type PanelKind } from '@renderer/components/layout/classic/MenuBar.vue'
 import {
   appPanelKey,
   DEFAULT_KEYBINDINGS,
@@ -11,11 +11,12 @@ import {
   type KeybindingAction
 } from '@shared/types'
 import { formatAccelerator, matchesAccelerator } from '@shared/accel'
-import MenuPanelContent from './components/MenuPanelContent.vue'
-import CommandPalette, { type Command } from './components/CommandPalette.vue'
-import TerminalDrawer from './components/TerminalDrawer.vue'
-import CliTerminalView from './components/CliTerminalView.vue'
-import SetupGate from './components/SetupGate.vue'
+import MenuPanelContent from '@renderer/components/panels/MenuPanelContent.vue'
+import QQShell from '@renderer/components/layout/qq/QQShell.vue'
+import CommandPalette, { type Command } from '@renderer/components/shell/CommandPalette.vue'
+import TerminalDrawer from '@renderer/components/terminal/TerminalDrawer.vue'
+import CliTerminalView from '@renderer/components/terminal/CliTerminalView.vue'
+import SetupGate from '@renderer/components/shell/SetupGate.vue'
 import HomeView from './views/HomeView.vue'
 import { usePagesStore, type PageState } from './stores/pages'
 import { useSettingsStore, applyReduceMotion } from './stores/settings'
@@ -37,6 +38,14 @@ const dualStore = useDualStore()
 
 /** Panels float over the workbench instead of replacing it, so an embedded page never unmounts. */
 const activePanel = ref<string | null>(null)
+
+/* ---- shell layout mode -------------------------------------------------------------
+   'classic' (default) keeps the top menu bar + centered floating panels; 'im' swaps the
+   menu bar for a compact title bar and moves the panels into a QQ-like left rail + docked
+   sidebar (QQShell). It is a layout switch only — the frosted surfaces, theme and aurora
+   are untouched. Driven off the reactive settings so the 设置 ▸ 界面视图 radio and the
+   Ctrl+K command flip it live; popout windows always render classic. */
+const isIm = computed(() => !isPopout.value && settingsStore.settings.layoutMode === 'im')
 
 /**
  * Vertical tab a panel should open on, set by a palette command (「查看事件动态」→ help/events).
@@ -120,14 +129,18 @@ function openTerminalDrawer(): void {
   else void store.start('container', t('terminal.rootTitle')).catch(() => undefined)
 }
 
-const PANEL_COMMANDS: { kind: PanelKind; label: string }[] = [
-  { kind: 'pages', label: t('palette.panelPages') },
-  { kind: 'external', label: t('palette.panelExternal') },
-  { kind: 'dsh', label: t('palette.panelDsh') },
-  { kind: 'openclaw', label: t('palette.panelOpenclaw') },
-  { kind: 'mcp', label: t('palette.panelMcp') },
-  { kind: 'settings', label: t('palette.panelSettings') },
-  { kind: 'help', label: t('palette.panelHelp') }
+/* Store i18n KEYS, not resolved labels: `t()` here would run once at module load and freeze
+   whichever language was active then (the palette's Chinese items under an English header).
+   The label is resolved inside the `commands` computed so it tracks the reactive locale. */
+const PANEL_COMMANDS: { kind: PanelKind; key: string }[] = [
+  { kind: 'pages', key: 'palette.panelPages' },
+  { kind: 'external', key: 'palette.panelExternal' },
+  { kind: 'dsh', key: 'palette.panelDsh' },
+  { kind: 'openclaw', key: 'palette.panelOpenclaw' },
+  { kind: 'mcp', key: 'palette.panelMcp' },
+  { kind: 'workspace', key: 'palette.panelWorkspace' },
+  { kind: 'settings', key: 'palette.panelSettings' },
+  { kind: 'help', key: 'palette.panelHelp' }
 ]
 
 /**
@@ -218,6 +231,16 @@ const commands = computed<Command[]>(() => {
       title: t('palette.actTheme'),
       group: t('palette.groupActions'),
       run: () => quickThemeToggle()
+    },
+    {
+      id: 'act-layout',
+      title: t('palette.actLayout'),
+      hint: t('palette.actLayoutHint', {
+        mode: isIm.value ? t('settings.layoutIm') : t('settings.layoutClassic')
+      }),
+      group: t('palette.groupActions'),
+      keywords: 'layout 布局 侧边栏 sidebar im classic',
+      run: () => toggleLayoutMode()
     },
     {
       id: 'act-detach',
@@ -320,7 +343,7 @@ const commands = computed<Command[]>(() => {
   for (const panel of PANEL_COMMANDS) {
     list.push({
       id: `panel-${panel.kind}`,
-      title: panel.label,
+      title: t(panel.key),
       group: t('palette.groupPanels'),
       run: () => (activePanel.value = panel.kind)
     })
@@ -332,8 +355,9 @@ const commands = computed<Command[]>(() => {
 const activePageId = ref<string | null>(null)
 /** One mounted <webview> per opened page; switching only flips which one is visible, so a
     guest that is already up (openclaw's one-time bootstrap token, dsh terminals) is never
-    reloaded by a page switch. */
-const webviewSessions = ref<{ id: string; url: string }[]>([])
+    reloaded by a page switch. `hosted` marks a container-managed page (vs an external preview),
+    which the first-open repaint uses to scope its one-shot reload to pages that can black out. */
+const webviewSessions = ref<{ id: string; url: string; hosted: boolean }[]>([])
 const activeSessionId = ref<string | null>(null)
 /** URL of the session on screen; '' while the market / a CLI terminal owns the surface. */
 const webviewSrc = computed(
@@ -350,8 +374,7 @@ const externalView = ref(false)
 const pageUrl = (p: PageState): string => p.launchUrl || p.url || ''
 
 /** The address a window should host for a page: an external page keeps it in `externalUrl`. */
-const popoutUrl = (p: PageState): string =>
-  p.external ? p.externalUrl || pageUrl(p) : pageUrl(p)
+const popoutUrl = (p: PageState): string => (p.external ? p.externalUrl || pageUrl(p) : pageUrl(p))
 
 /**
  * Pages the dual-pane secondary screen can show: every running web page (with a live URL)
@@ -555,7 +578,7 @@ async function startPage(id: string): Promise<void> {
  * token / dsh terminal alive across switches.
  */
 const stripReloadHash = (u: string): string => u.replace(/#container-reload=\d+/, '')
-function upsertSession(id: string, url: string): void {
+function upsertSession(id: string, url: string, hosted: boolean): void {
   const clean = stripReloadHash(url)
   const existing = webviewSessions.value.find((s) => s.id === id)
   if (existing) {
@@ -574,7 +597,7 @@ function upsertSession(id: string, url: string): void {
     webviewLoading.value = true
     return
   }
-  webviewSessions.value.push({ id, url: clean })
+  webviewSessions.value.push({ id, url: clean, hosted })
   webviewLoading.value = true
 }
 
@@ -585,7 +608,7 @@ function showInWebview(page: PageState): void {
     activeSessionId.value = null
     return
   }
-  upsertSession(page.id, pageUrl(page))
+  upsertSession(page.id, pageUrl(page), true)
   activeSessionId.value = page.id
   // Switching a page deliberately does NOT touch the persisted 默认打开页面 setting —
   // that is only changed from 设置, and every launch loads exactly what is configured there.
@@ -688,7 +711,7 @@ function previewExternalUrl(url: string, siteId?: string, embedOnly = false): vo
   externalView.value = true
   activePageId.value = siteId ?? null
   const sid = siteId || `ext:${url}`
-  upsertSession(sid, url)
+  upsertSession(sid, url, false)
   activeSessionId.value = sid
   // Displaying an external address is transient too — it never rewrites the default view.
 }
@@ -884,6 +907,13 @@ function quickThemeToggle(): void {
   userPinnedTheme = true
   applyTheme(next)
   settingsStore.patch({ theme: next }).catch(() => undefined)
+}
+
+/** Flip the shell layout (classic ⇄ IM) and persist it; the change is instant and reversible. */
+function toggleLayoutMode(): void {
+  const next = settingsStore.settings.layoutMode === 'im' ? 'classic' : 'im'
+  activePanel.value = null
+  settingsStore.patch({ layoutMode: next }).catch(() => undefined)
 }
 
 async function toggleDevTools(): Promise<void> {
@@ -1244,7 +1274,7 @@ const showNav = computed(() =>
 
 <template>
   <el-config-provider :locale="currentEpLocale" :message="messageConfig">
-    <div class="shell">
+    <div class="shell" :class="{ 'layout-im': isIm }">
       <!-- Ambient aurora: fixed, non-interactive; glass chrome bleeds it through. -->
       <div class="aurora" aria-hidden="true">
         <span class="blob b1" />
@@ -1252,11 +1282,18 @@ const showNav = computed(() =>
         <span class="blob b3" />
       </div>
 
+      <!-- Window-edge flowing light: a full-perimeter base ring plus a bright comet that traces
+           the whole viewport border at constant speed. SVG stroke-dash (not a conic sweep) so the
+           short vertical edges are covered just as evenly as the long ones (see `.win-edge` in glass.css). -->
+      <svg class="win-edge" aria-hidden="true">
+        <rect class="we-base" />
+        <rect class="we-comet" pathLength="100" />
+      </svg>
+
       <MenuBar
         v-if="!isPopout"
         :current="activePanel"
-        :running-count="runningCount"
-        :total-count="pageContainerCount"
+        :im-mode="isIm"
         :outdated-count="updatesStore.outdated.length"
         :is-dark="isDark"
         :theme-mode="themeMode"
@@ -1344,6 +1381,15 @@ const showNav = computed(() =>
             :total-count="pageContainerCount"
           />
         </template>
+        <template #workspace>
+          <MenuPanelContent
+            v-if="activePanel === 'workspace'"
+            panel="workspace"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pageContainerCount"
+          />
+        </template>
         <template #app="{ pageId }">
           <MenuPanelContent
             v-if="pageId && activePanel === appPanelKey(pageId)"
@@ -1408,7 +1454,15 @@ const showNav = computed(() =>
               />
             </svg>
             <svg v-else width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-              <rect x="1" y="3" width="6" height="6" fill="none" stroke="currentColor" stroke-width="1.2" />
+              <rect
+                x="1"
+                y="3"
+                width="6"
+                height="6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+              />
               <path d="M3 3 V1 H9 V7 H7" fill="none" stroke="currentColor" stroke-width="1.2" />
             </svg>
           </button>
@@ -1425,34 +1479,60 @@ const showNav = computed(() =>
         </div>
       </div>
 
-      <main class="content">
-        <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
-        <CliTerminalView
-          v-if="activeTerminalPage"
-          ref="cliTermRef"
-          :page="activeTerminalPage"
-          @exit="backToWorkbench"
+      <div class="shell-body">
+        <!-- IM layout: the left rail + docked sidebar replace the menu bar's group triggers and
+             the centered floating panel. It shares `activePanel` with the compact title bar, so a
+             rail click and the switcher stay in sync. Classic mode renders no rail. -->
+        <QQShell
+          v-if="isIm"
+          :pages="pagesStore.pages"
+          :current="activePanel"
+          :runtime="pagesStore.nodeInfo"
+          :running-count="runningCount"
+          :total-count="pageContainerCount"
+          :initial-tab="panelTab"
+          :outdated-count="updatesStore.outdated.length"
+          :is-dark="isDark"
+          @open-panel="activePanel = $event"
+          @toggle-theme="quickThemeToggle"
+          @open-palette="paletteOpen = true"
+          @apply-theme="applyTheme"
+          @preview-site="previewExternalUrl"
+          @check-updates="updatesStore.check(true)"
+          @open-page="openPage"
+          @open-terminal="openPage"
+          @close="activePanel = null"
         />
-        <HomeView
-          ref="homeRef"
-          :sessions="webviewSessions"
-          :active-id="activeSessionId"
-          :loading="webviewLoading"
-          :starting-text="startingText"
-          :phase-text="bootPhaseText"
-          :logs="bootLogs"
-          :slow="bootSlow"
-          :elapsed-text="bootElapsedText"
-          :market-active="!isPopout && !webviewActive && !activeTerminalPage"
-          :external-view="externalView"
-          :secondary-choices="secondaryChoices"
-          @nav-state="onNavState"
-          @guest-stop-loading="webviewLoading = false"
-          @install-pages="activePanel = 'pages'"
-          @open-panel="(k: string) => (activePanel = k)"
-          @cancel-start="cancelStart"
-        />
-      </main>
+        <main class="content">
+          <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
+          <CliTerminalView
+            v-if="activeTerminalPage"
+            ref="cliTermRef"
+            :page="activeTerminalPage"
+            @exit="backToWorkbench"
+          />
+          <HomeView
+            ref="homeRef"
+            :sessions="webviewSessions"
+            :active-id="activeSessionId"
+            :loading="webviewLoading"
+            :repaint-hosted-first="settingsStore.settings.persistentServices === true"
+            :starting-text="startingText"
+            :phase-text="bootPhaseText"
+            :logs="bootLogs"
+            :slow="bootSlow"
+            :elapsed-text="bootElapsedText"
+            :market-active="!isPopout && !webviewActive && !activeTerminalPage"
+            :external-view="externalView"
+            :secondary-choices="secondaryChoices"
+            @nav-state="onNavState"
+            @guest-stop-loading="webviewLoading = false"
+            @install-pages="activePanel = 'pages'"
+            @open-panel="(k: string) => (activePanel = k)"
+            @cancel-start="cancelStart"
+          />
+        </main>
+      </div>
 
       <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
          v-show, not v-if: unmounting drops the global onPtyData subscription, which
@@ -1494,6 +1574,18 @@ const showNav = computed(() =>
      tint the embedded page; glass chrome (menubar / panels) still sits above it. */
   position: relative;
   z-index: 1;
+}
+
+/* Body row under the title bar. Classic mode: only .content (fills width). IM mode: the QQShell
+   rail + sidebar dock to the left and .content takes the rest, so the webview reflows narrower. */
+.shell-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.shell-body > .content {
+  min-width: 0;
 }
 
 /* The embedded page owns the whole content area — flush to every window edge. */

@@ -1,6 +1,6 @@
 import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, BrowserWindow, nativeImage, Tray, Menu, dialog, session, screen, ipcMain as ipcMain$1, webContents } from "electron";
 import * as fs from "node:fs";
-import fs__default, { existsSync, mkdirSync, accessSync, constants as constants$1, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, unlinkSync, writeFileSync as writeFileSync$1, rmSync, createWriteStream, cpSync, promises, copyFileSync } from "node:fs";
+import fs__default, { existsSync, mkdirSync, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, unlinkSync, writeFileSync as writeFileSync$1, rmSync, createWriteStream, cpSync, promises, copyFileSync } from "node:fs";
 import path, { join, delimiter, extname, basename, dirname, sep } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import { EventEmitter } from "node:events";
@@ -21,6 +21,7 @@ import { pipeline } from "node:stream/promises";
 import { copyFile, readdir, stat } from "node:fs/promises";
 import { simpleGit } from "simple-git";
 import { join as join$1 } from "path";
+import { createSocket } from "node:dgram";
 import * as pty from "node-pty";
 import __cjs_mod__ from "node:module";
 const __filename = import.meta.filename;
@@ -174,6 +175,8 @@ const IPC = {
   GetNetworkStats: "container:get-network-stats",
   /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
   OnPageMetrics: "container:page-metrics",
+  /** broadcast: top-bar live network sample (NetSample) — rates + latency + online ports */
+  OnNetSample: "container:net-sample",
   /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
   OnLogLine: "container:log-line",
   /** #26: probe every candidate npm registry in parallel → RegistryProbe[] */
@@ -214,7 +217,13 @@ const IPC = {
   /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
   McpBridgeInfo: "container:mcp-bridge-info",
   /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
-  McpPackagesStatus: "container:mcp-packages-status"
+  McpPackagesStatus: "container:mcp-packages-status",
+  /** shared workspace: read the container-owned context + its locations → WorkspaceInfo */
+  WorkspaceGet: "container:workspace-get",
+  /** shared workspace: persist a partial edit ({ task?, notes? }) → WorkspaceContext */
+  WorkspaceSave: "container:workspace-save",
+  /** shared workspace: push the current task to running agents (bump revision + log a note) → WorkspaceContext */
+  WorkspaceBroadcast: "container:workspace-broadcast"
 };
 let cached = null;
 function invalidateNodeRuntimeCache() {
@@ -11491,6 +11500,12 @@ class ElectronStore extends Conf {
     }
   }
 }
+const ENV_INSTALL = "@install";
+const ENV_SYSTEM = "@system";
+function envDirName(key, pageId) {
+  const m2 = /^(.+?)_HOME$/i.exec((key || "").trim());
+  return `.${(m2?.[1] || pageId || "page").toLowerCase()}`;
+}
 const DEFAULTS = {
   defaultView: { kind: "none" },
   openExternalIn: "embedded",
@@ -11508,10 +11523,14 @@ const DEFAULTS = {
   theme: "auto",
   // UI display language; defaults to Chinese
   locale: "zh",
-  // empty = follow the install directory (<installDir>/env); see resolveEnvRoot()
+  // env root is no longer user-configurable: fixed at userData/env (the system-common spot).
+  // The field only survives in old settings files; resolveEnvRoot() ignores it. '@system' was
+  // also a persisted choice there and resolves to the same place, so nothing needs migrating.
   envRoot: "",
   dshHome: "",
   openclawHome: "",
+  // empty = userData/workspace; the shared context every hosted agent reads/writes
+  workspaceRoot: "",
   // empty = the OS Downloads folder; embedded-page downloads save there (see downloads.ts)
   downloadDir: "",
   pageEnvs: {},
@@ -11551,7 +11570,9 @@ const DEFAULTS = {
   npmRegistry: "",
   // #26: tray defaults mirror what the menu/badge did before they were configurable.
   trayPageEntries: "all",
-  trayBadge: "all"
+  trayBadge: "all",
+  // on by default: hosted agents get the shared workspace pointers at spawn (see runtime/workspace.ts)
+  sharedWorkspace: true
 };
 let store$1 = null;
 function getStore() {
@@ -11612,22 +11633,7 @@ function resolveInstallDir() {
   }
   return resolveProjectDir();
 }
-function isWritableDir(dir) {
-  try {
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    accessSync(dir, constants$1.W_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
 function resolveEnvRoot() {
-  const override = (getSettings().envRoot || "").trim();
-  if (override) return expandHome(override);
-  if (app$1.isPackaged) {
-    const candidate = join(resolveInstallDir(), "env");
-    if (isWritableDir(candidate)) return candidate;
-  }
   return join(app$1.getPath("userData"), "env");
 }
 function expandEnvTemplate(p) {
@@ -11636,6 +11642,14 @@ function expandEnvTemplate(p) {
 }
 function preferExisting(candidate, legacy) {
   return existsSync(candidate) || !existsSync(legacy) ? candidate : legacy;
+}
+function hasData(dir) {
+  if (!dir) return false;
+  try {
+    return readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
 }
 function resolveDshRuntimeDirs() {
   const pinned = (process.env.DSH_DSH_ROOT || "").trim();
@@ -11651,10 +11665,11 @@ function resolveDshHome() {
   const fromEnv = (process.env.DSH_HOME || "").trim();
   if (fromEnv) return expandHome(fromEnv);
   const override = (getSettings().dshHome || "").trim() || (getSettings().pageEnvs?.["dsh-web"]?.DSH_HOME || "").trim();
-  if (!override) {
-    return join(homedir$1(), ".dsh");
-  }
-  return expandHome(override);
+  const systemHome = join(homedir$1(), ".dsh");
+  if (override === ENV_SYSTEM) return systemHome;
+  const installHome = join(resolveEnvRoot(), envDirName("DSH_HOME", "dsh-web"));
+  if (override === ENV_INSTALL) return installHome;
+  return hasData(systemHome) ? systemHome : installHome;
 }
 function expandHome(p) {
   if (p === "~") return homedir$1();
@@ -11669,22 +11684,27 @@ function resolveOpenclawHome() {
   const fromEnv = (process.env.OPENCLAW_STATE_DIR || "").trim();
   if (fromEnv) return expandHome(fromEnv);
   const override = (getSettings().openclawHome || "").trim() || (getSettings().pageEnvs?.["openclaw"]?.OPENCLAW_HOME || "").trim();
-  if (!override) {
-    return join(homedir$1(), ".openclaw");
-  }
-  return expandHome(override);
+  const systemHome = join(homedir$1(), ".openclaw");
+  if (override === ENV_SYSTEM) return systemHome;
+  const installHome = join(resolveEnvRoot(), envDirName("OPENCLAW_HOME", "openclaw"));
+  if (override === ENV_INSTALL) return installHome;
+  return hasData(systemHome) ? systemHome : installHome;
 }
 function resolvePageEnv(pageId, key, defaultPath, legacyPath) {
   const fromEnv = (process.env[key] || "").trim();
   if (fromEnv) return expandHome(fromEnv);
   const override = (getSettings().pageEnvs?.[pageId]?.[key] || "").trim();
-  if (override) return expandHome(override);
-  if (defaultPath && defaultPath.trim()) {
-    const candidate = expandEnvTemplate(defaultPath.trim());
-    const legacy = (legacyPath || "").trim();
-    return legacy ? preferExisting(candidate, expandHome(legacy)) : candidate;
+  const installDir = join(resolveEnvRoot(), envDirName(key, pageId));
+  if (override === ENV_INSTALL) return installDir;
+  const declared = defaultPath && defaultPath.trim() ? expandEnvTemplate(defaultPath.trim()) : "";
+  const legacy = (legacyPath || "").trim() ? expandHome((legacyPath || "").trim()) : "";
+  if (override === ENV_SYSTEM) {
+    if (!declared) return "";
+    return legacy ? preferExisting(declared, legacy) : declared;
   }
-  return "";
+  if (hasData(declared)) return declared;
+  if (hasData(legacy)) return legacy;
+  return installDir;
 }
 function resolvePageTextEnv(pageId, key, defaultValue) {
   return (process.env[key] || "").trim() || (getSettings().pageEnvs?.[pageId]?.[key] || "").trim() || (defaultValue || "").trim();
@@ -11740,6 +11760,11 @@ function defaultDownloadDir() {
 function resolveDownloadDir() {
   const override = (getSettings().downloadDir || "").trim();
   return override ? expandHome(override) : defaultDownloadDir();
+}
+function resolveWorkspaceDir() {
+  const override = (getSettings().workspaceRoot || "").trim();
+  if (override) return expandEnvTemplate(override);
+  return join(app$1.getPath("userData"), "workspace");
 }
 function resolveNpmRegistry() {
   const override = (getSettings().npmRegistry || "").trim().replace(/\/+$/, "");
@@ -11814,6 +11839,7 @@ const zh = {
   "mcp.builtin.playwright.name": "浏览器自动化 Playwright",
   "mcp.builtin.github.name": "GitHub（需密钥）",
   "mcp.builtin.brave-search.name": "Brave 搜索（需密钥）",
+  "mcp.builtin.dsh-workspace.name": "共享上下文 Workspace",
   "download.doneTitle": "下载完成",
   "download.doneBody": "{name} 已保存到 {dir}",
   "ipc.portRange": "端口需为 1-65535 的整数",
@@ -11881,7 +11907,7 @@ const zh = {
   "dsh.exitCode": "dsh 退出码 {code}",
   "dsh.pageExists": "pages/{id} 已存在",
   "dsh.homeLabel": "DSH 配置目录",
-  "dsh.homeDesc": "留空即使用 dsh CLI 的默认目录 ~/.dsh，与终端里的 dsh 共用同一套 profile",
+  "dsh.homeDesc": "默认使用独立目录（容器独占，环境根目录下的 .dsh 子目录）；若未手动改动且 ~/.dsh 已有登录会自动沿用以免丢失；选系统通用目录则与终端共用同一套 profile（~/.dsh）",
   "dsh.profilePageDesc": "由容器管理的 @deepseek-ai/dsh profile「{profile}」，插件在本机 userData 的 profile 目录内管理",
   "dsh.invalidSpec": "非法包名/地址: {spec}",
   "dsh.gitNeedsUrl": "git 更新需要提供仓库地址",
@@ -11897,7 +11923,7 @@ const zh = {
   "openclaw.versionFail": "openclaw --version 退出码 {code}",
   "openclaw.unavailable": "openclaw 不可用：{err}",
   "openclaw.homeLabel": "OPENCLAW 配置目录",
-  "openclaw.homeDesc": "留空即使用 openclaw CLI 的默认目录 ~/.openclaw，与终端共用同一套配置",
+  "openclaw.homeDesc": "默认使用独立目录（容器独占，环境根目录下的 .openclaw 子目录）；若未手动改动且 ~/.openclaw 已有配置会自动沿用以免丢失；选系统通用目录则与终端共用同一套配置（~/.openclaw）",
   "openclaw.pageDesc": "由容器管理的 openclaw gateway（自带最新版），主界面内嵌打开 Control UI；配置目录默认 ~/.openclaw",
   "openclaw.configUnreadable": "无法解析 openclaw 配置（{path}），已中止以免覆盖：{err}",
   "openclaw.tokenWriteFail": "写入 Gateway 令牌失败：{err}",
@@ -12026,6 +12052,7 @@ const en = {
   "mcp.builtin.playwright.name": "Playwright (browser automation)",
   "mcp.builtin.github.name": "GitHub (needs token)",
   "mcp.builtin.brave-search.name": "Brave Search (needs key)",
+  "mcp.builtin.dsh-workspace.name": "Shared context (Workspace)",
   "download.doneTitle": "Download complete",
   "download.doneBody": "{name} saved to {dir}",
   "ipc.portRange": "Port must be an integer from 1 to 65535",
@@ -12093,7 +12120,7 @@ const en = {
   "dsh.exitCode": "dsh exited with code {code}",
   "dsh.pageExists": "pages/{id} already exists",
   "dsh.homeLabel": "DSH config directory",
-  "dsh.homeDesc": "Leave empty to use dsh's default ~/.dsh — the same profile store the CLI uses",
+  "dsh.homeDesc": "Uses a container-owned .dsh subfolder of the env root by default; until you change it, an existing ~/.dsh login is kept automatically so nothing is lost. Pick the system-common folder to share the CLI profile store (~/.dsh)",
   "dsh.profilePageDesc": 'Container-managed @deepseek-ai/dsh profile "{profile}"; plugins are managed in this machine’s userData profile directory',
   "dsh.invalidSpec": "Invalid package name / URL: {spec}",
   "dsh.gitNeedsUrl": "A git update requires a repository URL",
@@ -12109,7 +12136,7 @@ const en = {
   "openclaw.versionFail": "openclaw --version exited with code {code}",
   "openclaw.unavailable": "openclaw is unavailable: {err}",
   "openclaw.homeLabel": "OPENCLAW config dir",
-  "openclaw.homeDesc": "Empty uses openclaw’s default ~/.openclaw — the same config store the CLI uses",
+  "openclaw.homeDesc": "Uses a container-owned .openclaw subfolder of the env root by default; until you change it, an existing ~/.openclaw config is kept automatically so nothing is lost. Pick the system-common folder to share the CLI config store (~/.openclaw)",
   "openclaw.pageDesc": "Container-managed openclaw gateway (bundled latest); the main window embeds its Control UI; the config dir defaults to ~/.openclaw",
   "openclaw.configUnreadable": "Could not parse the openclaw config ({path}); aborted to avoid overwriting it: {err}",
   "openclaw.tokenWriteFail": "Failed to write the gateway token: {err}",
@@ -12735,7 +12762,7 @@ function buildCatalog(servers, tools) {
   return {
     version: 1,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    servers: servers.filter((s) => s.spec.enabled !== false).map((s) => ({
+    servers: servers.filter((s) => s.spec.enabled !== false && s.spec.autoStart === true).map((s) => ({
       ...s.spec,
       status: s.status,
       tools: (s.status === "connected" ? tools : []).filter((t) => t.serverId === s.spec.id).map((t) => ({
@@ -12822,6 +12849,182 @@ function syncCodexConfig(servers, home) {
   writeText(file, mergeCodexToml(existing, servers));
   return file;
 }
+const OPENCLAW_MCP_PREFIX = "dsh__";
+function mcpNamespaceSlug(id2) {
+  return id2.replace(/[^A-Za-z0-9_-]/g, "_").replace(/^dsh[-_]+/i, "");
+}
+function openclawServerKey(id2) {
+  return `${OPENCLAW_MCP_PREFIX}${mcpNamespaceSlug(id2)}`;
+}
+function mergeOpenclawMcpConfig(cfg, servers) {
+  const mcp = cfg.mcp && typeof cfg.mcp === "object" && !Array.isArray(cfg.mcp) ? cfg.mcp : {};
+  const cur = mcp.servers && typeof mcp.servers === "object" && !Array.isArray(mcp.servers) ? mcp.servers : {};
+  const out = {};
+  for (const [k, v] of Object.entries(cur)) if (!k.startsWith(OPENCLAW_MCP_PREFIX)) out[k] = v;
+  for (const s of servers) {
+    out[openclawServerKey(s.id)] = {
+      command: s.command,
+      ...s.args?.length ? { args: s.args } : {},
+      ...s.cwd ? { cwd: s.cwd } : {},
+      ...s.env && Object.keys(s.env).length ? { env: s.env } : {},
+      enabled: true
+    };
+  }
+  return { ...cfg, mcp: { ...mcp, servers: out } };
+}
+function syncOpenclawMcpConfig(servers, cfgPath) {
+  let cfg = {};
+  if (existsSync(cfgPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(cfgPath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        cfg = parsed;
+      }
+    } catch {
+      return cfgPath;
+    }
+  }
+  writeText(cfgPath, JSON.stringify(mergeOpenclawMcpConfig(cfg, servers), null, 2) + "\n");
+  return cfgPath;
+}
+function dshMcpPatchFile() {
+  return join(bridgeDir(), "dsh-mcp.patch.json");
+}
+function dshServerName(id2) {
+  return `dsh_${mcpNamespaceSlug(id2)}`.slice(0, 32);
+}
+function renderDshMcpPatch(servers) {
+  const entries2 = servers.map((s) => ({
+    id: `dsh-mcp-${mcpNamespaceSlug(s.id)}`,
+    name: "@deepseek-ai/dsh-mcp-client",
+    config: {
+      serverName: dshServerName(s.id),
+      transport: "stdio",
+      command: s.command,
+      ...s.args?.length ? { args: s.args } : {},
+      ...s.cwd ? { cwd: s.cwd } : {},
+      ...s.env && Object.keys(s.env).length ? { env: s.env } : {}
+    }
+  }));
+  return entries2.length ? [{ insert: entries2 }] : [];
+}
+function syncDshMcpPatch(servers) {
+  const entries2 = renderDshMcpPatch(servers);
+  if (!entries2.length) return null;
+  writeText(dshMcpPatchFile(), JSON.stringify(entries2, null, 2));
+  return dshMcpPatchFile();
+}
+function workspaceDir() {
+  return resolveWorkspaceDir();
+}
+function workspaceFile() {
+  return join(workspaceDir(), "context.json");
+}
+function isSharedWorkspaceEnabled() {
+  return getSettings().sharedWorkspace !== false;
+}
+function emptyContext() {
+  return { version: 1, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), revision: 0, task: "", notes: [] };
+}
+function newNoteId() {
+  return `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+function normalizeContext(raw) {
+  if (!raw || typeof raw !== "object") return emptyContext();
+  const o = raw;
+  const notes = (Array.isArray(o.notes) ? o.notes : []).map((n) => {
+    if (!n || typeof n !== "object") return null;
+    const r = n;
+    const text = typeof r.text === "string" ? r.text : "";
+    if (!text.trim()) return null;
+    return {
+      id: typeof r.id === "string" && r.id ? r.id : newNoteId(),
+      author: typeof r.author === "string" && r.author ? r.author : "agent",
+      text,
+      ts: typeof r.ts === "number" ? r.ts : Date.now()
+    };
+  }).filter((n) => n !== null);
+  return {
+    version: 1,
+    updatedAt: typeof o.updatedAt === "string" ? o.updatedAt : (/* @__PURE__ */ new Date()).toISOString(),
+    revision: typeof o.revision === "number" && o.revision >= 0 ? o.revision : 0,
+    ...typeof o.broadcastAt === "string" ? { broadcastAt: o.broadcastAt } : {},
+    task: typeof o.task === "string" ? o.task : "",
+    notes
+  };
+}
+function readWorkspace() {
+  try {
+    const file = workspaceFile();
+    if (!existsSync(file)) return emptyContext();
+    return normalizeContext(JSON.parse(readFileSync(file, "utf8")));
+  } catch {
+    return emptyContext();
+  }
+}
+function ensureWorkspace() {
+  try {
+    mkdirSync(workspaceDir(), { recursive: true });
+  } catch {
+  }
+  const file = workspaceFile();
+  if (!existsSync(file)) {
+    const seed = emptyContext();
+    try {
+      writeFileSync$1(file, JSON.stringify(seed, null, 2), "utf8");
+    } catch {
+    }
+    return seed;
+  }
+  return readWorkspace();
+}
+function writeWorkspace(patch) {
+  const cur = ensureWorkspace();
+  const next2 = {
+    version: 1,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    // A plain edit keeps the broadcast signal; only broadcastWorkspace moves it forward.
+    revision: cur.revision,
+    ...cur.broadcastAt ? { broadcastAt: cur.broadcastAt } : {},
+    task: patch.task !== void 0 ? patch.task : cur.task,
+    notes: patch.notes !== void 0 ? normalizeContext({ notes: patch.notes }).notes : cur.notes
+  };
+  try {
+    writeFileSync$1(workspaceFile(), JSON.stringify(next2, null, 2), "utf8");
+  } catch {
+  }
+  return next2;
+}
+function broadcastWorkspace() {
+  const cur = ensureWorkspace();
+  const now = /* @__PURE__ */ new Date();
+  const task = cur.task.trim();
+  const notes = task ? [...cur.notes, { id: newNoteId(), author: "container", text: `【广播】${task}`, ts: now.getTime() }] : cur.notes;
+  const next2 = {
+    version: 1,
+    updatedAt: now.toISOString(),
+    revision: (Number.isFinite(cur.revision) ? cur.revision : 0) + 1,
+    broadcastAt: now.toISOString(),
+    task: cur.task,
+    notes
+  };
+  try {
+    writeFileSync$1(workspaceFile(), JSON.stringify(next2, null, 2), "utf8");
+  } catch {
+  }
+  return next2;
+}
+function workspaceInfo() {
+  return { dir: workspaceDir(), file: workspaceFile(), context: ensureWorkspace() };
+}
+function workspaceEnvVars() {
+  if (!isSharedWorkspaceEnabled()) return {};
+  ensureWorkspace();
+  return {
+    DSH_WORKSPACE_DIR: workspaceDir(),
+    DSH_WORKSPACE_FILE: workspaceFile()
+  };
+}
 const BUILTIN_MCP_PKG = {
   "sequential-thinking": "@modelcontextprotocol/server-sequential-thinking",
   memory: "@modelcontextprotocol/server-memory",
@@ -12877,6 +13080,43 @@ function mcpPackagesStatus() {
     installed: resolveMcpPkgEntry(pkg) !== null,
     version: mcpPkgVersion(pkg)
   }));
+}
+const WORKSPACE_SERVER_SOURCE = "#!/usr/bin/env node\n/**\n * dsh-workspace MCP server — the container's shared-context layer, exposed as MCP tools.\n *\n * Why this exists: the container hands every hosted agent a pointer to one shared document\n * (DSH_WORKSPACE_FILE) via env, but a bare path is only useful to an agent that happens to be\n * written to read it. Registering this server in the bridge (mcp-servers.json / codex\n * config.toml) means any MCP-speaking agent can `workspace_read` the current task + shared\n * memory and `workspace_append` a finding back into it — a real read/write channel, not just a\n * path. The agent spawns its own copy of this process (stdio), exactly like it does for the\n * curated npm servers; the container never proxies the calls.\n *\n * Dependency-free on purpose: it runs under the bundled node.exe from userData, where app.asar\n * — and therefore @modelcontextprotocol/sdk — is not readable. The only external piece is the\n * MCP stdio wire format: newline-delimited JSON-RPC 2.0. It reads/writes the same context.json\n * the container's UI edits, tolerating anything a hand-edit or a peer agent may have written.\n */\nimport { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'\nimport { dirname } from 'node:path'\nimport readline from 'node:readline'\n\n/** Absolute path to the shared context.json, injected by the bridge spec's env. */\nconst FILE = process.env.DSH_WORKSPACE_FILE || ''\n/** Fallback when the client does not negotiate a version; clients accept an equal/older one. */\nconst PROTOCOL = '2024-11-05'\n\nfunction emptyDoc() {\n  return { version: 1, updatedAt: new Date().toISOString(), revision: 0, task: '', notes: [] }\n}\n\nfunction newId() {\n  return 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)\n}\n\n/** Coerce unknown JSON into a trustworthy doc without ever throwing (mirrors the container). */\nfunction normalize(raw) {\n  if (!raw || typeof raw !== 'object') return emptyDoc()\n  const notes = (Array.isArray(raw.notes) ? raw.notes : [])\n    .map((n) => {\n      if (!n || typeof n !== 'object') return null\n      const text = typeof n.text === 'string' ? n.text : ''\n      if (!text.trim()) return null\n      return {\n        id: typeof n.id === 'string' && n.id ? n.id : newId(),\n        author: typeof n.author === 'string' && n.author ? n.author : 'agent',\n        text,\n        ts: typeof n.ts === 'number' ? n.ts : Date.now()\n      }\n    })\n    .filter(Boolean)\n  return {\n    version: 1,\n    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),\n    revision: typeof raw.revision === 'number' && raw.revision >= 0 ? raw.revision : 0,\n    ...(typeof raw.broadcastAt === 'string' ? { broadcastAt: raw.broadcastAt } : {}),\n    task: typeof raw.task === 'string' ? raw.task : '',\n    notes\n  }\n}\n\nfunction readDoc() {\n  try {\n    if (!FILE || !existsSync(FILE)) return emptyDoc()\n    return normalize(JSON.parse(readFileSync(FILE, 'utf8')))\n  } catch {\n    return emptyDoc()\n  }\n}\n\n/** Best-effort write: a read-only root surfaces through the tool result, never kills the child. */\nfunction writeDoc(doc) {\n  if (!FILE) return false\n  try {\n    mkdirSync(dirname(FILE), { recursive: true })\n    writeFileSync(FILE, JSON.stringify(doc, null, 2), 'utf8')\n    return true\n  } catch {\n    return false\n  }\n}\n\nconst TOOLS = [\n  {\n    name: 'workspace_read',\n    description:\n      'Read the container-owned shared context: the current task, the append-only shared-memory log (notes), and the broadcast revision. Call this to load cross-agent context.',\n    inputSchema: { type: 'object', properties: {}, additionalProperties: false }\n  },\n  {\n    name: 'workspace_append',\n    description:\n      'Append one entry to the shared-memory log so other hosted agents can see it. Use for findings or decisions worth sharing across agents.',\n    inputSchema: {\n      type: 'object',\n      properties: {\n        text: { type: 'string', description: 'The note to share (non-empty).' },\n        author: { type: 'string', description: 'Who is writing (defaults to your agent name).' }\n      },\n      required: ['text'],\n      additionalProperties: false\n    }\n  },\n  {\n    name: 'workspace_set_task',\n    description: 'Set the single current shared task/goal that all hosted agents work toward.',\n    inputSchema: {\n      type: 'object',\n      properties: { task: { type: 'string', description: 'The current task text.' } },\n      required: ['task'],\n      additionalProperties: false\n    }\n  }\n]\n\nfunction textResult(text) {\n  return { content: [{ type: 'text', text: String(text) }], isError: false }\n}\nfunction errorResult(text) {\n  return { content: [{ type: 'text', text: String(text) }], isError: true }\n}\n\nfunction callTool(name, args) {\n  const a = args && typeof args === 'object' ? args : {}\n  if (name === 'workspace_read') return textResult(JSON.stringify(readDoc(), null, 2))\n  if (name === 'workspace_append') {\n    const text = typeof a.text === 'string' ? a.text.trim() : ''\n    if (!text) return errorResult('workspace_append needs a non-empty \"text\".')\n    const doc = readDoc()\n    doc.notes.push({\n      id: newId(),\n      author: (typeof a.author === 'string' && a.author.trim()) || 'agent',\n      text,\n      ts: Date.now()\n    })\n    doc.updatedAt = new Date().toISOString()\n    if (!writeDoc(doc)) return errorResult('Failed to write the shared context (read-only path?).')\n    return textResult(\n      'Appended shared-memory note; the context now has ' + doc.notes.length + ' note(s).'\n    )\n  }\n  if (name === 'workspace_set_task') {\n    const doc = readDoc()\n    doc.task = typeof a.task === 'string' ? a.task : ''\n    doc.updatedAt = new Date().toISOString()\n    if (!writeDoc(doc)) return errorResult('Failed to write the shared context (read-only path?).')\n    return textResult('Current shared task set.')\n  }\n  return errorResult('Unknown tool: ' + name)\n}\n\nfunction send(msg) {\n  process.stdout.write(JSON.stringify(msg) + '\\n')\n}\nfunction reply(id, result) {\n  send({ jsonrpc: '2.0', id, result })\n}\nfunction replyError(id, code, message) {\n  send({ jsonrpc: '2.0', id, error: { code, message } })\n}\n\nfunction handle(msg) {\n  if (!msg || typeof msg !== 'object') return\n  const id = msg.id\n  const method = msg.method\n  const params = msg.params\n  const isRequest = id !== undefined && id !== null\n  switch (method) {\n    case 'initialize': {\n      const clientProto = params && params.protocolVersion\n      reply(id, {\n        // Echo the client's requested version when present so older/newer clients both handshake.\n        protocolVersion: typeof clientProto === 'string' ? clientProto : PROTOCOL,\n        capabilities: { tools: {} },\n        serverInfo: { name: 'dsh-workspace', version: '1.0.0' }\n      })\n      return\n    }\n    case 'ping':\n      if (isRequest) reply(id, {})\n      return\n    case 'notifications/initialized':\n    case 'initialized':\n    case 'notifications/cancelled':\n      return // notifications: no response\n    case 'tools/list':\n      reply(id, { tools: TOOLS })\n      return\n    case 'tools/call': {\n      const p = params || {}\n      reply(id, callTool(p.name, p.arguments))\n      return\n    }\n    // Declare only `tools`, but answer these cheaply in case a client probes them anyway.\n    case 'resources/list':\n      reply(id, { resources: [] })\n      return\n    case 'prompts/list':\n      reply(id, { prompts: [] })\n      return\n    default:\n      if (isRequest) replyError(id, -32601, 'Method not found: ' + method)\n  }\n}\n\nconst rl = readline.createInterface({ input: process.stdin, terminal: false })\nrl.on('line', (line) => {\n  const s = line.trim()\n  if (!s) return\n  let msg\n  try {\n    msg = JSON.parse(s)\n  } catch {\n    return // a non-JSON line is not a protocol message; ignore rather than crash\n  }\n  try {\n    handle(msg)\n  } catch (err) {\n    if (msg && msg.id !== undefined) replyError(msg.id, -32603, String((err && err.message) || err))\n  }\n})\nrl.on('close', () => process.exit(0))\n";
+const WORKSPACE_MCP_ID = "dsh-workspace";
+function workspaceServerFile() {
+  return join(bridgeDir(), "workspace-server.mjs");
+}
+let writtenSource = "";
+function ensureWorkspaceServerScript() {
+  const file = workspaceServerFile();
+  if (writtenSource !== WORKSPACE_SERVER_SOURCE || !existsSync(file)) {
+    try {
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync$1(file, WORKSPACE_SERVER_SOURCE, "utf8");
+      writtenSource = WORKSPACE_SERVER_SOURCE;
+    } catch {
+    }
+  }
+  return file;
+}
+function workspaceMcpSpec() {
+  if (!isSharedWorkspaceEnabled()) return null;
+  const script = ensureWorkspaceServerScript();
+  let command = "node";
+  try {
+    command = getNodeExePath();
+  } catch {
+  }
+  return {
+    id: WORKSPACE_MCP_ID,
+    name: m("mcp.builtin.dsh-workspace.name"),
+    command,
+    args: [script],
+    env: { DSH_WORKSPACE_FILE: workspaceFile(), DSH_WORKSPACE_DIR: workspaceDir() },
+    enabled: true,
+    autoStart: true,
+    builtin: true
+  };
 }
 const CONNECT_TIMEOUT_MS = 3e4;
 const MCP_CALL_TOOL_TIMEOUT_MS = 6e4;
@@ -12973,7 +13213,7 @@ function loadSpecs() {
   return Array.isArray(raw) ? raw : [];
 }
 function persistSpecs(list) {
-  mcpStore().set("servers", list.filter((s) => !LOCKED_MCP_IDS.has(s.id)));
+  mcpStore().set("servers", list.filter((s) => !isCodeOwnedId(s.id)));
 }
 const LOCKED_MCP_DEFS = [{ id: "filesystem", autoStart: true }];
 const SEED_MCP_DEFS = [
@@ -13003,6 +13243,13 @@ function curatedSpec(def) {
 }
 function lockedMcpSpecs() {
   return LOCKED_MCP_DEFS.map(curatedSpec);
+}
+function isCodeOwnedId(id2) {
+  return LOCKED_MCP_IDS.has(id2) || id2 === WORKSPACE_MCP_ID;
+}
+function codeOwnedSpecs() {
+  const ws = workspaceMcpSpec();
+  return ws ? [...lockedMcpSpecs(), ws] : lockedMcpSpecs();
 }
 function isDefaultCurated(spec) {
   const pkg = BUILTIN_MCP_PKG[spec.id];
@@ -13048,12 +13295,15 @@ function ensureSeeded() {
 function reconcile() {
   ensureSeeded();
   const specs = [
-    ...lockedMcpSpecs(),
-    ...loadSpecs().filter((s) => !LOCKED_MCP_IDS.has(s.id))
+    ...codeOwnedSpecs(),
+    ...loadSpecs().filter((s) => !isCodeOwnedId(s.id))
   ];
   const alive = new Set(specs.map((s) => s.id));
   for (const id2 of [...entries.keys()]) {
-    if (!alive.has(id2)) void disconnect(id2).catch(() => void 0);
+    if (!alive.has(id2)) {
+      void disconnect(id2).catch(() => void 0);
+      entries.delete(id2);
+    }
   }
   for (const spec of specs) {
     const existing = entries.get(spec.id);
@@ -13072,7 +13322,7 @@ function refreshBuiltinPackages() {
 async function saveServer(raw) {
   const { spec, errors: errors2 } = sanitizeMcpSpec(raw);
   if (!spec) throw new Error(errors2.join("; "));
-  if (LOCKED_MCP_IDS.has(spec.id)) throw new Error(m("mcp.errBuiltinEdit"));
+  if (isCodeOwnedId(spec.id)) throw new Error(m("mcp.errBuiltinEdit"));
   const specs = loadSpecs();
   const idx = specs.findIndex((s) => s.id === spec.id);
   if (idx >= 0) specs[idx] = spec;
@@ -13087,7 +13337,7 @@ async function saveServer(raw) {
   return snapshot();
 }
 async function removeServer(id2) {
-  if (LOCKED_MCP_IDS.has(id2)) throw new Error(m("mcp.errBuiltinRemove"));
+  if (isCodeOwnedId(id2)) throw new Error(m("mcp.errBuiltinRemove"));
   await disconnect(id2).catch(() => void 0);
   entries.delete(id2);
   persistSpecs(loadSpecs().filter((s) => s.id !== id2));
@@ -13626,7 +13876,7 @@ function buildPageEnv(meta) {
     }
     const v = resolvePageEnv(meta.id, spec.key, spec.defaultPath, spec.legacyPath);
     if (!v) continue;
-    if (spec.defaultPath) ensureEnvDir(v);
+    ensureEnvDir(v);
     out[spec.key] = v;
   }
   const merged = { ...out, ...resolvePageCustomEnvs(meta.id) };
@@ -13640,7 +13890,7 @@ function buildPageEnv(meta) {
       console.warn("[mcp-bridge] codex sync failed:", err.message);
     }
   }
-  return { ...bridgeEnvVars(), ...merged };
+  return { ...bridgeEnvVars(), ...workspaceEnvVars(), ...merged };
 }
 function expandStartCommand(cmd) {
   return cmd.replace(/(^|\s)~(?=[/\\]|$)/g, (_m, pre) => pre + expandHome("~"));
@@ -13743,7 +13993,9 @@ class PageRegistry extends EventEmitter {
     };
   }
   logs(id2) {
-    return [...this.entries.get(id2)?.logs ?? []];
+    const e = this.entries.get(id2);
+    if (!e) return [];
+    return [...e.logs];
   }
   /**
    * Terminal-kind CLIs are never spawned by the registry — the embedded terminal
@@ -13832,35 +14084,42 @@ class PageRegistry extends EventEmitter {
     e.launchUrl = void 0;
     e.portHolder = null;
     this.emitProgress(e, "spawning");
-    let proc;
+    let mcpServers = [];
+    if (isDsh || isOpenclaw) {
+      try {
+        const states = listServers();
+        const tools = listTools();
+        exportBridgeFiles(states, tools);
+        mcpServers = buildCatalog(states, tools).servers;
+      } catch (err) {
+        console.warn("[mcp-bridge] agent snapshot failed:", err.message);
+      }
+    }
+    let launch;
     if (isDsh) {
       const { dshSpawnCommand: dshSpawnCommand2 } = await Promise.resolve().then(() => dsh);
-      const spec = await dshSpawnCommand2(e.meta.dshProfile || "web", port);
+      let spec;
       try {
-        proc = spawn(spec.cmd, spec.args, {
-          cwd: spec.cwd,
-          env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) },
-          windowsHide: true,
-          shell: false
-        });
+        spec = await dshSpawnCommand2(e.meta.dshProfile || "web", port, syncDshMcpPatch(mcpServers));
       } catch (err) {
         this.fail(e, m("page.dshStartFail", { err: err.message }));
         throw new Error(e.lastError);
       }
+      launch = {
+        cmd: spec.cmd,
+        args: spec.args,
+        cwd: spec.cwd,
+        env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) }
+      };
     } else if (isOpenclaw) {
       const { openclawSpawnSpec: openclawSpawnSpec2 } = await Promise.resolve().then(() => openclaw);
-      const spec = openclawSpawnSpec2(port);
-      try {
-        proc = spawn(spec.cmd, spec.args, {
-          cwd: spec.cwd,
-          env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) },
-          windowsHide: true,
-          shell: false
-        });
-      } catch (err) {
-        this.fail(e, m("page.openclawStartFail", { err: err.message }));
-        throw new Error(e.lastError);
-      }
+      const spec = openclawSpawnSpec2(port, mcpServers);
+      launch = {
+        cmd: spec.cmd,
+        args: spec.args,
+        cwd: spec.cwd,
+        env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) }
+      };
     } else {
       if (isTerminal) {
         this.setStatus(e, "stopped");
@@ -13868,17 +14127,26 @@ class PageRegistry extends EventEmitter {
       }
       const [cmd, ...args] = expandStartCommand(e.meta.startCommand).split(/\s+/);
       const executable = cmd === "node" ? getNodeExePath() : cmd;
-      try {
-        proc = spawn(executable, args, {
-          cwd: e.meta.dir,
-          env: bundledEnv({ PORT: String(port), ...buildPageEnv(e.meta) }),
-          windowsHide: true,
-          shell: false
-        });
-      } catch (err) {
-        this.fail(e, m("page.spawnFail", { err: err.message }));
-        throw new Error(e.lastError);
-      }
+      launch = {
+        cmd: executable,
+        args,
+        cwd: e.meta.dir,
+        env: bundledEnv({ PORT: String(port), ...buildPageEnv(e.meta) })
+      };
+    }
+    let proc;
+    try {
+      proc = spawn(launch.cmd, launch.args, {
+        cwd: launch.cwd,
+        env: launch.env,
+        windowsHide: true,
+        shell: false,
+        stdio: "pipe"
+      });
+    } catch (err) {
+      const failKey = isDsh ? "page.dshStartFail" : isOpenclaw ? "page.openclawStartFail" : "page.spawnFail";
+      this.fail(e, m(failKey, { err: err.message }));
+      throw new Error(e.lastError);
     }
     e.proc = proc;
     e.pid = proc.pid;
@@ -13887,53 +14155,13 @@ class PageRegistry extends EventEmitter {
     proc.stdout.on("data", (d) => this.appendLog(e, d));
     proc.stderr.on("data", (d) => this.appendLog(e, d));
     proc.on("error", (err) => this.fail(e, err.message));
-    proc.on("close", (code2) => {
-      const wasRunning = e.status === "running";
-      if (e.status === "starting" || e.status === "running") {
-        this.setStatus(e, code2 === 0 || this.quitting ? "stopped" : "error");
-        e.exitCode = code2;
-        if (code2 !== 0 && !this.quitting) {
-          e.lastError = m("page.processExited", { code: code2 ?? "" });
-          e.logs.push(`[container] ${e.lastError}`);
-        }
-      }
-      if (wasRunning && code2 !== 0 && !this.quitting && e.meta.kind !== "terminal" && getSettings().crashAutoRestart !== false) {
-        if (detectEngineMismatch(e)) {
-          e.lastError = m("page.logEngineMismatch");
-          e.logs.push(`[container] ${e.lastError}`);
-          console.warn(`[pages] ${e.meta.id}: EBADENGINE — not restarting (engine mismatch)`);
-          logEvent({ level: "error", kind: "page.engineMismatch", pageId: e.meta.id });
-        } else if (code2 === 78 && (e.reclaimRetries ?? 0) < MAX_RECLAIM_RETRIES) {
-          e.reclaimRetries = (e.reclaimRetries ?? 0) + 1;
-          e.logs.push(`[container] ${m("page.logReclaimRetry")}`);
-          logEvent({
-            level: "warn",
-            kind: "page.reclaim",
-            pageId: e.meta.id,
-            meta: { attempt: e.reclaimRetries }
-          });
-          this.scheduleReclaimRestart(e);
-        } else {
-          e.crashes++;
-          logEvent({
-            level: "warn",
-            kind: "page.crash",
-            pageId: e.meta.id,
-            meta: { code: code2 ?? "n/a", attempt: e.crashes }
-          });
-          this.scheduleCrashRestart(e, code2);
-        }
-      }
-      e.proc = void 0;
-      e.pid = void 0;
-      this.emitChanged();
-    });
+    proc.on("close", (code2) => this.handleProcessDeath(e, code2));
     try {
       this.emitProgress(e, "port");
-      const { port: port2, url } = await this.waitReady(e, proc, isDsh, isOpenclaw, isTerminal);
-      e.resolvedPort = port2;
+      const { port: boundPort, url } = await this.waitReady(e, proc, isDsh, isOpenclaw, isTerminal);
+      e.resolvedPort = boundPort;
       if (e.meta.healthUrl) {
-        const target = healthTarget(e.meta, port2);
+        const target = healthTarget(e.meta, boundPort);
         if (target && !await waitHealth(target, HEALTH_READY_TIMEOUT_MS)) {
           throw new Error(m("page.healthFail", { url: target }));
         }
@@ -13947,13 +14175,13 @@ class PageRegistry extends EventEmitter {
         launchUrl = await resolveOpenclawLaunchUrl2() || url;
       }
       e.launchUrl = launchUrl;
-      e.logs.push(m("page.logReady", { port: port2 }));
+      e.logs.push(m("page.logReady", { port: boundPort }));
       this.setStatus(e, "running");
       logEvent({
         level: "info",
         kind: "page.running",
         pageId: e.meta.id,
-        meta: { port: port2, ms: e.startedAt ? Date.now() - e.startedAt : 0 }
+        meta: { port: boundPort, ms: e.startedAt ? Date.now() - e.startedAt : 0 }
       });
       clearTimeout(e.stableTimer);
       e.stableTimer = setTimeout(() => {
@@ -14071,15 +14299,24 @@ class PageRegistry extends EventEmitter {
       const cleanup = () => {
         clearInterval(timer);
         proc.stdout.off("data", onChunk);
+        proc.stderr.off("data", onChunk);
         proc.off("close", onExit);
       };
       proc.stdout.on("data", onChunk);
+      proc.stderr.on("data", onChunk);
       proc.once("close", onExit);
       waitPortReady(wantPort, timeoutMs).then(
-        (port) => setTimeout(() => {
-          cleanup();
-          resolve2({ port, url: announced?.url });
-        }, ANNOUNCE_GRACE_MS),
+        (port) => {
+          const settleDeadline = Date.now() + ANNOUNCE_GRACE_MS * 4;
+          const settle = () => {
+            clearInterval(poll);
+            cleanup();
+            resolve2({ port, url: announced?.url });
+          };
+          const poll = setInterval(() => {
+            if (announced || Date.now() > settleDeadline) settle();
+          }, 150);
+        },
         failWith
       );
     });
@@ -14095,7 +14332,10 @@ class PageRegistry extends EventEmitter {
       }
       return;
     }
-    if (!e?.proc) return;
+    if (!e?.proc) {
+      if (e && (e.status === "running" || e.status === "starting")) this.setStatus(e, "stopped");
+      return;
+    }
     const proc = e.proc;
     e.logs.push(m("page.logStopping"));
     e.exitCode = void 0;
@@ -14114,7 +14354,9 @@ class PageRegistry extends EventEmitter {
   stopAndWait(id2, timeoutMs = 8e3) {
     const e = this.entries.get(id2);
     const proc = e?.proc;
-    if (!proc) return Promise.resolve();
+    if (!proc) {
+      return Promise.resolve();
+    }
     this.stop(id2);
     return new Promise((resolve2) => {
       const done = () => {
@@ -14275,7 +14517,7 @@ class PageRegistry extends EventEmitter {
   waitDepReady(id2) {
     const deadline = Date.now() + DSH_READY_TIMEOUT_MS;
     return new Promise((resolve2, reject) => {
-      const tick = () => {
+      const tick2 = () => {
         const d = this.entries.get(id2);
         if (!d) return resolve2();
         if (d.status === "running") return resolve2();
@@ -14285,9 +14527,9 @@ class PageRegistry extends EventEmitter {
         if (Date.now() > deadline) {
           return reject(new Error(m("page.depsFail", { dep: id2, err: "timeout" })));
         }
-        setTimeout(tick, 400);
+        setTimeout(tick2, 400);
       };
-      tick();
+      tick2();
     });
   }
   /**
@@ -14334,6 +14576,12 @@ class PageRegistry extends EventEmitter {
           await this.startWithDeps(id2);
         } catch (err) {
           console.warn(`[pages] auto-start ${id2} failed:`, err.message);
+          logEvent({
+            level: "warn",
+            kind: "page.autostartFail",
+            pageId: id2,
+            detail: err.message
+          });
         }
       })
     );
@@ -14348,7 +14596,54 @@ class PageRegistry extends EventEmitter {
    * quit paths that don't await this can orphan grandchildren on slow machines. */
   async shutdownAll() {
     this.quitting = true;
-    await Promise.all([...this.entries.keys()].map((id2) => this.stopAndWait(id2)));
+    const ids = [...this.entries.keys()];
+    await Promise.all(ids.map((id2) => this.stopAndWait(id2)));
+  }
+  /**
+   * Shared death path for anything with a real child handle (piped / POSIX-detached spawns). A
+   * hidden launch has no handle and reaches this via the pid-liveness poll with `code = null`.
+   * Marks the row stopped/error, then runs the crash health-guard for an unscheduled death.
+   */
+  handleProcessDeath(e, code2) {
+    const wasRunning = e.status === "running";
+    if (e.status === "starting" || e.status === "running") {
+      this.setStatus(e, code2 === 0 || this.quitting ? "stopped" : "error");
+      e.exitCode = code2;
+      if (code2 !== 0 && !this.quitting) {
+        e.lastError = m("page.processExited", { code: code2 ?? "" });
+        e.logs.push(`[container] ${e.lastError}`);
+      }
+    }
+    if (wasRunning && code2 !== 0 && !this.quitting && e.meta.kind !== "terminal" && getSettings().crashAutoRestart !== false) {
+      if (detectEngineMismatch(e)) {
+        e.lastError = m("page.logEngineMismatch");
+        e.logs.push(`[container] ${e.lastError}`);
+        console.warn(`[pages] ${e.meta.id}: EBADENGINE — not restarting (engine mismatch)`);
+        logEvent({ level: "error", kind: "page.engineMismatch", pageId: e.meta.id });
+      } else if (code2 === 78 && (e.reclaimRetries ?? 0) < MAX_RECLAIM_RETRIES) {
+        e.reclaimRetries = (e.reclaimRetries ?? 0) + 1;
+        e.logs.push(`[container] ${m("page.logReclaimRetry")}`);
+        logEvent({
+          level: "warn",
+          kind: "page.reclaim",
+          pageId: e.meta.id,
+          meta: { attempt: e.reclaimRetries }
+        });
+        this.scheduleReclaimRestart(e);
+      } else {
+        e.crashes++;
+        logEvent({
+          level: "warn",
+          kind: "page.crash",
+          pageId: e.meta.id,
+          meta: { code: code2 ?? "n/a", attempt: e.crashes }
+        });
+        this.scheduleCrashRestart(e, code2);
+      }
+    }
+    e.proc = void 0;
+    e.pid = void 0;
+    this.emitChanged();
   }
   setStatus(e, status) {
     e.status = status;
@@ -16039,8 +16334,16 @@ function runCli$1(cmd, args, opts = {}) {
     });
     let stdout = "";
     let stderr = "";
-    child.stdout?.on("data", (d) => stdout += String(d));
-    child.stderr?.on("data", (d) => stderr += String(d));
+    child.stdout?.on("data", (d) => {
+      const s = String(d);
+      stdout += s;
+      opts.onData?.(s);
+    });
+    child.stderr?.on("data", (d) => {
+      const s = String(d);
+      stderr += s;
+      opts.onData?.(s);
+    });
     child.on("error", (err) => resolve2({ code: -1, stdout, stderr: stderr || err.message }));
     child.on("close", (code2) => resolve2({ code: code2 ?? -1, stdout, stderr }));
   });
@@ -16145,7 +16448,9 @@ async function dshEnv(profileDir) {
     DSH_HOME: join(profileDir, "..", ".."),
     DSH_NODE_PATH: nodeExe,
     // MCP hub catalog pointers: dsh's terminals inherit them to every plugin process
-    ...bridgeEnvVars()
+    ...bridgeEnvVars(),
+    // shared workspace pointers: dsh's terminals inherit them to every plugin process too
+    ...workspaceEnvVars()
   });
 }
 function validateProfileName(profile) {
@@ -16193,7 +16498,8 @@ async function runDsh(args, opts = {}) {
     {
       env: await dshEnv(status.profileDir),
       shell: process.platform === "win32" && !viaNode,
-      timeoutMs: opts.timeoutMs ?? 10 * 6e4
+      timeoutMs: opts.timeoutMs ?? 10 * 6e4,
+      onData: opts.onData
     }
   );
   if (res.code !== 0)
@@ -16202,11 +16508,12 @@ async function runDsh(args, opts = {}) {
     );
   return res.stdout;
 }
-async function dshPluginForward(pnpmArgs, profile = DEFAULT_PROFILE) {
+async function dshPluginForward(pnpmArgs, profile = DEFAULT_PROFILE, onData) {
   if (!(await pnpmBinDirs()).length) throw pnpmMissingError();
   return runDsh(["plugin", "--profile", profile, ...pnpmArgs], {
     timeoutMs: 15 * 6e4,
-    profile
+    profile,
+    onData
   });
 }
 function readProfileManifest(profileDir) {
@@ -16298,24 +16605,50 @@ function validateNpmSpec(spec) {
 async function installDshPlugin(spec, profile = DEFAULT_PROFILE) {
   const s = validateNpmSpec(spec);
   broadcastPluginOp({ name: s, done: false });
+  const tee = pluginOutputTee(`plugin add ${s}`);
   try {
-    await dshPluginForward(["add", s], profile);
+    await dshPluginForward(["add", s], profile, tee.onData);
     broadcastPluginOp({ name: s, done: true });
   } catch (err) {
     broadcastPluginOp({ name: s, done: true, error: err.message });
     throw err;
+  } finally {
+    tee.flush();
   }
 }
 const NOT_A_DEPENDENCY = /ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS|no such dependency found/i;
 async function uninstallDshPlugin(name, profile = DEFAULT_PROFILE) {
   const s = validateNpmSpec(name);
+  const tee = pluginOutputTee(`plugin remove ${s}`);
   try {
-    await dshPluginForward(["remove", s], profile);
+    await dshPluginForward(["remove", s], profile, tee.onData);
   } catch (err) {
     const raw = err.message;
     if (NOT_A_DEPENDENCY.test(raw)) throw new Error(m("dsh.notADependency", { name: s }));
     throw err;
+  } finally {
+    tee.flush();
   }
+}
+function pluginOutputTee(label) {
+  let buf = "";
+  const emit = (line) => {
+    const trimmed = line.replace(/\x1b\[[0-9;]*m/g, "").trim();
+    if (trimmed) console.log(`[dsh] ${trimmed}`);
+  };
+  console.log(`[dsh] ${label} started`);
+  return {
+    onData(chunk) {
+      buf += chunk;
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() ?? "";
+      for (const line of lines) emit(line);
+    },
+    flush() {
+      if (buf) emit(buf);
+      buf = "";
+    }
+  };
 }
 function broadcastPluginOp(p) {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -16339,11 +16672,21 @@ async function applyPluginUpdate(name, channel, gitUrl, profile = DEFAULT_PROFIL
     const repo = parsed ? parsed.repo : gitUrl;
     const ref2 = parsed?.ref;
     const installSpec = ref2 ? `${repo}#${ref2}` : `${repo}#${(await remoteHeadSha(repo)).slice(0, 8)}`;
-    await dshPluginForward(["add", installSpec], profile);
+    const tee2 = pluginOutputTee(`plugin update ${name} (git ${installSpec})`);
+    try {
+      await dshPluginForward(["add", installSpec], profile, tee2.onData);
+    } finally {
+      tee2.flush();
+    }
     return m("dsh.updatedTo", { spec: installSpec });
   }
   const s = validateNpmSpec(name);
-  await dshPluginForward(["update", s, "--latest"], profile);
+  const tee = pluginOutputTee(`plugin update ${s}`);
+  try {
+    await dshPluginForward(["update", s, "--latest"], profile, tee.onData);
+  } finally {
+    tee.flush();
+  }
   return m("dsh.npmUpdated", { spec: s });
 }
 async function updateAllDshPlugins(profile = DEFAULT_PROFILE) {
@@ -16561,16 +16904,27 @@ function isProcessAlive(pid) {
     return err.code === "EPERM";
   }
 }
-async function dshSpawnCommand(profile, port) {
+async function dshSpawnCommand(profile, port, mcpPatchFile) {
   const status = await getDshStatus(profile);
   if (!status.installed) throw new Error(status.error || m("dsh.unavailable"));
   const binJs = dshBinJs();
   if (!binJs) throw new Error(m("dsh.binMissing"));
   mkdirSync(status.profileDir, { recursive: true });
   clearStaleDshLocks(join(status.profileDir, "..", ".."));
+  const patchArgs = mcpPatchFile ? ["--patch", mcpPatchFile] : [];
   return {
     cmd: resolveDshNodeExePath(),
-    args: [binJs, "--profile", profile, "--host", "127.0.0.1", "--port", String(port), "--no-open"],
+    args: [
+      binJs,
+      "--profile",
+      profile,
+      ...patchArgs,
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--no-open"
+    ],
     cwd: status.profileDir,
     env: await dshEnv(status.profileDir)
   };
@@ -16628,7 +16982,13 @@ function resolveOpenclawCommand() {
   return { cmd: getNodeExePath(), script };
 }
 function openclawEnv(extra = {}) {
-  return bundledEnv({ OPENCLAW_STATE_DIR: resolveOpenclawHome(), ...bridgeEnvVars(), ...extra });
+  return bundledEnv({
+    OPENCLAW_STATE_DIR: resolveOpenclawHome(),
+    ...bridgeEnvVars(),
+    // and the shared workspace pointers, so openclaw reads/writes the one container context
+    ...workspaceEnvVars(),
+    ...extra
+  });
 }
 function isOpenclawInstalled() {
   return openclawEntryCandidates().some((p) => existsSync(p));
@@ -16718,18 +17078,37 @@ function createOpenclawPage(port = OPENCLAW_DEFAULT_PORT) {
   writeFileSync$1(join(dir, "container.json"), JSON.stringify(manifest, null, 2));
   return id2;
 }
+function refreshBuiltinEnvVars(id2, envVars) {
+  const metaFile = join(resolvePagesDir(), id2, "container.json");
+  if (!existsSync(metaFile)) return;
+  try {
+    const raw = JSON.parse(readFileSync(metaFile, "utf-8"));
+    const cur = Array.isArray(raw.envVars) ? raw.envVars : [];
+    if (JSON.stringify(cur) === JSON.stringify(envVars)) return;
+    writeFileSync$1(metaFile, JSON.stringify({ ...raw, envVars }, null, 2));
+  } catch {
+  }
+}
+function dshEnvVars() {
+  return [
+    {
+      key: "DSH_HOME",
+      label: {
+        zh: msgIn("zh", "dsh.homeLabel"),
+        en: msgIn("en", "dsh.homeLabel")
+      },
+      defaultPath: "~/.dsh",
+      description: {
+        zh: msgIn("zh", "dsh.homeDesc"),
+        en: msgIn("en", "dsh.homeDesc")
+      }
+    }
+  ];
+}
 function ensureDefaultOpenclawPage() {
   const metaFile = join(resolvePagesDir(), "openclaw", "container.json");
   if (existsSync(metaFile)) {
-    try {
-      const raw = JSON.parse(readFileSync(metaFile, "utf-8"));
-      const vars = Array.isArray(raw.envVars) ? raw.envVars : [];
-      const stale = !vars.length || vars.some((v) => v?.key === "OPENCLAW_HOME" && v?.defaultPath === "{envRoot}/openclaw");
-      if (stale) {
-        writeFileSync$1(metaFile, JSON.stringify({ ...raw, envVars: openclawEnvVars() }, null, 2));
-      }
-    } catch {
-    }
+    refreshBuiltinEnvVars("openclaw", openclawEnvVars());
     return;
   }
   try {
@@ -16748,20 +17127,7 @@ function createDshWebPage() {
     },
     kind: "dsh",
     dsh: { profile: "web", port: 8899 },
-    envVars: [
-      {
-        key: "DSH_HOME",
-        label: {
-          zh: msgIn("zh", "dsh.homeLabel"),
-          en: msgIn("en", "dsh.homeLabel")
-        },
-        defaultPath: "~/.dsh",
-        description: {
-          zh: msgIn("zh", "dsh.homeDesc"),
-          en: msgIn("en", "dsh.homeDesc")
-        }
-      }
-    ]
+    envVars: dshEnvVars()
   };
   writeFileSync$1(join(dir, "container.json"), JSON.stringify(manifest, null, 2));
 }
@@ -16781,6 +17147,7 @@ function ensureBuiltinPages() {
     }
   }
   if (!existsSync(join(destRoot, "dsh-web", "container.json"))) createDshWebPage();
+  refreshBuiltinEnvVars("dsh-web", dshEnvVars());
   try {
     const s = getSettings();
     const alive = (pageId) => existsSync(join(destRoot, pageId, "container.json"));
@@ -16792,6 +17159,7 @@ function ensureBuiltinPages() {
   }
 }
 function removeLegacyBuiltinPages() {
+  if (getSettings().legacyBuiltinPagesPruned) return;
   const retired = ["codex", "dsh-plugin-market"];
   for (const id2 of retired) {
     const dir = join(resolvePagesDir(), id2);
@@ -16813,8 +17181,12 @@ function removeLegacyBuiltinPages() {
     if (staleDefault) setDefaultView({ kind: "none" });
   } catch {
   }
+  try {
+    updateSettings({ legacyBuiltinPagesPruned: true });
+  } catch {
+  }
 }
-function openclawSpawnSpec(port) {
+function openclawSpawnSpec(port, mcpServers = []) {
   const resolved = resolveOpenclawCommand();
   if (!resolved) throw new Error(m("openclaw.cliMissingShort"));
   const home = resolveOpenclawHome();
@@ -16825,6 +17197,11 @@ function openclawSpawnSpec(port) {
     initializeOpenclawToken();
   } catch (err) {
     console.warn("[openclaw] durable gateway token seed failed:", err.message);
+  }
+  try {
+    syncOpenclawMcpConfig(mcpServers, openclawConfigPath());
+  } catch (err) {
+    console.warn("[openclaw] mcp bridge sync failed:", err.message);
   }
   return {
     cmd: resolved.cmd,
@@ -17916,90 +18293,6 @@ async function probeRegistries(timeoutMs = 6e3) {
   );
   return results;
 }
-const CACHE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "Shared Dictionary"];
-const STORAGE_DIRS = ["Local Storage", "Session Storage", "IndexedDB", "FileSystem", "WebStorage"];
-async function dirBytes(path2) {
-  let entries2;
-  try {
-    entries2 = await promises.readdir(path2, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  let total = 0;
-  for (const ent of entries2) {
-    const child = join(path2, ent.name);
-    if (ent.isDirectory()) {
-      total += await dirBytes(child);
-      continue;
-    }
-    if (!ent.isFile()) continue;
-    try {
-      const st = await promises.stat(child);
-      total += st.size;
-    } catch {
-    }
-  }
-  return total;
-}
-async function sumDirs(names2) {
-  const root2 = app$1.getPath("userData");
-  const sizes = await Promise.all(names2.map((n) => dirBytes(join(root2, n))));
-  return sizes.reduce((a, b) => a + b, 0);
-}
-async function getWebDataReport() {
-  const [cacheBytes, storageBytes, cookies] = await Promise.all([
-    sumDirs(CACHE_DIRS),
-    sumDirs(STORAGE_DIRS),
-    session.defaultSession.cookies.get({})
-  ]);
-  const counts = /* @__PURE__ */ new Map();
-  for (const c of cookies) {
-    const domain = (c.domain || "").replace(/^\./, "") || "(unknown)";
-    counts.set(domain, (counts.get(domain) || 0) + 1);
-  }
-  const cookieDomains = [...counts.entries()].map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count || a.domain.localeCompare(b.domain));
-  return { cacheBytes, storageBytes, cookieDomains, totalCookies: cookies.length };
-}
-function cookieUrl(cookie) {
-  const host = (cookie.domain || "").replace(/^\./, "");
-  const scheme = cookie.secure ? "https" : "http";
-  const path2 = cookie.path && cookie.path !== "/" ? cookie.path : "";
-  return `${scheme}://${host}${path2}`;
-}
-async function clearCookies(domain) {
-  const all = await session.defaultSession.cookies.get({});
-  const targets = domain ? all.filter((c) => {
-    const host = (c.domain || "").replace(/^\./, "");
-    return host === domain || host.endsWith(`.${domain}`);
-  }) : all;
-  let removed = 0;
-  for (const c of targets) {
-    try {
-      await session.defaultSession.cookies.remove(cookieUrl(c), c.name);
-      removed += 1;
-    } catch {
-    }
-  }
-  return removed;
-}
-async function clearWebData(args) {
-  const scope2 = args.scope;
-  let removedCookies = 0;
-  if (scope2 === "cache") {
-    await session.defaultSession.clearCache();
-  } else if (scope2 === "cookies") {
-    removedCookies = await clearCookies(args.domain);
-  } else if (scope2 === "storage") {
-    await session.defaultSession.clearStorageData({
-      storages: ["localstorage", "indexdb", "filesystem", "serviceworkers", "shadercache"]
-    });
-  } else {
-    removedCookies = await clearCookies(args.domain);
-    await session.defaultSession.clearStorageData();
-    await session.defaultSession.clearCache();
-  }
-  return { removedCookies, scope: scope2 };
-}
 function listInterfaces() {
   const out = [];
   let ifaces = {};
@@ -18115,6 +18408,188 @@ function getSystemInfo() {
     interfaceCount: interfaces.filter((i) => !i.internal).length,
     installDir: resolveInstallDir()
   };
+}
+const NET_BAR_POLL_MS = 2e3;
+const LATENCY_EVERY_TICKS = 40;
+const LATENCY_PROBE_TIMEOUT_MS = 5e3;
+const LATENCY_PROBE_URL = "https://registry.npmmirror.com/-/ping";
+const EGRESS_PROBE_HOST = "223.5.5.5";
+const EGRESS_PROBE_PORT = 53;
+const EGRESS_EVERY_TICKS = 5;
+let netBarTimer = null;
+let lastCounters = null;
+let lastRates = { rx: 0, tx: 0 };
+let lastLatencyMs = null;
+let latencyInFlight = false;
+let tick = 0;
+let activeEgressIp = null;
+function startNetBarLoop(registry2) {
+  if (netBarTimer) clearInterval(netBarTimer);
+  tick = 0;
+  activeEgressIp = null;
+  netBarTimer = setInterval(() => void sampleNetBar(registry2), NET_BAR_POLL_MS);
+  netBarTimer.unref?.();
+  void sampleNetBar(registry2);
+}
+function collectOnlinePorts(registry2) {
+  return registry2.running().map((p) => ({ id: p.id, name: p.name, port: Number(p.containerPort || p.port) || 0 })).filter((p) => p.port > 0).sort((a, b) => a.port - b.port);
+}
+function classifyInterface(name) {
+  const n = name.toLowerCase();
+  if (/wi-?fi|wlan|wireless|无线/.test(n)) return "wifi";
+  if (/ethernet|以太网|\beth\b|gigabit|gbe/.test(n)) return "ethernet";
+  return "other";
+}
+function detectEgressIPv4() {
+  try {
+    const socket = createSocket("udp4");
+    socket.connect(EGRESS_PROBE_PORT, EGRESS_PROBE_HOST);
+    const local = socket.address().address;
+    socket.close();
+    return local || null;
+  } catch {
+    return null;
+  }
+}
+function pickLocalInterface(interfaces, egressIp) {
+  const usable = interfaces.filter((i) => !i.internal && i.address);
+  if (!usable.length) return null;
+  const rank = (i) => classifyInterface(i.name) === "wifi" ? 0 : classifyInterface(i.name) === "ethernet" ? 1 : 2;
+  const match = egressIp ? usable.find((i) => i.address === egressIp) : void 0;
+  const chosen = match ?? [...usable].sort((a, b) => rank(a) - rank(b))[0];
+  return {
+    name: chosen.name,
+    address: chosen.address,
+    kind: classifyInterface(chosen.name)
+  };
+}
+async function sampleNetBar(registry2) {
+  try {
+    tick++;
+    if (tick % LATENCY_EVERY_TICKS === 1 && !latencyInFlight) {
+      latencyInFlight = true;
+      probeUrl(LATENCY_PROBE_URL, LATENCY_PROBE_TIMEOUT_MS).then((p) => {
+        if (p.ok && p.ms != null) lastLatencyMs = p.ms;
+      }).catch(() => void 0).finally(() => {
+        latencyInFlight = false;
+      });
+    }
+    const stats = await getNetworkStats();
+    let rxRate = 0;
+    let txRate = 0;
+    if (stats.counters) {
+      const prev = lastCounters;
+      const dt = prev ? (stats.sampleAt - prev.at) / 1e3 : 0;
+      if (prev && dt > 0) {
+        rxRate = Math.max(0, (stats.counters.rxBytes - prev.rxBytes) / dt);
+        txRate = Math.max(0, (stats.counters.txBytes - prev.txBytes) / dt);
+      }
+      lastCounters = { ...stats.counters, at: stats.sampleAt };
+      lastRates = { rx: rxRate, tx: txRate };
+    } else {
+      rxRate = lastRates.rx;
+      txRate = lastRates.tx;
+    }
+    if (tick % EGRESS_EVERY_TICKS === 1) activeEgressIp = detectEgressIPv4();
+    const local = pickLocalInterface(stats.interfaces, activeEgressIp);
+    const sample = {
+      rxRateBps: rxRate,
+      txRateBps: txRate,
+      counters: stats.counters,
+      localInterface: local,
+      latencyMs: lastLatencyMs,
+      onlinePorts: collectOnlinePorts(registry2),
+      sampleAt: stats.sampleAt
+    };
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnNetSample, sample);
+    }
+  } catch {
+  }
+}
+const CACHE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "Shared Dictionary"];
+const STORAGE_DIRS = ["Local Storage", "Session Storage", "IndexedDB", "FileSystem", "WebStorage"];
+async function dirBytes(path2) {
+  let entries2;
+  try {
+    entries2 = await promises.readdir(path2, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const ent of entries2) {
+    const child = join(path2, ent.name);
+    if (ent.isDirectory()) {
+      total += await dirBytes(child);
+      continue;
+    }
+    if (!ent.isFile()) continue;
+    try {
+      const st = await promises.stat(child);
+      total += st.size;
+    } catch {
+    }
+  }
+  return total;
+}
+async function sumDirs(names2) {
+  const root2 = app$1.getPath("userData");
+  const sizes = await Promise.all(names2.map((n) => dirBytes(join(root2, n))));
+  return sizes.reduce((a, b) => a + b, 0);
+}
+async function getWebDataReport() {
+  const [cacheBytes, storageBytes, cookies] = await Promise.all([
+    sumDirs(CACHE_DIRS),
+    sumDirs(STORAGE_DIRS),
+    session.defaultSession.cookies.get({})
+  ]);
+  const counts = /* @__PURE__ */ new Map();
+  for (const c of cookies) {
+    const domain = (c.domain || "").replace(/^\./, "") || "(unknown)";
+    counts.set(domain, (counts.get(domain) || 0) + 1);
+  }
+  const cookieDomains = [...counts.entries()].map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count || a.domain.localeCompare(b.domain));
+  return { cacheBytes, storageBytes, cookieDomains, totalCookies: cookies.length };
+}
+function cookieUrl(cookie) {
+  const host = (cookie.domain || "").replace(/^\./, "");
+  const scheme = cookie.secure ? "https" : "http";
+  const path2 = cookie.path && cookie.path !== "/" ? cookie.path : "";
+  return `${scheme}://${host}${path2}`;
+}
+async function clearCookies(domain) {
+  const all = await session.defaultSession.cookies.get({});
+  const targets = domain ? all.filter((c) => {
+    const host = (c.domain || "").replace(/^\./, "");
+    return host === domain || host.endsWith(`.${domain}`);
+  }) : all;
+  let removed = 0;
+  for (const c of targets) {
+    try {
+      await session.defaultSession.cookies.remove(cookieUrl(c), c.name);
+      removed += 1;
+    } catch {
+    }
+  }
+  return removed;
+}
+async function clearWebData(args) {
+  const scope2 = args.scope;
+  let removedCookies = 0;
+  if (scope2 === "cache") {
+    await session.defaultSession.clearCache();
+  } else if (scope2 === "cookies") {
+    removedCookies = await clearCookies(args.domain);
+  } else if (scope2 === "storage") {
+    await session.defaultSession.clearStorageData({
+      storages: ["localstorage", "indexdb", "filesystem", "serviceworkers", "shadercache"]
+    });
+  } else {
+    removedCookies = await clearCookies(args.domain);
+    await session.defaultSession.clearStorageData();
+    await session.defaultSession.clearCache();
+  }
+  return { removedCookies, scope: scope2 };
 }
 const lastCpu = /* @__PURE__ */ new Map();
 const HISTORY_CAP = 120;
@@ -19257,6 +19732,7 @@ function registerIpc(registry2) {
     }
   }, METRICS_POLL_MS);
   metricsTimer.unref?.();
+  startNetBarLoop(registry2);
   ipcMain$1.handle(
     IPC.UpdateSettings,
     (_e, partial) => {
@@ -19297,14 +19773,13 @@ function registerIpc(registry2) {
       }
     }
   );
-  ipcMain$1.handle(
-    IPC.EnvRoot,
-    () => ok({
+  ipcMain$1.handle(IPC.EnvRoot, () => {
+    return ok({
       envRoot: resolveEnvRoot(),
       installDir: resolveInstallDir(),
-      custom: Boolean((getSettings().envRoot || "").trim())
-    })
-  );
+      home: homedir$1()
+    });
+  });
   ipcMain$1.handle(
     IPC.DownloadDir,
     () => ok({
@@ -19703,6 +20178,30 @@ function registerIpc(registry2) {
       return fail(err);
     }
   });
+  ipcMain$1.handle(IPC.WorkspaceGet, () => {
+    try {
+      return ok(workspaceInfo());
+    } catch (err) {
+      return fail(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.WorkspaceSave,
+    (_e, patch) => {
+      try {
+        return ok(writeWorkspace(patch || {}));
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.WorkspaceBroadcast, () => {
+    try {
+      return ok(broadcastWorkspace());
+    } catch (err) {
+      return fail(err);
+    }
+  });
 }
 let sequence = 0;
 function nextId() {
@@ -19977,6 +20476,10 @@ function confirmAndQuit() {
   if (!mainWindow.isVisible()) mainWindow.show();
   mainWindow.webContents.send(IPC.OnQuitConfirm);
 }
+function quitNow() {
+  isQuitting = true;
+  app$1.quit();
+}
 async function verifyNodeRuntime() {
   const info = await getNodeRuntimeInfo();
   if (!info.ok) {
@@ -20036,6 +20539,16 @@ if (!gotLock) {
     app$1.on("browser-window-created", (_, window) => optimizer.watchWindowShortcuts(window));
     app$1.on("web-contents-created", (_e, contents) => {
       if (contents.getType() === "webview") {
+        contents.setBackgroundThrottling(false);
+        contents.on("did-stop-loading", () => {
+          if (!contents.isDestroyed()) contents.invalidate();
+        });
+        contents.on("did-finish-load", () => {
+          if (!contents.isDestroyed()) contents.invalidate();
+          setTimeout(() => {
+            if (!contents.isDestroyed()) contents.invalidate();
+          }, 120);
+        });
         contents.setWindowOpenHandler(({ url }) => {
           contents.loadURL(url).catch(() => void 0);
           return { action: "deny" };
@@ -20047,7 +20560,7 @@ if (!gotLock) {
     createTray({
       getRegistry: () => registry,
       onShowWindow: showWindow,
-      onQuitRequest: confirmAndQuit
+      onQuitRequest: quitNow
     });
     verifyNodeRuntime().catch(
       (err) => console.error("[container] node runtime verification failed:", err)

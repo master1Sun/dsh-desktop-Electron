@@ -1,6 +1,7 @@
 import { ipcMain, shell, BrowserWindow, webContents, nativeTheme, dialog, app } from 'electron'
 import type { WebContents } from 'electron'
 import { existsSync, rmSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   IPC,
@@ -83,6 +84,7 @@ import { logsDir, listLogFiles, readLogTail, startLogStream, logPageLine } from 
 import { exportDiagnostics } from '../runtime/diagnostics'
 import { exportSnapshot, importSnapshot } from '../runtime/snapshot'
 import { runNetworkProbe, probeRegistries } from '../runtime/net-probe'
+import { startNetBarLoop } from '../runtime/network-bar'
 import { getWebDataReport, clearWebData } from './webdata'
 import { getSystemInfo, getNetworkStats } from '../runtime/sysinfo'
 import { collectPageMetrics, pruneMetricsBaseline, getMetricsHistory } from '../runtime/metrics'
@@ -126,13 +128,16 @@ import {
   hubEvents
 } from '../runtime/mcp-hub'
 import { bridgeCatalogFile, bridgeConfigFile, bridgeDir } from '../runtime/mcp-bridge'
+import { workspaceInfo, writeWorkspace, broadcastWorkspace } from '../runtime/workspace'
 import { mcpPackagesStatus } from '../runtime/mcp-packages'
 import type {
   McpCallToolArgs,
   McpCallToolResult,
   McpServerSpec,
   McpServerState,
-  McpToolInfo
+  McpToolInfo,
+  WorkspaceContext,
+  WorkspaceNote
 } from '../../shared/types'
 import { m, notifyLocaleChanged, invalidateLocaleCache } from './i18n'
 
@@ -1089,6 +1094,10 @@ export function registerIpc(registry: PageRegistry): void {
   }, METRICS_POLL_MS)
   metricsTimer.unref?.()
 
+  // Top-bar network indicator: one shared 2s sample loop in main (rates + latency + online
+  // ports) broadcast to every window — see network-bar.ts. Idempotent across dev-HMR.
+  startNetBarLoop(registry)
+
   ipcMain.handle(
     IPC.UpdateSettings,
     (
@@ -1190,13 +1199,15 @@ export function registerIpc(registry: PageRegistry): void {
     }
   )
 
-  ipcMain.handle(IPC.EnvRoot, (): IpcResult =>
-    ok({
+  // Env-root facts for the 环境目录 rows: the fixed root every '@install' dir lands under,
+  // plus the OS home so the renderer can expand `~` in declared defaults.
+  ipcMain.handle(IPC.EnvRoot, (): IpcResult => {
+    return ok({
       envRoot: resolveEnvRoot(),
       installDir: resolveInstallDir(),
-      custom: Boolean((getSettings().envRoot || '').trim())
+      home: homedir()
     })
-  )
+  })
 
   // The effective webview download folder + the OS default an empty override falls back to,
   // so the Settings panel can show a real placeholder and a "reveal current" value.
@@ -1727,6 +1738,36 @@ export function registerIpc(registry: PageRegistry): void {
   ipcMain.handle(IPC.McpPackagesStatus, (): IpcResult => {
     try {
       return ok(mcpPackagesStatus())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  /** Shared workspace: locations + the live container-owned context, for the panel. */
+  ipcMain.handle(IPC.WorkspaceGet, (): IpcResult => {
+    try {
+      return ok(workspaceInfo())
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  /** Shared workspace: persist a partial edit ({ task?, notes? }) and return the stored doc. */
+  ipcMain.handle(
+    IPC.WorkspaceSave,
+    (_e, patch: { task?: string; notes?: WorkspaceNote[] }): IpcResult<WorkspaceContext> => {
+      try {
+        return ok(writeWorkspace(patch || {}))
+      } catch (err) {
+        return fail(err)
+      }
+    }
+  )
+
+  /** Shared workspace: push the current task to running agents (bump revision + log a note). */
+  ipcMain.handle(IPC.WorkspaceBroadcast, (): IpcResult<WorkspaceContext> => {
+    try {
+      return ok(broadcastWorkspace())
     } catch (err) {
       return fail(err)
     }

@@ -246,6 +246,17 @@ function confirmAndQuit(): void {
   mainWindow.webContents.send(IPC.OnQuitConfirm)
 }
 
+/**
+ * Quit with no confirm dialog — the tray's 退出 item. This is still a clean exit: `app.quit()`
+ * fires `before-quit`, which runs the graceful child shutdown (tree-killing every child) before
+ * forcing exit. Setting `isQuitting` first makes
+ * the window `close` handler let the teardown through instead of re-intercepting it.
+ */
+function quitNow(): void {
+  isQuitting = true
+  app.quit()
+}
+
 async function verifyNodeRuntime(): Promise<void> {
   const info = await getNodeRuntimeInfo()
   if (!info.ok) {
@@ -339,6 +350,32 @@ if (!gotLock) {
     // renderer `new-window` event, so nothing can slip out to an external window.
     app.on('web-contents-created', (_e, contents) => {
       if (contents.getType() === 'webview') {
+        // Persistent-services black screen (root cause): a managed <webview> navigates while the
+        // just-created host window has not yet painted it as foreground, so Chromium treats the
+        // guest as background and THROTTLES its first composite — the DOM is fully there (Elements
+        // populated, token correct) but the surface reads black until a manual refresh forces a
+        // frame. Keeping the guest unthrottled makes it composite the instant it loads. Safe here:
+        // the container already keeps every opened guest alive across switches (they are never
+        // reloaded), so full-rate rendering of a mounted view is the intended model, not a cost we
+        // newly introduce. Reload-on-load-events in the renderer stays only as a belt-and-suspenders
+        // fallback for the rare machine where throttling is not the cause.
+        contents.setBackgroundThrottling(false)
+        // Belt-and-suspenders against the SAME "rendered but not composited" black frame from the
+        // other side: even unthrottled, a guest can hand Chromium a first frame the host never
+        // latches while the window is still settling. `invalidate()` asks the guest to repaint its
+        // surface right after the document finishes — non-destructive (no reload, no re-navigation,
+        // so an openclaw token / a live dsh session are untouched) and cheap enough to fire on every
+        // load. Repeated once after a short settle because the very first invalidate can land before
+        // there is a frame to push.
+        contents.on('did-stop-loading', () => {
+          if (!contents.isDestroyed()) contents.invalidate()
+        })
+        contents.on('did-finish-load', () => {
+          if (!contents.isDestroyed()) contents.invalidate()
+          setTimeout(() => {
+            if (!contents.isDestroyed()) contents.invalidate()
+          }, 120)
+        })
         contents.setWindowOpenHandler(({ url }) => {
           contents.loadURL(url).catch(() => undefined)
           return { action: 'deny' }
@@ -359,7 +396,7 @@ if (!gotLock) {
     createTray({
       getRegistry: () => registry,
       onShowWindow: showWindow,
-      onQuitRequest: confirmAndQuit
+      onQuitRequest: quitNow
     })
 
     // Node probing may spawn a process (seconds on cold starts) — never await it on the
@@ -420,6 +457,7 @@ if (!gotLock) {
       shutdownDone = true // one-shot: never reset, re-entrant quits fall through to Electron
       e.preventDefault()
       const grace = new Promise<void>((resolve) => setTimeout(resolve, QUIT_FLUSH_MS))
+      // Tree-kill every tracked child on quit; nothing is left running detached across sessions.
       Promise.race([registry.shutdownAll(), grace])
         .then(
           () => mcpShutdown(),

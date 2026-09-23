@@ -22,7 +22,10 @@
    `.glass-soft` — lighter inset surface (rows, sub-cards, inputs).
    Tint alpha (--glass-tint-a) and saturation both scale with --glass-blur, so the
    settings slider visibly changes the frosting instead of blurring an invisible
-   backdrop behind a near-opaque fill. */
+   backdrop behind a near-opaque fill. Rows/sub-cards sit ON TOP of a `.glass` panel,
+   so their own tint is halved (× 0.5) — that keeps them clearly lighter than the
+   panel they rest on (a see-through "window" into the frosted backdrop) while still
+   tracking the 毛玻璃 slider, which drives --glass-tint-a. */
 .glass {
   background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a));
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
@@ -36,7 +39,7 @@
     0 1px 0 0 color-mix(in srgb, #ffffff 14%, transparent) inset;
 }
 .glass-soft {
-  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.98));
+  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.5));
   border: 1px solid var(--border);
   border-radius: var(--radius-md, 12px);
   -webkit-backdrop-filter: blur(calc(var(--glass-blur, 30px) * 0.667))
@@ -190,6 +193,111 @@ html.light .aurora .blob {
   animation-delay: -15s;
 }
 
+/* ---- flowing-light border (marquee ring) ------------------------------------
+   A theme-tinted ring with a bright head travelling the full loop, painted two ways:
+   • App-window frame (`.win-edge`): an SVG stroke-dash — a full-perimeter base rect plus a bright
+     dash whose offset animates. Chosen over a conic because on a wide window a conic sweeps by
+     ANGLE and rushes the short vertical edges (the light looks like it "skips" the sides); a dash
+     runs by PERIMETER at constant speed so every edge is covered evenly.
+   • Floating popups (`.qq-pop` / `.panel-card` / `.palette` / `.el-dialog`): a conic `::after`,
+     fine at their small near-square sizes. Ring colours are shared via `--mq-*` vars, but the conic
+     is written inline on each popup so its `from var(--ang)` resolves against that element's
+     animated angle (neon-spin drives the registered `@property --ang`) — each ring spins on its own.
+     The mask clips the paint to a border-only band (content-box XOR full) so the surface is never
+     dimmed. DARK THEME ONLY — the light theme keeps its flat hairline borders. */
+:root {
+  /* Ring colours live here (theme-resolved on <html>, which carries the accent tokens) — none of
+     them reference --ang. The rotating conic itself MUST be written inline on each `.win-edge` /
+     popup ::after so its `from var(--ang)` resolves against THAT element's animated angle. If the
+     conic were wrapped in a :root custom property, --ang would be substituted at :root's value
+     (frozen 0deg, since @property --ang doesn't inherit and :root never animates it) and the
+     marquee would render but never move. */
+  /* Base (`--mq-dim`) must stay bright enough to read on the near-black dark bg, otherwise only
+     the comet head is visible along the long window perimeter and it looks like the light never
+     completes the loop. Leading edge (`--mq-tail`) is a whitened accent — hue follows the theme. */
+  --mq-dim: color-mix(in srgb, var(--accent) 55%, transparent);
+  --mq-mid: color-mix(in srgb, var(--accent) 68%, transparent);
+  --mq-bright: color-mix(in srgb, var(--accent) 85%, transparent);
+  --mq-head: color-mix(in srgb, var(--accent-strong) 100%, transparent);
+  --mq-tail: color-mix(in srgb, var(--accent-strong) 55%, white);
+  --marquee-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+}
+/* Popup hosts that paint the ring as an ::after must be positioned; these are static, and
+   relative→ adds no offset so it is safe in every theme. (.qq-pop & .el-dialog already are.) */
+.panel-card,
+.palette {
+  position: relative;
+}
+
+/* App-window frame. SVG stroke-dash so the comet runs the *perimeter* at constant speed. Two
+   stacked rects: `.we-base` is the always-on full ring; `.we-comet` is a bright dash (pathLength=100
+   → dash units are % of the perimeter) whose offset animates one full lap. Hidden outside dark. */
+.win-edge {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  display: none;
+}
+.win-edge rect {
+  fill: none;
+  x: 1px;
+  y: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  rx: 9px;
+  stroke-width: 2;
+}
+.win-edge .we-base {
+  stroke: color-mix(in srgb, var(--accent) 42%, transparent);
+}
+.win-edge .we-comet {
+  stroke: color-mix(in srgb, var(--accent-strong) 96%, transparent);
+  stroke-linecap: round;
+  stroke-dasharray: 20 80;
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--accent) 55%, transparent));
+  animation: we-run 7s linear infinite;
+}
+html.dark .win-edge {
+  display: block;
+}
+@keyframes we-run {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+/* Every floating popup gets the same travelling ring along its own border. */
+html.dark .qq-pop::after,
+html.dark .panel-card::after,
+html.dark .palette::after,
+html.dark .el-dialog::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  padding: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--ang, 0deg),
+    var(--mq-dim) 0deg,
+    var(--mq-mid) 140deg,
+    var(--mq-bright) 250deg,
+    var(--mq-head) 330deg,
+    var(--mq-tail) 352deg,
+    var(--mq-dim) 360deg
+  );
+  -webkit-mask: var(--marquee-mask);
+  -webkit-mask-composite: xor;
+  mask: var(--marquee-mask);
+  mask-composite: exclude;
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 45%, transparent));
+  animation: neon-spin 7s linear infinite;
+}
+
 /* ---- Element Plus buttons: semantic neon glow --------------------------------
    Every el-button casts a glow in its own type color, so start/stop/delete-style
    actions read as highlighted anywhere in the app (the Pages table started it).
@@ -284,6 +392,11 @@ html.light .aurora .blob {
    hint, instead of a bare media query — the class form is what lets the setting say 'off'. */
 html.reduce-motion .reveal,
 html.reduce-motion .aurora .blob,
+html.reduce-motion .win-edge .we-comet,
+html.reduce-motion .qq-pop::after,
+html.reduce-motion .panel-card::after,
+html.reduce-motion .palette::after,
+html.reduce-motion .el-dialog::after,
 html.reduce-motion .neon-edge::before {
   animation: none !important;
 }
@@ -302,16 +415,92 @@ html.reduce-motion .el-button {
 
 /* ---- frosted inputs (Element Plus) -----------------------------------------
    Inputs/textarea keep a translucent, blurred fill so they read as glass instead
-   of an opaque block — the dark-mode gap the other surfaces already fixed. */
+   of an opaque block. Like the `.glass-soft` rows they sit on a frosted panel, so the
+   fill is a fraction of --glass-tint-a (× 0.45) — lighter than the panel and visibly
+   tracking the 毛玻璃 slider. --glass-tint-rgb already flips white↔black per theme, so
+   one rule serves both light and dark (the old dark-only +/‑ alpha nudge is gone). */
 .el-input__wrapper,
 .el-textarea__inner {
-  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) + 0.1));
+  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.45));
   -webkit-backdrop-filter: blur(calc(var(--glass-blur, 30px) * 0.267)) saturate(120%);
   backdrop-filter: blur(calc(var(--glass-blur, 30px) * 0.267)) saturate(120%);
 }
-html.dark .el-input__wrapper,
-html.dark .el-textarea__inner {
-  background: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) - 0.12));
+
+/* ---- frosted dialogs (Element Plus) ----------------------------------------
+   `el-dialog` / `el-message-box` are the only surfaces still riding the opaque
+   `--surface` fallback in main.css, so the dialog-only pages (后台服务 / MCP / 页面配置
+   / 日志 …) read flat next to the frosted docked panels, and their edge/title never
+   followed the user's highlight color. Give them the same glass surface as `.panel-card`
+   — a translucent blurred tint, an accent-tinted border + top glow, and an accent title —
+   so every floating surface shares one treatment. They mount on <body> (append-to-body),
+   so these rules must stay global; glass.css loads after main.css, so the `html.dark`
+   selectors here outrank main.css's opaque `html.dark .el-dialog` by source order. */
+html .el-dialog,
+html.dark .el-dialog,
+html .el-message-box,
+html.dark .el-message-box {
+  background:
+    radial-gradient(
+      120% 70% at 50% -12%,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      transparent 60%
+    ),
+    rgb(var(--glass-tint-rgb) / var(--glass-tint-a));
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
+    saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
+  box-shadow:
+    var(--shadow),
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent) inset,
+    0 18px 60px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+/* Accent title. Kept at `.el-dialog .el-dialog__title` depth so it matches (and, by
+   loading later, beats) main.css's nested `html.dark .el-dialog .el-dialog__title`. */
+html .el-dialog .el-dialog__title,
+html.dark .el-dialog .el-dialog__title {
+  color: var(--accent);
+}
+
+/* ---- themed tooltip bubbles (`.dsh-tip-popper`) -----------------------------
+   The ⓘ info tooltips (InfoTip in 设置, the 环境目录 row tips in Pages) used Element
+   Plus's stock bubble: a fixed dark/light fill that ignored the theme, no width cap (so a
+   long paragraph ran one line across the whole window), and no height cap. Route them here
+   with `popper-class="dsh-tip-popper"` to get the same frosted surface as the dialogs —
+   driven by --glass/--accent tokens so it tracks theme + the 毛玻璃 slider — a sane max
+   width that wraps, and a scroll box (max-height + overflow) so a very long tip stays put
+   instead of stretching the page. The arrow is dropped because it sits outside the box and
+   a rounded/scrollable bubble would clip it. glass.css loads after EP, so these (0,2,0)
+   rules outrank `.el-popper.is-dark` / `.is-light` by source order. */
+.dsh-tip-popper.el-popper {
+  max-width: min(340px, 82vw);
+  max-height: 46vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.55;
+  font-size: 12px;
+  color: var(--text);
+  background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a));
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: var(--radius-md, 12px);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
+    saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(calc(1.2 + var(--glass-blur-n, 30) / 70));
+  box-shadow: var(--shadow);
+}
+.dsh-tip-popper .el-popper__arrow {
+  display: none;
+}
+
+/* Table cell overflow tooltips (el-table `show-overflow-tooltip` with popperClass
+   `dsh-tip-popper dsh-cell-tip`). Same glass surface as the ⓘ bubbles, but wider — a
+   cell tip usually carries a whole page description / path — and `pre-line`, because
+   the tip text is the cell's innerText whose name/description lines arrive as \n. */
+.dsh-cell-tip.el-popper {
+  max-width: min(420px, 82vw);
+  white-space: pre-line;
 }
 
 /* ---- compact corner toasts (ElMessage) --------------------------------------
@@ -377,6 +566,36 @@ html.dark .el-textarea__inner {
 .v-tabs .el-tabs__header {
   margin: 0 16px 0 0;
 }
+/* IM popup variant: `tab-position="top"` adds `.el-tabs--top` to the same root. The base block is
+   tuned for the left rail (row flex + min-height), so flip it back to a column and move the header
+   margin beneath the tab strip; `.is-left` rules above stay inert for top items (`.is-top`). */
+.v-tabs.el-tabs--top {
+  flex-direction: column;
+  align-items: stretch;
+  min-height: 0;
+}
+.v-tabs.el-tabs--top .el-tabs__header {
+  margin: 0 0 12px;
+  display: flex;
+  justify-content: center;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border));
+}
+/* Horizontal tabs: pills centred in the header, centred icon+label. The rail's `margin-top: 8px`
+   (for a vertical stack) is neutralised — EP already lays the top nav as a flex row, so item spacing
+   comes from a uniform `gap` (below) rather than a left margin. */
+.v-tabs.el-tabs--top .el-tabs__item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  padding: 8px 14px;
+}
+.v-tabs.el-tabs--top .el-tabs__nav {
+  gap: 10px;
+  /* Outer edges must match the inter-pill gap, else the first/last tab sits flush
+     (2px base padding) while the rest are 10px apart. */
+  padding: 2px 10px;
+}
 .v-tabs .el-tabs__nav-wrap::after {
   display: none;
 }
@@ -396,7 +615,8 @@ html.dark .el-textarea__inner {
   white-space: nowrap;
   color: var(--text-dim);
 }
-.v-tabs .el-tabs__item + .el-tabs__item {
+.v-tabs:not(.el-tabs--top) .el-tabs__item + .el-tabs__item {
+  /* Vertical rail only: this stack spacing would stagger a horizontal row's first item. */
   margin-top: 8px;
 }
 .v-tabs .el-tabs__item:hover {
@@ -422,4 +642,76 @@ html.dark .el-textarea__inner {
 }
 .tab-label .el-icon {
   font-size: 15px;
+}
+
+/* =============================================================================
+ * IM (QQ-like) sidebar: narrow reflow
+ * -----------------------------------------------------------------------------
+ * The docked sidebar's content column is ~340px, while managers are authored for the wide
+ * centered floating card — so horizontal control rows overflow and long inline values push
+ * the panel wide. These unscoped rules are keyed on `.qq-sidebar .side-body`, a class the
+ * classic card never carries, and reflow the shared patterns: control rows wrap instead of
+ * overflowing, fixed-width fields give up their width, label/control grids collapse to one
+ * column, and long inline values shrink. `.qq-sidebar .side-body X` (>=0,3,0) beats each
+ * manager's own scoped `.X[data-v]` (0,2,0), so no per-component prop is needed.
+ * ========================================================================== */
+
+/* Let any control row fold onto a second line instead of forcing the sidebar wide. */
+.qq-sidebar
+  .side-body
+  :is(
+    .head,
+    .head-main,
+    .head-actions,
+    .btn-row,
+    .row-actions,
+    .row-switch,
+    .actions,
+    .src-row,
+    .kind-row,
+    .act-row,
+    .info-row,
+    .token-row,
+    .token-hint,
+    .term-row,
+    .sub,
+    .note-row,
+    .row-main,
+    .row-pkg,
+    .tool-row,
+    .bridge-hint,
+    .node-update-ctl,
+    .kv,
+    .dsh-footer
+  ) {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* Fields/tables can't exceed the column; `max-width:100%` beats a hard inline
+   `width` (it clamps regardless of specificity), so oversized selects fit. */
+.qq-sidebar
+  .side-body
+  :is(
+    .el-select,
+    .el-input,
+    .el-input-number,
+    .el-cascader,
+    .el-date-editor,
+    .el-autocomplete,
+    .el-textarea,
+    .el-button-group,
+    .el-table
+  ) {
+  max-width: 100%;
+}
+/* Long inline values (paths, commands, tokens) shrink below their content and wrap
+   rather than pushing the row out — `min-width:0` is what unlocks a flex child's shrink. */
+.qq-sidebar .side-body :is(code, .scmd, .sname, .info-val, .token-val, .row-status, .cell-sub) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* Label/control grids collapse to one stacked column (AppManager `.field`, Help `.sys-grid`). */
+.qq-sidebar .side-body :is(.field, .sys-grid) {
+  grid-template-columns: minmax(0, 1fr);
 }

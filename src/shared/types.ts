@@ -253,14 +253,14 @@ export function parseAppPanel(panel: string | null | undefined): string | null {
   return panel && panel.startsWith(APP_PANEL_PREFIX) ? panel.slice(APP_PANEL_PREFIX.length) : null
 }
 
-/** Resolved "环境目录" info surfaced to the Settings panel. */
+/** Resolved "环境目录" info surfaced to the renderer's env-dir rows. */
 export interface EnvRootInfo {
-  /** effective root every runtime's home dir defaults into */
+  /** effective (fixed) root every runtime's install-choice dir lands under: userData/env */
   envRoot: string
   /** directory holding the app executable (the install dir when packaged) */
   installDir: string
-  /** true when the user pinned a custom root instead of following the install dir */
-  custom: boolean
+  /** os home — lets the renderer display `~/.tool` system-common paths verbatim */
+  home: string
 }
 
 /** Resolved "下载目录" info surfaced to the Settings panel. */
@@ -307,15 +307,27 @@ export interface ContainerSettings {
   theme: 'auto' | 'light' | 'dark'
   /** UI display language; empty/default = Chinese */
   locale: Locale
-  /** root for every runtime's config/state dir; empty = follow the install dir (<installDir>/env) */
+  /**
+   * Shell layout mode. 'classic' (default) = the top menu bar with centered floating panels;
+   * 'im' = a QQ-like shell: a compact title bar, a left icon rail, and a docked sidebar that
+   * hosts the same panels. Layout only — the frosted-glass surfaces are unchanged.
+   */
+  layoutMode?: 'classic' | 'im'
+  /** legacy: the env root used to be a two-choice pick here; resolveEnvRoot() now always returns userData/env */
   envRoot: string
-  /** dsh home override; empty = <envRoot>/dsh (an existing ~/.dsh is kept as a migration fallback) */
+  /** dsh home choice; ''/'@install' (default) = container-owned <envRoot>/.dsh, '@system' = the tool's own ~/.dsh (legacy free paths read as default) */
   dshHome: string
-  /** openclaw config home override; empty = <envRoot>/openclaw (existing ~/.openclaw kept as fallback) */
+  /** openclaw config home choice; ''/'@install' (default) = <envRoot>/.openclaw, '@system' = the tool's own ~/.openclaw (legacy free paths read as default) */
   openclawHome: string
+  /**
+   * Root of the container-owned *shared workspace* (working dir + context.json every hosted
+   * agent reads/writes; see runtime/workspace.ts). Empty = userData/workspace; a set value
+   * (`~`/`{envRoot}` expanded) lets the shared context live inside a real project repo.
+   */
+  workspaceRoot?: string
   /** where files downloaded inside an embedded page are saved; empty = the OS Downloads folder */
   downloadDir: string
-  /** per-page directory env overrides: pageId -> (envVarKey -> path); empty value falls back to the spec defaultPath */
+  /** per-page directory env choices: pageId -> (envVarKey -> ''|'@install'|'@system'); default (empty/'@install') is the container dir, '@system' the tool's own home; legacy free paths read as default */
   pageEnvs: Record<string, Record<string, string>>
   /** per-page port overrides: pageId -> port; wins over container.json so imported projects need no editing */
   pagePorts: Record<string, number>
@@ -385,6 +397,13 @@ export interface ContainerSettings {
   /** #26: which tiers may light the tray badge: all = update/resource/alert, alert = a crashed page only, off = never */
   trayBadge?: 'all' | 'alert' | 'off'
   /**
+   * Master switch for the shared workspace / context layer. On (default): every hosted agent is
+   * pointed at the container-owned context at spawn. Off: the pointers are withheld, so newly
+   * started agents neither see nor write the shared memory — a per-user opt out of multi-agent
+   * context. Running agents keep whatever they were handed at launch until they restart.
+   */
+  sharedWorkspace?: boolean
+  /**
    * Dist-tag the DSH CLI is (re)provisioned from. 'alpha' is what the container shipped with
    * (dsh publishes prereleases there), 'latest' tracks the stable release. Read at install and
    * update-check time, so switching only changes what the *next* reprovision pulls.
@@ -401,6 +420,14 @@ export interface ContainerSettings {
    * is cheaper than a leak-induced OOM.
    */
   memLimitAction?: 'notify' | 'restart'
+  /**
+   * One-shot guard for the transitional cleanup of built-in pages retired from the container
+   * (the old `codex` CLI page, `dsh-plugin-market`). Those dirs live in the SAME userData/pages
+   * root a user's own imports land in, so re-pruning them on every launch would silently delete
+   * an imported page that happens to share a retired id (e.g. importing an npm CLI into a folder
+   * named `codex`). Prune once per install — before any import can collide — then never again.
+   */
+  legacyBuiltinPagesPruned?: boolean
   /**
    * Custom shortcut bindings: action id -> accelerator string ('Ctrl+K', 'F12',
    * 'Ctrl+Shift+Enter'). Absent key = the built-in default for that action, so this map only
@@ -834,6 +861,46 @@ export interface McpBridgeInfo {
   codexConfigFile?: string
 }
 
+/* ---- shared workspace / context layer (see runtime/workspace.ts) ---- */
+
+/** One entry in the shared workspace's append-only memory log. */
+export interface WorkspaceNote {
+  id: string
+  /** who wrote it — an agent name, the container UI, or 'agent' for an unattributed write */
+  author: string
+  text: string
+  /** epoch ms; the panel orders and renders this in the display zone like every other timestamp */
+  ts: number
+}
+
+/**
+ * The container-owned shared context every hosted agent discovers through
+ * DSH_WORKSPACE_DIR / DSH_WORKSPACE_FILE. A single document all agents read and write,
+ * so "what are we working on" survives an agent swap.
+ */
+export interface WorkspaceContext {
+  version: number
+  /** ISO stamp of the last write; maintained by the container, ignored on ingest */
+  updatedAt: string
+  /**
+   * Monotonic counter bumped on every broadcast. A polling agent diffs it against what it last
+   * read to notice the container pushed a new task without it re-parsing the whole document.
+   */
+  revision: number
+  /** ISO stamp of the last broadcast (container → running agents), if any */
+  broadcastAt?: string
+  /** the current shared task / goal, free text */
+  task: string
+  notes: WorkspaceNote[]
+}
+
+/** Where the shared workspace lives + its current contents, handed to the panel. */
+export interface WorkspaceInfo {
+  dir: string
+  file: string
+  context: WorkspaceContext
+}
+
 export interface IpcResult<T = unknown> {
   ok: boolean
   data?: T
@@ -1049,6 +1116,8 @@ export const IPC = {
   GetNetworkStats: 'container:get-network-stats',
   /** broadcast: #20 periodic CPU/RAM sample for running pages (PageMetrics[]) */
   OnPageMetrics: 'container:page-metrics',
+  /** broadcast: top-bar live network sample (NetSample) — rates + latency + online ports */
+  OnNetSample: 'container:net-sample',
   /** broadcast: #22 tailed lines appended to a log file since the last tick (LogLineEvent) */
   OnLogLine: 'container:log-line',
   /** #26: probe every candidate npm registry in parallel → RegistryProbe[] */
@@ -1089,7 +1158,13 @@ export const IPC = {
   /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
   McpBridgeInfo: 'container:mcp-bridge-info',
   /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
-  McpPackagesStatus: 'container:mcp-packages-status'
+  McpPackagesStatus: 'container:mcp-packages-status',
+  /** shared workspace: read the container-owned context + its locations → WorkspaceInfo */
+  WorkspaceGet: 'container:workspace-get',
+  /** shared workspace: persist a partial edit ({ task?, notes? }) → WorkspaceContext */
+  WorkspaceSave: 'container:workspace-save',
+  /** shared workspace: push the current task to running agents (bump revision + log a note) → WorkspaceContext */
+  WorkspaceBroadcast: 'container:workspace-broadcast'
 } as const
 
 /** Payload of {@link IPC.OnHotkey}: which action fired and for which page, if any. */
@@ -1278,5 +1353,39 @@ export interface NetworkStats {
   interfaces: NetInterfaceInfo[]
   counters: { rxBytes: number; txBytes: number } | null
   /** epoch ms of this sample, used as the delta baseline by the renderer */
+  sampleAt: number
+}
+
+/** One online (running, port-bound) page for the top-bar network tooltip. */
+export interface OnlinePort {
+  id: string
+  name: string
+  /** the effective listening port (containerPort || port) */
+  port: number
+}
+
+/**
+ * Broadcast the main process pushes to every window for the top-bar network indicator.
+ * The byte counters are cumulative-since-boot (null where the OS probe failed); the
+ * rx/tx rates are the main process's delta between two consecutive samples, and
+ * `latencyMs` is a slow-cadence internet-RTT probe cached between probes.
+ */
+export interface NetSample {
+  /** current down/up rate in bytes/sec */
+  rxRateBps: number
+  txRateBps: number
+  counters: { rxBytes: number; txBytes: number } | null
+  /** the interface the machine is actually online through right now (default-route probe):
+   *  WiFi/NAT/以太网优先，否则回退到首张非回环网卡; null when none has an address */
+  localInterface: {
+    name: string
+    address?: string
+    /** coarse adapter kind derived from the interface name */
+    kind: 'wifi' | 'ethernet' | 'other'
+  } | null
+  /** last measured internet latency in ms; null = never succeeded (or still probing) */
+  latencyMs: number | null
+  /** running pages that listen on a port, sorted by port */
+  onlinePorts: OnlinePort[]
   sampleAt: number
 }

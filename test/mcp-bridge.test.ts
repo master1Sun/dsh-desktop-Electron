@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 
 // mcp-bridge imports electron (app.getPath) + the store chain at module level; stub it
 // the same way mcp-hub.test.ts does so the pure helpers run in plain node.
@@ -46,17 +46,25 @@ import {
   detectMcpAgent,
   exportBridgeFiles,
   mergeCodexToml,
+  mergeOpenclawMcpConfig,
   renderCodexBlock,
-  syncCodexConfig
+  renderDshMcpPatch,
+  syncCodexConfig,
+  syncDshMcpPatch,
+  syncOpenclawMcpConfig,
+  dshMcpPatchFile,
+  OPENCLAW_MCP_PREFIX
 } from '../src/main/runtime/mcp-bridge'
 import type { McpServerSpec, McpToolInfo } from '../src/shared/types'
 
 function spec(over: Partial<McpServerSpec> & { id: string }): McpServerSpec {
   return { name: over.id, command: 'npx', args: [], enabled: true, autoStart: false, ...over }
 }
-const fsServer = { spec: spec({ id: 'fs', args: ['-y', 'server-fs', 'D:\\a b'] }), status: 'connected' as const }
-const memServer = { spec: spec({ id: 'mem', env: { K: 'v' } }), status: 'stopped' as const }
-const offServer = { spec: spec({ id: 'off', enabled: false }), status: 'stopped' as const }
+const fsServer = { spec: spec({ id: 'fs', autoStart: true, args: ['-y', 'server-fs', 'D:\\a b'] }), status: 'connected' as const }
+const memServer = { spec: spec({ id: 'mem', autoStart: true, env: { K: 'v' } }), status: 'stopped' as const }
+const offServer = { spec: spec({ id: 'off', autoStart: true, enabled: false }), status: 'stopped' as const }
+// enabled but NOT auto-start: a panel-only row that must never reach an agent
+const lazyServer = { spec: spec({ id: 'lazy', autoStart: false }), status: 'connected' as const }
 const tools: McpToolInfo[] = [
   { serverId: 'fs', name: 'read_file', description: 'read', inputSchema: { type: 'object' } },
   { serverId: 'fs', name: 'list', title: 'Lister' },
@@ -64,8 +72,8 @@ const tools: McpToolInfo[] = [
 ]
 
 describe('buildCatalog', () => {
-  it('drops disabled specs and attaches each server its own tools', () => {
-    const cat = buildCatalog([fsServer, memServer, offServer], tools)
+  it('keeps only auto-start+enabled specs and attaches each server its own tools', () => {
+    const cat = buildCatalog([fsServer, memServer, offServer, lazyServer], tools)
     expect(cat.servers.map((s) => s.id)).toEqual(['fs', 'mem'])
     expect(cat.servers[0].tools.map((t) => t.name)).toEqual(['read_file', 'list'])
     expect(cat.servers[0].tools[0].inputSchema).toEqual({ type: 'object' })
@@ -155,5 +163,105 @@ describe('bridge IO', () => {
     const file = syncCodexConfig(buildCatalog([fsServer], tools).servers, home)
     expect(file).toBe(join(home, 'config.toml'))
     expect(readFileSync(file, 'utf8')).toContain('[mcp_servers.fs]')
+  })
+})
+
+describe('mergeOpenclawMcpConfig', () => {
+  const cat = buildCatalog([fsServer, memServer], tools)
+  it('writes namespaced stdio entries and preserves unrelated + user servers', () => {
+    const base = {
+      gateway: { mode: 'local', port: 18789 },
+      mcp: { servers: { mything: { command: 'custom' } } }
+    }
+    const out = mergeOpenclawMcpConfig(base, cat.servers) as {
+      gateway: unknown
+      mcp: { servers: Record<string, { command: string; args?: string[]; env?: Record<string, string>; enabled: boolean }> }
+    }
+    expect(out.gateway).toEqual({ mode: 'local', port: 18789 })
+    expect(out.mcp.servers.mything).toEqual({ command: 'custom' })
+    expect(out.mcp.servers[`${OPENCLAW_MCP_PREFIX}fs`]).toEqual({
+      command: 'npx',
+      args: ['-y', 'server-fs', 'D:\\a b'],
+      enabled: true
+    })
+    expect(out.mcp.servers[`${OPENCLAW_MCP_PREFIX}mem`].env).toEqual({ K: 'v' })
+  })
+  it('prunes only the managed set on re-sync, so a dropped hub server disappears', () => {
+    const first = mergeOpenclawMcpConfig({}, cat.servers)
+    const second = mergeOpenclawMcpConfig(first, buildCatalog([fsServer], tools).servers) as {
+      mcp: { servers: Record<string, unknown> }
+    }
+    expect(Object.keys(second.mcp.servers).sort()).toEqual([`${OPENCLAW_MCP_PREFIX}fs`])
+  })
+  it('strips a redundant leading dsh- so dsh-workspace lands as dsh__workspace', () => {
+    const ws = buildCatalog(
+      [{ spec: spec({ id: 'dsh-workspace', autoStart: true }), status: 'stopped' as const }],
+      []
+    )
+    const out = mergeOpenclawMcpConfig({}, ws.servers) as { mcp: { servers: Record<string, unknown> } }
+    expect(Object.keys(out.mcp.servers)).toEqual([`${OPENCLAW_MCP_PREFIX}workspace`])
+  })
+})
+
+describe('syncOpenclawMcpConfig', () => {
+  it('merges into an existing openclaw.json and keeps the gateway block', () => {
+    const dir = join(tmpdir(), 'dsh-container-bridge-test', 'oc-home')
+    const file = join(dir, 'openclaw.json')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(file, JSON.stringify({ gateway: { mode: 'local' } }), 'utf8')
+    syncOpenclawMcpConfig(buildCatalog([fsServer], tools).servers, file)
+    const cfg = JSON.parse(readFileSync(file, 'utf8')) as { gateway: unknown; mcp: { servers: Record<string, unknown> } }
+    expect(cfg.gateway).toEqual({ mode: 'local' })
+    expect(cfg.mcp.servers[`${OPENCLAW_MCP_PREFIX}fs`]).toBeTruthy()
+  })
+  it('never clobbers an unparseable (JSON5/comment) config', () => {
+    const dir = join(tmpdir(), 'dsh-container-bridge-test', 'oc-json5')
+    const file = join(dir, 'openclaw.json')
+    mkdirSync(dir, { recursive: true })
+    const raw = '{ /* hand edit */ "gateway": { "mode": "local" } }\n'
+    writeFileSync(file, raw, 'utf8')
+    syncOpenclawMcpConfig(buildCatalog([fsServer], tools).servers, file)
+    expect(readFileSync(file, 'utf8')).toBe(raw)
+  })
+})
+
+describe('dsh --patch overlay', () => {
+  const cat = buildCatalog([fsServer, memServer, offServer], tools)
+  it('wraps entries in a single insert patch so dsh adds (not modifies) them', () => {
+    const patches = renderDshMcpPatch(cat.servers) as Array<{
+      id?: string
+      insert?: Array<{ id: string; name: string; config: Record<string, unknown> }>
+    }>
+    // top level must be one id-less `insert` patch (a bare [{id}] array = "not found")
+    expect(patches).toHaveLength(1)
+    expect(patches[0].id).toBeUndefined()
+    const entries = patches[0].insert!
+    expect(entries.map((e) => e.id)).toEqual(['dsh-mcp-fs', 'dsh-mcp-mem'])
+    expect(entries[0].name).toBe('@deepseek-ai/dsh-mcp-client')
+    expect(entries[0].config).toEqual({
+      serverName: 'dsh_fs',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', 'server-fs', 'D:\\a b']
+    })
+    expect(entries[1].config.env).toEqual({ K: 'v' })
+    // serverName contract: [A-Za-z0-9_-]{1,32}
+    for (const e of entries) expect(String(e.config.serverName)).toMatch(/^[A-Za-z0-9_-]{1,32}$/)
+  })
+  it('drops a redundant leading dsh- so dsh-workspace becomes dsh_workspace, not dsh_dsh-workspace', () => {
+    const cat = buildCatalog([{ spec: spec({ id: 'dsh-workspace', autoStart: true }), status: 'stopped' as const }], [])
+    const entries = (renderDshMcpPatch(cat.servers) as Array<{ insert: Array<{ id: string; config: Record<string, unknown> }> }>)[0]
+      .insert
+    expect(entries[0].id).toBe('dsh-mcp-workspace')
+    expect(entries[0].config.serverName).toBe('dsh_workspace')
+  })
+  it('syncDshMcpPatch writes the overlay file, or null when nothing is enabled', () => {
+    expect(renderDshMcpPatch([])).toEqual([])
+    expect(syncDshMcpPatch([])).toBeNull()
+    const file = syncDshMcpPatch(cat.servers)
+    expect(file).toBe(dshMcpPatchFile())
+    const parsed = JSON.parse(readFileSync(file as string, 'utf8')) as Array<{ insert: unknown[] }>
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0].insert).toHaveLength(2)
   })
 })

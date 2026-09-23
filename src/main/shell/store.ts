@@ -1,11 +1,11 @@
 import { app } from 'electron'
-import { accessSync, existsSync, mkdirSync } from 'node:fs'
-import { constants } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, basename, extname } from 'node:path'
 import Store from 'electron-store'
 import type { ContainerSettings, DefaultView } from '../../shared/types'
 import { NPM_REGISTRY_DEFAULT } from '../../shared/types'
+import { ENV_INSTALL, ENV_SYSTEM, envDirName } from '../../shared/envDir'
 
 const DEFAULTS: ContainerSettings = {
   defaultView: { kind: 'none' },
@@ -24,10 +24,14 @@ const DEFAULTS: ContainerSettings = {
   theme: 'auto',
   // UI display language; defaults to Chinese
   locale: 'zh',
-  // empty = follow the install directory (<installDir>/env); see resolveEnvRoot()
+  // env root is no longer user-configurable: fixed at userData/env (the system-common spot).
+  // The field only survives in old settings files; resolveEnvRoot() ignores it. '@system' was
+  // also a persisted choice there and resolves to the same place, so nothing needs migrating.
   envRoot: '',
   dshHome: '',
   openclawHome: '',
+  // empty = userData/workspace; the shared context every hosted agent reads/writes
+  workspaceRoot: '',
   // empty = the OS Downloads folder; embedded-page downloads save there (see downloads.ts)
   downloadDir: '',
   pageEnvs: {},
@@ -67,7 +71,9 @@ const DEFAULTS: ContainerSettings = {
   npmRegistry: '',
   // #26: tray defaults mirror what the menu/badge did before they were configurable.
   trayPageEntries: 'all',
-  trayBadge: 'all'
+  trayBadge: 'all',
+  // on by default: hosted agents get the shared workspace pointers at spawn (see runtime/workspace.ts)
+  sharedWorkspace: true
 }
 
 let store: Store<ContainerSettings> | null = null
@@ -160,31 +166,14 @@ export function resolveInstallDir(): string {
   return resolveProjectDir()
 }
 
-/** True when `dir` exists (or can be created) and is writable — runtime state needs both. */
-function isWritableDir(dir: string): boolean {
-  try {
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    accessSync(dir, constants.W_OK)
-    return true
-  } catch {
-    return false
-  }
-}
-
 /**
- * Root of the container's "环境目录": every runtime's config/state dir defaults into a
- * subdir of it (dsh → <root>/dsh, openclaw → <root>/openclaw).
- * Default follows the install directory so a self-contained install keeps its data next
- * to the app; when the install dir isn't writable (e.g. C:\Program Files) it falls back
- * to userData. A non-empty `settings.envRoot` always wins.
+ * Root of the container's "环境目录": not user-configurable any more — always the
+ * system-common userData location. Per-runtime rows still offer their own two choices
+ * (the tool's system home vs a <envRoot>/<name> subdir), so '@install' keeps landing here.
+ * The persisted settings.envRoot (incl. legacy free-form paths) is ignored; `<installDir>/env`
+ * stays out of reach because a non-writable install dir made that choice unreliable anyway.
  */
 export function resolveEnvRoot(): string {
-  const override = (getSettings().envRoot || '').trim()
-  if (override) return expandHome(override)
-  if (app.isPackaged) {
-    const candidate = join(resolveInstallDir(), 'env')
-    if (isWritableDir(candidate)) return candidate
-  }
   return join(app.getPath('userData'), 'env')
 }
 
@@ -205,6 +194,22 @@ function preferExisting(candidate: string, legacy: string): string {
   return existsSync(candidate) || !existsSync(legacy) ? candidate : legacy
 }
 
+/**
+ * True when `dir` exists and holds at least one entry — a real prior install with data
+ * (login, config, profiles), not merely the empty shell the spawn path `mkdir`s. The two-choice
+ * DEFAULT uses this so a never-touched row keeps an existing system home instead of adopting the
+ * independent container dir and stranding that data, which would boot dsh/openclaw against an
+ * empty home and break startup. An explicit '@install' pick still forces the fresh container dir.
+ */
+function hasData(dir: string): boolean {
+  if (!dir) return false
+  try {
+    return readdirSync(dir).length > 0
+  } catch {
+    return false
+  }
+}
+
 /** dsh runtime roots, most-recently-writable first: userData survives packaged updates
     (reprovision upgrade target), resources/dsh ships with the installer / dev provision.
     Deliberately NOT the repo root: dsh locates pnpm via `import.meta.resolve('@pnpm/exe/pnpm')`
@@ -221,18 +226,24 @@ export function resolveDshRuntimeDirs(): string[] {
   return pinned ? [pinned, ...roots.filter((r) => r !== pinned)] : roots
 }
 
-/** dsh home: profiles live under <dshHome>/profiles/<name>. Defaults to dsh's own `~/.dsh` (matching the CLI's precedence: explicit config → $DSH_HOME → ~/.dsh) so the container manages the same profiles as the terminal by default; any non-empty setting overrides, with `~` expanded. The dsh-web page's Settings "DSH 配置目录" (pageEnvs DSH_HOME) is honored too, so that input actually takes effect. */
+/** dsh home: profiles live under <dshHome>/profiles/<name>. Two-choice setting:
+ *  '@system' = dsh's own `~/.dsh` (shared with the CLI); '@install' = a container-owned `.dsh`
+ *  subdir of the env root (userData/env), forced fresh. The DEFAULT (unset/''/legacy free path)
+ *  is the independent subdir, but reuses an existing populated `~/.dsh` so a never-touched row
+ *  never strands the terminal's login (which would break the page's boot). The dsh-web page's
+ *  Settings row (pageEnvs DSH_HOME) feeds the same chain. */
 export function resolveDshHome(): string {
   const fromEnv = (process.env.DSH_HOME || '').trim()
   if (fromEnv) return expandHome(fromEnv)
   const override =
     (getSettings().dshHome || '').trim() ||
     (getSettings().pageEnvs?.['dsh-web']?.DSH_HOME || '').trim()
-  if (!override) {
-    // dsh CLI's own native home: the container manages the same profiles as the terminal.
-    return join(homedir(), '.dsh')
-  }
-  return expandHome(override)
+  const systemHome = join(homedir(), '.dsh')
+  if (override === ENV_SYSTEM) return systemHome
+  const installHome = join(resolveEnvRoot(), envDirName('DSH_HOME', 'dsh-web'))
+  if (override === ENV_INSTALL) return installHome
+  // Unset / legacy: prefer the independent dir, but keep a populated system home in use.
+  return hasData(systemHome) ? systemHome : installHome
 }
 
 export function expandHome(p: string): string {
@@ -246,25 +257,32 @@ export function resolveDshProfileDir(profile: string): string {
   return join(resolveDshHome(), 'profiles', safe || 'web')
 }
 
-/** openclaw config home: defaults to the CLI's own `~/.openclaw`; any non-empty setting overrides (`~` expanded). The openclaw page's Settings "OPENCLAW 配置目录" (pageEnvs OPENCLAW_HOME) is honored too. */
+/** openclaw config home: two-choice like dsh — '@system' = the CLI's own `~/.openclaw`
+ *  (shared with the terminal); '@install' = a container-owned `.openclaw` subdir of the env root,
+ *  forced fresh. The DEFAULT (unset/''/legacy) is the independent subdir, but reuses an existing
+ *  populated `~/.openclaw` so a never-touched row keeps the config/token instead of booting an
+ *  empty home. The openclaw page's Settings row (pageEnvs OPENCLAW_HOME) feeds the same chain. */
 export function resolveOpenclawHome(): string {
   const fromEnv = (process.env.OPENCLAW_STATE_DIR || '').trim()
   if (fromEnv) return expandHome(fromEnv)
   const override =
     (getSettings().openclawHome || '').trim() ||
     (getSettings().pageEnvs?.['openclaw']?.OPENCLAW_HOME || '').trim()
-  if (!override) {
-    // openclaw CLI's own native home: the container manages the same config as the terminal.
-    return join(homedir(), '.openclaw')
-  }
-  return expandHome(override)
+  const systemHome = join(homedir(), '.openclaw')
+  if (override === ENV_SYSTEM) return systemHome
+  const installHome = join(resolveEnvRoot(), envDirName('OPENCLAW_HOME', 'openclaw'))
+  if (override === ENV_INSTALL) return installHome
+  // Unset / legacy: prefer the independent dir, but keep a populated system home in use.
+  return hasData(systemHome) ? systemHome : installHome
 }
 
-/** Resolve one page-declared directory env var: process.env → user override → spec default.
-    Returns '' when none is set so callers can omit the var entirely. `~` is expanded.
-    `legacyPath` names the CLI's own pre-container home: while it exists it wins over the
-    new default, so an existing install (login state, sessions, config) stays in use —
-    same migration guard dsh/openclaw get. */
+/** Resolve one page-declared directory env var: process.env → two-choice setting → default.
+ *  '@install' forces the container-owned <envRoot>/.<tool-name> subdir; '@system' selects the
+ *  tool's own home — the declared `defaultPath` (e.g. `~/.dsh`), which is what the CLI uses
+ *  ('' when none declared, so callers can omit the var). The DEFAULT (unset/''/a legacy free-form
+ *  path) is the independent subdir, but reuses an existing populated system home (the declared
+ *  default or `legacyPath`) so a never-touched row keeps its login/config instead of booting a
+ *  runtime against an empty dir. `~` / `{envRoot}` are expanded. */
 export function resolvePageEnv(
   pageId: string,
   key: string,
@@ -274,14 +292,19 @@ export function resolvePageEnv(
   const fromEnv = (process.env[key] || '').trim()
   if (fromEnv) return expandHome(fromEnv)
   const override = (getSettings().pageEnvs?.[pageId]?.[key] || '').trim()
-  if (override) return expandHome(override)
-  // Declared defaults may use {envRoot} so they follow the install dir / user override.
-  if (defaultPath && defaultPath.trim()) {
-    const candidate = expandEnvTemplate(defaultPath.trim())
-    const legacy = (legacyPath || '').trim()
-    return legacy ? preferExisting(candidate, expandHome(legacy)) : candidate
+  const installDir = join(resolveEnvRoot(), envDirName(key, pageId))
+  if (override === ENV_INSTALL) return installDir
+  const declared = defaultPath && defaultPath.trim() ? expandEnvTemplate(defaultPath.trim()) : ''
+  const legacy = (legacyPath || '').trim() ? expandHome((legacyPath || '').trim()) : ''
+  if (override === ENV_SYSTEM) {
+    // The tool's own home: declared default (legacy migration-guarded); '' when undeclared.
+    if (!declared) return ''
+    return legacy ? preferExisting(declared, legacy) : declared
   }
-  return ''
+  // Unset / legacy: independent default, but keep a populated system home in use.
+  if (hasData(declared)) return declared
+  if (hasData(legacy)) return legacy
+  return installDir
 }
 
 /**
@@ -380,6 +403,19 @@ export function defaultDownloadDir(): string {
 export function resolveDownloadDir(): string {
   const override = (getSettings().downloadDir || '').trim()
   return override ? expandHome(override) : defaultDownloadDir()
+}
+
+/**
+ * Root of the container-owned *shared workspace*: a working directory plus `context.json`
+ * every hosted agent discovers through DSH_WORKSPACE_DIR / DSH_WORKSPACE_FILE (see
+ * runtime/workspace.ts). Defaults under userData so it survives updates; a non-empty
+ * `settings.workspaceRoot` always wins, `~`/`{envRoot}`/`{userData}` expanded, so the shared
+ * context can live inside a real project repo instead of an app-private folder.
+ */
+export function resolveWorkspaceDir(): string {
+  const override = (getSettings().workspaceRoot || '').trim()
+  if (override) return expandEnvTemplate(override)
+  return join(app.getPath('userData'), 'workspace')
 }
 
 /**

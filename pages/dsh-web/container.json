@@ -18,8 +18,8 @@
       },
       "defaultPath": "~/.dsh",
       "description": {
-        "zh": "留空即使用 dsh CLI 的默认目录 ~/.dsh，与终端里的 dsh 共用同一套 profile",
-        "en": "Leave empty to use dsh's default ~/.dsh — the same profile store the CLI uses"
+        "zh": "默认使用独立目录（容器独占，环境根目录下的 .dsh 子目录）；若未手动改动且 ~/.dsh 已有登录会自动沿用以免丢失；选系统通用目录则与终端共用同一套 profile（~/.dsh）",
+        "en": "Uses a container-owned .dsh subfolder of the env root by default; until you change it, an existing ~/.dsh login is kept automatically so nothing is lost. Pick the system-common folder to share the CLI profile store (~/.dsh)"
       }
     }
   ]

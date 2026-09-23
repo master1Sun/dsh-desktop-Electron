@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import MarketView from '../views/MarketView.vue'
 import { t, locale } from '../i18n'
 import { useDualStore, type DualPane } from '../stores/dual'
@@ -7,11 +7,15 @@ import whaleIcon from '../assets/whale.png'
 
 const props = defineProps<{
   /** Every page opened this session, one mounted <webview> each. Switching only toggles
-      visibility so a guest session (openclaw's one-time token, dsh terminals) survives. */
-  sessions: { id: string; url: string }[]
+      visibility so a guest session (openclaw's one-time token, dsh terminals) survives.
+      `hosted` distinguishes a container-managed page from an external preview. */
+  sessions: { id: string; url: string; hosted?: boolean }[]
   /** Session currently on screen; null while the market / a CLI terminal owns the surface. */
   activeId: string | null
   loading: boolean
+  /** Persistent-services mode: a hosted page can flip to running before its first composited
+      frame lands (black until refresh), so the first DOM ready gets a one-shot reload. */
+  repaintHostedFirst?: boolean
   startingText?: string
   /** Current boot phase label streamed from the main process (empty until the first event). */
   phaseText?: string
@@ -108,6 +112,7 @@ interface WebviewNav {
   goForward?: () => void
   reload?: () => void
   loadURL?: (url: string) => Promise<void>
+  isLoading?: () => boolean
 }
 const guest = (id: string | null = props.activeId): WebviewNav | null =>
   (id && (webviewEls.value[id] as unknown as WebviewNav)) || null
@@ -180,10 +185,60 @@ watch(activeUrl, () => {
 function onStopLoading(id: string): void {
   if (id === props.activeId) emit('guest-stop-loading')
 }
+
+/* ---- first-open repaint (persistent-services black screen) ----
+   Only the app's FIRST launch of a hosted page blacks out: in persistent mode (and, since adopt now
+   really survives a quit on Windows, on every reopen too) the row flips to `running` the instant the
+   port answers, so the <webview> navigates before the guest has produced a visible frame. The DOM
+   ends up fully there (Elements populated, the token URL correct) yet the surface reads black until a
+   manual refresh; page switching can't recover it (it only flips v-show) and a size nudge is ignored,
+   so the ONE proven lever is a reload of the SAME URL — it never re-navigates away, so an openclaw
+   one-time token / a live dsh session survive. Two triggers, because adopt has two failure shapes:
+   (1) did-STOP-loading (the whole doc + subresources settled — closest to when a human presses F5;
+   did-finish-load fires too early for the SPA to have painted), and (2) an active-session fallback for
+   the fast adopt where navigation finishes BEFORE Vue binds the @did-* listeners, so no load event
+   reaches us at all. Both are once-per-session (the reload re-fires the events, the Set stops the
+   loop) and scoped to container-hosted pages in persistent mode via the repaintHostedFirst prop. */
+const repaintedHosted = new Set<string>()
+
 function onDomReady(id: string): void {
   syncNav(id)
   onStopLoading(id)
 }
+
+/** Force the fresh frame the exact way the user's manual F5 does — reload the SAME url, so an
+    openclaw one-time token / a live dsh session survive (the URL never changes). At most once per
+    session; the reload itself re-fires the load events, and the Set is what stops it looping. */
+function maybeRepaintHosted(id: string): void {
+  if (!props.repaintHostedFirst || repaintedHosted.has(id)) return
+  if (!props.sessions.find((s) => s.id === id)?.hosted) return
+  repaintedHosted.add(id)
+  setTimeout(() => guest(id)?.reload?.(), 120)
+}
+
+/** did-stop-loading = the settled state a user would refresh from; the primary repaint trigger. */
+function onDidStopLoading(id: string): void {
+  onStopLoading(id)
+  maybeRepaintHosted(id)
+}
+
+// Active-session fallback for the adopt fast path (see block comment). Give the real load a beat, then
+// if the guest already reports "not loading" it navigated in the listener-binding gap — force the same
+// one-shot reload. A still-booting page correctly reports isLoading()===true and is left to did-stop.
+watch(
+  () => props.activeId,
+  (id) => {
+    if (!id) return
+    void nextTick(() =>
+      setTimeout(() => {
+        if (repaintedHosted.has(id)) return
+        const g = guest(id)
+        if (g && g.isLoading?.() === false) maybeRepaintHosted(id)
+      }, 600)
+    )
+  },
+  { immediate: true }
+)
 
 /**
  * Keep window.open / target=_blank inside the SAME embedded page — never pop a window or
@@ -360,7 +415,7 @@ defineExpose({
           class="wv"
           allowpopups
           @activate="dualStore.setFocusPane('main')"
-          @did-stop-loading="onStopLoading(s.id)"
+          @did-stop-loading="onDidStopLoading(s.id)"
           @dom-ready="onDomReady(s.id)"
           @did-navigate="syncNav(s.id)"
           @did-navigate-in-page="syncNav(s.id)"

@@ -114,7 +114,8 @@ function retryOrExit(meta) {
   require('node:child_process')
     .spawn(process.execPath, [...process.argv.slice(1), '--dsh-boot-retry'], {
       detached: true,
-      stdio: 'ignore'
+      stdio: 'ignore',
+      windowsHide: true
     })
     .unref()
   require('electron').app.exit(0)
@@ -156,10 +157,11 @@ function main() {
   }
   if (meta.pendingAsar) promote(meta)
   require('node:child_process')
-    .spawn(process.execPath, [...process.argv.slice(1), '--app-path=' + target, '--dsh-asar-launched'], {
-      detached: true,
-      stdio: 'ignore'
-    })
+    .spawn(
+      process.execPath,
+      [...process.argv.slice(1), '--app-path=' + target, '--dsh-asar-launched'],
+      { detached: true, stdio: 'ignore', windowsHide: true }
+    )
     .unref()
   app.exit(0)
 }

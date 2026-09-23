@@ -12,6 +12,7 @@ import {
 import { join, dirname } from 'node:path'
 import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
 import { bridgeEnvVars } from './mcp-bridge'
+import { workspaceEnvVars } from './workspace'
 import {
   resolveDshProfileDir,
   resolveDshRuntimeDirs,
@@ -28,11 +29,18 @@ const DEFAULT_PROFILE = 'web'
 /** An empty writer lock older than this is a crashed holder, not a live writer mid-flush. */
 const STALE_EMPTY_LOCK_MS = 15_000
 
-/** Run a CLI without blocking the main-process event loop (a frozen UI otherwise). */
+/** Run a CLI without blocking the main-process event loop (a frozen UI otherwise).
+ *  `onData`, when given, receives every raw stdout/stderr chunk as it arrives so a caller can
+ *  stream long-running output (a plugin install's pnpm log) live instead of only at exit. */
 function runCli(
   cmd: string,
   args: string[],
-  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number; shell?: boolean } = {}
+  opts: {
+    env?: NodeJS.ProcessEnv
+    timeoutMs?: number
+    shell?: boolean
+    onData?: (chunk: string) => void
+  } = {}
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
@@ -43,8 +51,16 @@ function runCli(
     })
     let stdout = ''
     let stderr = ''
-    child.stdout?.on('data', (d) => (stdout += String(d)))
-    child.stderr?.on('data', (d) => (stderr += String(d)))
+    child.stdout?.on('data', (d) => {
+      const s = String(d)
+      stdout += s
+      opts.onData?.(s)
+    })
+    child.stderr?.on('data', (d) => {
+      const s = String(d)
+      stderr += s
+      opts.onData?.(s)
+    })
     child.on('error', (err) => resolve({ code: -1, stdout, stderr: stderr || err.message }))
     child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }))
   })
@@ -197,7 +213,9 @@ async function dshEnv(profileDir: string): Promise<NodeJS.ProcessEnv> {
     DSH_HOME: join(profileDir, '..', '..'),
     DSH_NODE_PATH: nodeExe,
     // MCP hub catalog pointers: dsh's terminals inherit them to every plugin process
-    ...bridgeEnvVars()
+    ...bridgeEnvVars(),
+    // shared workspace pointers: dsh's terminals inherit them to every plugin process too
+    ...workspaceEnvVars()
   })
 }
 
@@ -248,7 +266,7 @@ export async function getDshStatus(profile = DEFAULT_PROFILE): Promise<DshStatus
 /** run the dsh launcher with args; returns stdout or throws with stderr */
 async function runDsh(
   args: string[],
-  opts: { timeoutMs?: number; profile?: string } = {}
+  opts: { timeoutMs?: number; profile?: string; onData?: (chunk: string) => void } = {}
 ): Promise<string> {
   const status = await getDshStatus(opts.profile)
   if (!status.binPath) throw new Error(status.error || msg('dsh.unavailable'))
@@ -262,7 +280,8 @@ async function runDsh(
     {
       env: await dshEnv(status.profileDir),
       shell: process.platform === 'win32' && !viaNode,
-      timeoutMs: opts.timeoutMs ?? 10 * 60_000
+      timeoutMs: opts.timeoutMs ?? 10 * 60_000,
+      onData: opts.onData
     }
   )
   // First boot of a profile prints an informational "initialized profile …" notice
@@ -277,12 +296,14 @@ async function runDsh(
 /** forward to pnpm inside the profile dir via `dsh plugin --profile <name> ...` */
 export async function dshPluginForward(
   pnpmArgs: string[],
-  profile = DEFAULT_PROFILE
+  profile = DEFAULT_PROFILE,
+  onData?: (chunk: string) => void
 ): Promise<string> {
   if (!(await pnpmBinDirs()).length) throw pnpmMissingError()
   return runDsh(['plugin', '--profile', profile, ...pnpmArgs], {
     timeoutMs: 15 * 60_000,
-    profile
+    profile,
+    onData
   })
 }
 
@@ -413,12 +434,15 @@ function validateNpmSpec(spec: string): string {
 export async function installDshPlugin(spec: string, profile = DEFAULT_PROFILE): Promise<void> {
   const s = validateNpmSpec(spec)
   broadcastPluginOp({ name: s, done: false })
+  const tee = pluginOutputTee(`plugin add ${s}`)
   try {
-    await dshPluginForward(['add', s], profile)
+    await dshPluginForward(['add', s], profile, tee.onData)
     broadcastPluginOp({ name: s, done: true })
   } catch (err) {
     broadcastPluginOp({ name: s, done: true, error: (err as Error).message })
     throw err
+  } finally {
+    tee.flush()
   }
 }
 
@@ -431,12 +455,46 @@ const NOT_A_DEPENDENCY = /ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS|no such dependency
 
 export async function uninstallDshPlugin(name: string, profile = DEFAULT_PROFILE): Promise<void> {
   const s = validateNpmSpec(name)
+  const tee = pluginOutputTee(`plugin remove ${s}`)
   try {
-    await dshPluginForward(['remove', s], profile)
+    await dshPluginForward(['remove', s], profile, tee.onData)
   } catch (err) {
     const raw = (err as Error).message
     if (NOT_A_DEPENDENCY.test(raw)) throw new Error(msg('dsh.notADependency', { name: s }))
     throw err
+  } finally {
+    tee.flush()
+  }
+}
+
+/**
+ * Line-buffered tee for a plugin CLI run: every complete stdout/stderr line is mirrored to
+ * main.log under a `[dsh]` tag (console is mirrored to disk by installFileLogger), so the
+ * in-app 运行日志 shows the pnpm detail an install/update/uninstall prints — the top-bar
+ * progress strip alone only says "which plugin", not "what it did". `flush` emits any tail
+ * left after the last newline so a final line without a trailing break is not dropped.
+ */
+function pluginOutputTee(label: string): {
+  onData: (chunk: string) => void
+  flush: () => void
+} {
+  let buf = ''
+  const emit = (line: string): void => {
+    const trimmed = line.replace(/\x1b\[[0-9;]*m/g, '').trim()
+    if (trimmed) console.log(`[dsh] ${trimmed}`)
+  }
+  console.log(`[dsh] ${label} started`)
+  return {
+    onData(chunk: string): void {
+      buf += chunk
+      const lines = buf.split(/\r?\n/)
+      buf = lines.pop() ?? ''
+      for (const line of lines) emit(line)
+    },
+    flush(): void {
+      if (buf) emit(buf)
+      buf = ''
+    }
   }
 }
 
@@ -485,11 +543,21 @@ async function applyPluginUpdate(
     const installSpec = ref
       ? `${repo}#${ref}`
       : `${repo}#${(await remoteHeadSha(repo)).slice(0, 8)}`
-    await dshPluginForward(['add', installSpec], profile)
+    const tee = pluginOutputTee(`plugin update ${name} (git ${installSpec})`)
+    try {
+      await dshPluginForward(['add', installSpec], profile, tee.onData)
+    } finally {
+      tee.flush()
+    }
     return msg('dsh.updatedTo', { spec: installSpec })
   }
   const s = validateNpmSpec(name)
-  await dshPluginForward(['update', s, '--latest'], profile)
+  const tee = pluginOutputTee(`plugin update ${s}`)
+  try {
+    await dshPluginForward(['update', s, '--latest'], profile, tee.onData)
+  } finally {
+    tee.flush()
+  }
   return msg('dsh.npmUpdated', { spec: s })
 }
 
@@ -794,7 +862,8 @@ function isProcessAlive(pid: number): boolean {
  */
 export async function dshSpawnCommand(
   profile: string,
-  port: number
+  port: number,
+  mcpPatchFile?: string | null
 ): Promise<{ cmd: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> {
   const status = await getDshStatus(profile)
   if (!status.installed) throw new Error(status.error || msg('dsh.unavailable'))
@@ -804,9 +873,23 @@ export async function dshSpawnCommand(
   // Self-heal dead credentials/plugin locks left by a crashed harness, or this spawn would
   // block on withFileLock until timeout and die (see clearStaleDshLocks).
   clearStaleDshLocks(join(status.profileDir, '..', '..'))
+  // `--patch` is a launcher flag (it stops parsing at the first app arg), so it goes right
+  // after `--profile`, before the web app's `--host`/`--port`/`--no-open`. The overlay is a
+  // non-destructive Cordis layer contributing one `dsh-mcp-client` entry per bridged server.
+  const patchArgs = mcpPatchFile ? ['--patch', mcpPatchFile] : []
   return {
     cmd: resolveDshNodeExePath(),
-    args: [binJs, '--profile', profile, '--host', '127.0.0.1', '--port', String(port), '--no-open'],
+    args: [
+      binJs,
+      '--profile',
+      profile,
+      ...patchArgs,
+      '--host',
+      '127.0.0.1',
+      '--port',
+      String(port),
+      '--no-open'
+    ],
     cwd: status.profileDir,
     env: await dshEnv(status.profileDir)
   }

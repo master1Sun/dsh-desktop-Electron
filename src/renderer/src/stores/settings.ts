@@ -27,6 +27,8 @@ export interface Settings {
   theme: 'auto' | 'light' | 'dark'
   /** UI display language; 'zh' default, 'en' for English */
   locale: Locale
+  /** shell layout: 'classic' (default, top menu + floating panels) or 'im' (QQ-like rail + docked sidebar) */
+  layoutMode?: 'classic' | 'im'
   /** root for every runtime's config dir; empty = follow the install dir */
   envRoot: string
   dshHome: string
@@ -63,6 +65,10 @@ export interface Settings {
   containerChannel?: ContainerReleaseChannel
   /** 内存持续超限的页面处置：仅提示 / 自动重启 */
   memLimitAction?: 'notify' | 'restart'
+  /** 共享工作区/上下文总开关：开=托管 agent 启动时获得上下文指针；缺省视为开 */
+  sharedWorkspace?: boolean
+  /** 后台服务常驻：开=托管页以脱离子进程运行，客户端退出不停止，下次打开探测复用 */
+  persistentServices?: boolean
   /** 自定义快捷键：action id -> accelerator；缺省的 action 用内置默认值 */
   keybindings?: Record<string, string>
 }
@@ -121,7 +127,8 @@ export const useSettingsStore = defineStore('settings', () => {
     reduceMotion: 'auto',
     npmRegistry: '',
     trayPageEntries: 'all',
-    trayBadge: 'all'
+    trayBadge: 'all',
+    persistentServices: false
   })
   const loaded = ref(false)
 

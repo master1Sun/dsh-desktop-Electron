@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -55,18 +55,27 @@ function metaFor(id: string, envVars?: EnvVarSpec[]): PageMeta {
   return { id, name: id, dir: scratch, port: 0, startCommand: '', envVars }
 }
 
-/** The MCP bridge rides along on every spawn (design); the chains under test here are the
-    declared/free-form ones, so exact-equality assertions look at the page's own vars only. */
+/** The MCP bridge + shared workspace ride along on every spawn (design); the chains under test
+    here are the declared/free-form ones, so exact-equality assertions look at the page's own vars only. */
 function pageEnv(meta: PageMeta): Record<string, string> {
-  const { DSH_MCP_BRIDGE_DIR, DSH_MCP_CATALOG, DSH_MCP_CONFIG_JSON, ...rest } = buildPageEnv(meta)
+  const {
+    DSH_MCP_BRIDGE_DIR,
+    DSH_MCP_CATALOG,
+    DSH_MCP_CONFIG_JSON,
+    DSH_WORKSPACE_DIR,
+    DSH_WORKSPACE_FILE,
+    ...rest
+  } = buildPageEnv(meta)
   return rest
 }
 
 const ENV_ROOT = join(scratch, 'env')
 
-/** Point the whole env chain at a scratch tree so the case never touches a real `~/.dsh`. */
-function setEnvRoot(): void {
-  updateSettings({ envRoot: ENV_ROOT })
+/** The env root is fixed at userData/env now (no user choice, packaged or not): the unpackaged
+ *  electron stub maps userData → scratch, so the default root already IS <scratch>/env — a real
+ *  `~/.dsh` is never touched. The reset only keeps persisted values deterministic between cases. */
+function resetEnvRoot(): void {
+  updateSettings({ envRoot: '' })
 }
 
 const savedProcessEnv: Record<string, string | undefined> = {}
@@ -79,8 +88,8 @@ function stubProcessEnv(key: string, value: string | undefined): void {
 
 beforeEach(() => {
   rmSync(scratch, { recursive: true, force: true })
-  setEnvRoot()
-  updateSettings({ pageEnvs: {}, pageCustomEnvs: {} })
+  resetEnvRoot()
+  updateSettings({ pageEnvs: {}, pageCustomEnvs: {}, workspaceRoot: '' })
 })
 
 afterEach(() => {
@@ -90,25 +99,91 @@ afterEach(() => {
   }
 })
 
+describe('shared workspace pointers', () => {
+  it('injects DSH_WORKSPACE_DIR / DSH_WORKSPACE_FILE and creates the workspace', () => {
+    const full = buildPageEnv(metaFor('p1'))
+    // userData-scoped default (the electron `app` stub maps userData → scratch).
+    expect(full.DSH_WORKSPACE_DIR).toBe(join(scratch, 'workspace'))
+    expect(full.DSH_WORKSPACE_FILE).toBe(join(scratch, 'workspace', 'context.json'))
+    // The spawn path ensures the dir exists so a first-turn agent can write into it.
+    expect(existsSync(full.DSH_WORKSPACE_DIR)).toBe(true)
+  })
+
+  it('honors a settings workspaceRoot override', () => {
+    updateSettings({ workspaceRoot: '{envRoot}/shared' })
+    const full = buildPageEnv(metaFor('p1'))
+    // {envRoot} is substituted textually, so the template's own separator survives.
+    expect(full.DSH_WORKSPACE_DIR).toBe(`${ENV_ROOT}/shared`)
+  })
+})
+
 describe('declared directory vars', () => {
-  it('expands {envRoot} in a default and creates the directory', () => {
+  it('defaults an untouched dir var to the container install dir, over the declared home', () => {
+    const env = pageEnv(
+      metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '~/.fixture' }])
+    )
+    // No choice persisted → the install default wins over the declared system-common home.
+    expect(env.FIXTURE_HOME).toBe(join(ENV_ROOT, '.fixture'))
+    // The var names a home dir a CLI aborts on when missing, so the default creates it.
+    expect(existsSync(join(ENV_ROOT, '.fixture'))).toBe(true)
+  })
+
+  it('an untouched dir var reuses a populated system default instead of the empty container dir', () => {
+    stubProcessEnv('FIXTURE_HOME', undefined)
+    const systemHome = join(scratch, 'system-home')
+    mkdirSync(systemHome, { recursive: true })
+    writeFileSync(join(systemHome, 'credentials.yaml'), 'login')
+    const env = pageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: systemHome }]))
+    // The declared system home already holds data, so a never-touched row keeps it rather than
+    // booting the CLI against the empty independent dir (which is how dsh/openclaw broke).
+    expect(env.FIXTURE_HOME).toBe(systemHome)
+  })
+
+  it("the explicit '@install' choice forces a fresh container dir over a populated system home", () => {
+    stubProcessEnv('FIXTURE_HOME', undefined)
+    const systemHome = join(scratch, 'system-home-forced')
+    mkdirSync(systemHome, { recursive: true })
+    writeFileSync(join(systemHome, 'config'), 'x')
+    updateSettings({ pageEnvs: { p1: { FIXTURE_HOME: '@install' } } })
+    const env = pageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: systemHome }]))
+    // An active pick is honored literally: the independent dir wins even though the system home
+    // has data, so opting into container isolation stays possible (the user re-logs in there).
+    expect(env.FIXTURE_HOME).toBe(join(ENV_ROOT, '.fixture'))
+  })
+
+  it("the '@system' choice expands {envRoot} in the declared default and creates it", () => {
+    updateSettings({ pageEnvs: { p1: { FIXTURE_HOME: '@system' } } })
     const env = pageEnv(
       metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/fixture' }])
     )
-    // The placeholder is substituted textually, so the manifest's own separator survives
-    // (`env/fixture` on Windows) — both spellings resolve to the same directory there.
+    // '@system' hands the row back to the tool's own home — the declared defaultPath, whose
+    // {envRoot} placeholder is substituted textually (so the manifest's separator survives).
     expect(env).toEqual({ FIXTURE_HOME: `${ENV_ROOT}/fixture` })
-    // The var names a home dir a CLI aborts on when missing, so declaring it creates it.
     expect(existsSync(join(ENV_ROOT, 'fixture'))).toBe(true)
   })
 
-  it('lets a user override beat the declared default, and expands ~', () => {
+  it('routes the @install choice into <envRoot>/.<tool-name>, whatever the default declares', () => {
+    stubProcessEnv('FIXTURE_HOME', undefined)
+    updateSettings({ pageEnvs: { p1: { FIXTURE_HOME: '@install' } } })
+    const env = pageEnv(
+      metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/elsewhere' }])
+    )
+    // FIXTURE_HOME → envDirName ".fixture" (the leading dot mirrors the tool's ~/.name home):
+    // the choice wins over the declared default, and the created dir proves it is treated as a
+    // home the runtime may refuse to miss.
+    expect(env.FIXTURE_HOME).toBe(join(ENV_ROOT, '.fixture'))
+    expect(existsSync(join(ENV_ROOT, '.fixture'))).toBe(true)
+  })
+
+  it('reads a legacy free-text override as the install default (free paths no longer honored)', () => {
     stubProcessEnv('FIXTURE_HOME', undefined)
     updateSettings({ pageEnvs: { p1: { FIXTURE_HOME: '~/fixture-override' } } })
     const env = pageEnv(
       metaFor('p1', [{ key: 'FIXTURE_HOME', defaultPath: '{envRoot}/fixture' }])
     )
-    expect(env.FIXTURE_HOME).toBe(join(homedir(), 'fixture-override'))
+    // The two-choice UI replaced free inputs: any persisted path that is not exactly '@system'
+    // resolves as the install default.
+    expect(env.FIXTURE_HOME).toBe(join(ENV_ROOT, '.fixture'))
   })
 
   it('lets the inherited process env beat both', () => {
@@ -118,8 +193,12 @@ describe('declared directory vars', () => {
     expect(env.FIXTURE_HOME).toBe(join(scratch, 'from-process'))
   })
 
-  it('omits a var with nothing behind it instead of injecting an empty string', () => {
-    expect(pageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME' }]))).toEqual({})
+  it('resolves a declared dir var with no defaultPath to the container install dir', () => {
+    // Declaring a directory var means "configurable"; even with no defaultPath the install
+    // default resolves to <envRoot>/.<name> (envDirName derived from the key).
+    expect(pageEnv(metaFor('p1', [{ key: 'FIXTURE_HOME' }]))).toEqual({
+      FIXTURE_HOME: join(ENV_ROOT, '.fixture')
+    })
   })
 
   it('keeps an unusable spec row out of the way', () => {
