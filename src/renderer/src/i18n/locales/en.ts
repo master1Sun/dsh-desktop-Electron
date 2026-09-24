@@ -42,7 +42,6 @@ const en: Dict = {
     failed: 'Failed to start',
     stopped: 'Stopped',
     notRunningHint: 'Switch after it starts successfully',
-    openTerminalHint: 'Click to open and run in the embedded terminal',
     activePageHint: 'Current page',
     start: 'Start',
     startingTip: 'Starting…',

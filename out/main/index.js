@@ -11689,6 +11689,9 @@ function setDefaultView(view) {
 function resolveProjectDir() {
   return app$1.getAppPath();
 }
+function resolveSpawnableRoot() {
+  return app$1.isPackaged ? app$1.getPath("userData") : app$1.getAppPath();
+}
 function resolvePagesDir() {
   if (process.env.DSH_PAGES_DIR) return process.env.DSH_PAGES_DIR;
   if (app$1.isPackaged) return join(app$1.getPath("userData"), "pages");
@@ -21455,7 +21458,7 @@ function registerTerminalIpc(ctx) {
     }
   });
   const terminalDirFor = (target) => {
-    if (target === "container") return resolveProjectDir();
+    if (target === "container") return resolveSpawnableRoot();
     if (target === "openclaw") return resolveOpenclawHome();
     if (target === "dsh-root") return resolveDshHome();
     if (target.startsWith("dsh:")) return resolveDshProfileDir(target.slice(4));

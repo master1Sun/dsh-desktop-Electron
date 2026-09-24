@@ -3,7 +3,7 @@ import { IPC, type IpcResult } from '../../../shared/types'
 import { expandStartCommand, buildPageEnv } from '../../runtime/pages'
 import { PtyManager, listShells } from '../../runtime/pty'
 import { logPageLine } from '../logger'
-import { resolveProjectDir, resolveDshProfileDir, resolveDshHome, resolveOpenclawHome } from '../store'
+import { resolveSpawnableRoot, resolveDshProfileDir, resolveDshHome, resolveOpenclawHome } from '../store'
 import { m } from '../i18n'
 import { type IpcCtx } from './util'
 
@@ -63,7 +63,9 @@ export function registerTerminalIpc(ctx: IpcCtx): void {
   })
 
   const terminalDirFor = (target: string): string => {
-    if (target === 'container') return resolveProjectDir()
+    // 'container' is the drawer's default shell: it needs a real folder, so packaged builds get the
+    // container's userData rather than the asar path (see resolveSpawnableRoot).
+    if (target === 'container') return resolveSpawnableRoot()
     if (target === 'openclaw') return resolveOpenclawHome()
     if (target === 'dsh-root') return resolveDshHome()
     if (target.startsWith('dsh:')) return resolveDshProfileDir(target.slice(4))

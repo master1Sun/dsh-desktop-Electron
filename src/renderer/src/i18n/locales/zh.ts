@@ -42,7 +42,6 @@ const zh: Dict = {
     failed: '启动失败',
     stopped: '已停止',
     notRunningHint: '启动成功后才能切换',
-    openTerminalHint: '点击在内置终端中打开运行',
     activePageHint: '当前页面',
     start: '启动',
     startingTip: '启动中…',

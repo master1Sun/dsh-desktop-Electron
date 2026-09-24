@@ -157,6 +157,18 @@ export function resolveProjectDir(): string {
   return app.getAppPath()
 }
 
+/**
+ * A directory a child process can actually be started in. `resolveProjectDir()` points inside
+ * `app.asar` once packaged: Electron's fs reads through the archive, but CreateProcess cannot make a
+ * file a process cwd, so a PTY rooted there dies on spawn (ENOENT) and the embedded terminal never
+ * opens. Packaged installs use the container's own userData as the root — a real, writable folder
+ * holding `pages/`, `capabilities/` and `logs/` (the same reason `resolveEnvRoot` avoids the
+ * install dir).
+ */
+export function resolveSpawnableRoot(): string {
+  return app.isPackaged ? app.getPath('userData') : app.getAppPath()
+}
+
 /** pages/ lives in the repo in dev so it is editable; packaged it moves to userData so installs survive updates */
 export function resolvePagesDir(): string {
   if (process.env.DSH_PAGES_DIR) return process.env.DSH_PAGES_DIR

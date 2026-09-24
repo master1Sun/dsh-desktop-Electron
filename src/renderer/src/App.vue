@@ -130,8 +130,16 @@ function restartPage(id: string): void {
  * Reveal the terminal drawer from the palette: focus the last session if one exists,
  * otherwise start a root shell (which itself opens the drawer). */
 function openTerminalDrawer(): void {
-  if (store.sessions.length) store.open = true
-  else void store.start('container', t('terminal.title')).catch(() => undefined)
+  if (store.sessions.length) {
+    store.open = true
+    return
+  }
+  // Report a failed spawn: the drawer only opens once its shell exists, so swallowing the error
+  // made a bad cwd (packaged builds used to root the shell inside app.asar) look like a palette
+  // command that does nothing at all.
+  void store
+    .start('container', t('terminal.title'))
+    .catch((err) => ElMessage.error((err as Error).message))
 }
 
 /* Store i18n KEYS, not resolved labels: `t()` here would run once at module load and freeze

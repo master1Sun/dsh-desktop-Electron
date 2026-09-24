@@ -75,16 +75,6 @@ const activeDotClass = computed(() => {
   return p.runtimeMissing === true ? 'dot-stopped' : `dot-${p.status}`
 })
 
-/** Row tooltip: why a name is greyed, or what clicking it does (terminal = open the CLI). */
-function rowTitle(p: PageState): string {
-  if (blocked(p)) return t('setup.runtimeMissingTag')
-  if (needsStart(p)) return t('menu.notRunningHint')
-  const status = statusText(p)
-  return p.kind === 'terminal' && p.status !== 'running'
-    ? `${t('menu.openTerminalHint')} · ${status}`
-    : status
-}
-
 /**
  * A hosted dsh/openclaw page whose runtime is not installed yet: the row is flagged so the user
  * is guided to install (the ▶ click is intercepted upstream and opens the setup guide) rather than
@@ -94,21 +84,6 @@ function rowTitle(p: PageState): string {
  */
 function blocked(p: PageState): boolean {
   return p.runtimeMissing === true
-}
-
-/** Traffic-light / status labels for tooltips, in the active language. */
-function statusText(p: PageState): string {
-  const base =
-    {
-      running: t('menu.running'),
-      starting: t('menu.starting'),
-      error: t('menu.failed'),
-      stopped: t('menu.stopped')
-    }[p.status] || p.status
-  // The health guard appended its own context where it matters to the user.
-  if (p.nextRestartAt) return `${base} · ${t('menu.autoRestartPending')}`
-  if (p.crashes) return `${base} · ${t('menu.crashCount', { n: p.crashes })}`
-  return base
 }
 
 /** Capture phase, so the trigger's own re-click toggles before this sees the mousedown. */
@@ -240,16 +215,14 @@ defineExpose({ close })
               <path d="M1 4h9" stroke="currentColor" stroke-width="0.9" />
             </template>
           </svg>
-          <el-tooltip :content="rowTitle(p)" placement="top" popper-class="dsh-tip-popper">
-            <button
-              class="row-name"
-              :class="{ 'is-blocked': blocked(p) }"
-              :disabled="needsStart(p)"
-              @click="pick(p)"
-            >
-              {{ p.name }}
-            </button>
-          </el-tooltip>
+          <button
+            class="row-name"
+            :class="{ 'is-blocked': blocked(p) }"
+            :disabled="needsStart(p)"
+            @click="pick(p)"
+          >
+            {{ p.name }}
+          </button>
           <span v-if="blocked(p)" class="block-tag" :title="t('setup.runtimeMissingTag')">{{
             t('setup.missingTag')
           }}</span>
@@ -278,7 +251,6 @@ defineExpose({ close })
           <i
             class="status-dot"
             :class="blocked(p) ? 'dot-stopped' : `dot-${p.status}`"
-            :title="rowTitle(p)"
           />
         </li>
         <li v-if="!hasPages" class="drop-empty" role="presentation">{{ t('menu.switcherEmpty') }}</li>
