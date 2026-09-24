@@ -250,6 +250,11 @@ const zh: Dict = {
   'upd.localNoAuto': '本地项目不支持自动更新，请在其仓库拉取新版后重装/复制',
   'upd.builtinFollowsContainer': '容器内置页面，随桌面控制台源码一起更新',
   'upd.unknownChannel': '未知的更新方式',
+  'upd.badVersion': '版本号 {v} 不合法（仅允许字母、数字与 . - +）',
+  'upd.migrateRunning': '页面正在运行，请先停止后再执行迁移更新',
+  'upd.manifestUnreadable': '无法读取页面的 container.json，迁移已中止',
+  'upd.capabilityMigrated': '已迁移为容器能力并更新：{dir}',
+  'upd.capabilityMigratedPartial': '已迁移为容器能力并更新：{dir}（页面目录内部分旧文件被占用，未能清理）',
 
   // #15 配置快照 / 迁移包
   'snapshot.exportTitle': '导出迁移包',
@@ -518,6 +523,12 @@ const en: Dict = {
   'upd.builtinFollowsContainer':
     'Built-in container page — updates with the desktop container source',
   'upd.unknownChannel': 'Unknown update channel',
+  'upd.badVersion': 'Version {v} is not valid (letters, digits, . - + only)',
+  'upd.migrateRunning': 'The page is running — stop it before the migrate-update',
+  'upd.manifestUnreadable': 'Could not read the page container.json; migration aborted',
+  'upd.capabilityMigrated': 'Migrated to a container capability and updated: {dir}',
+  'upd.capabilityMigratedPartial':
+    'Migrated to a container capability and updated: {dir} (some old files in the page dir were locked and left behind)',
 
   // #15 config snapshot / migration package
   'snapshot.exportTitle': 'Export migration package',

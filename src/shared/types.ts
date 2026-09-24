@@ -688,12 +688,20 @@ export interface UpdateCheckResult {
   /** whether the app can run the update itself (vs. only surfacing a hint) */
   canAutoUpdate?: boolean
   /** how performUpdate should act on this row */
-  action?: 'pull' | 'reprovision' | 'manual' | 'none' | 'apply-asar'
+  action?: 'pull' | 'reprovision' | 'migrateCapability' | 'manual' | 'none' | 'apply-asar'
   /** npm package name backing an npm/builtin row */
   packageName?: string
+  /**
+   * Runtime kind the page's own container.json declares (page rows only) — lets the panel tag an
+   * import by what it actually is (`terminal` → CLI, `page` → Web) instead of its name.
+   */
+  pageKind?: PageKind
   /** container row: the new asar is already downloaded/staged — only a restart is missing */
   pendingRestart?: boolean
-  /** builtin-page row (action 'none'): the pages/<id> this row manages — reset entry key */
+  /** builtin-page row (action 'none'): the pages/<id> this row manages — reset entry key.
+   *  Also the migration target on a `migrateCapability` row (action): a legacy import whose whole
+   *  npm package sits in the page dir; the update re-provisions it into `capabilities/<pageId>`
+   *  and rewrites the manifest to the thin capability form. */
   pageId?: string
   /**
    * npm-CLI-capability row (a page that declared `npmPackage`): the page id whose update runs a
@@ -1202,6 +1210,8 @@ export const IPC = {
   DownloadDir: 'container:download-dir',
   CheckUpdates: 'container:check-updates',
   PerformUpdate: 'container:perform-update',
+  /** npm versions of one package, newest first — the 指定版本 picker's source (string[]) */
+  ListPkgVersions: 'container:list-pkg-versions',
   /** list Node versions eligible to replace the bundled runtime (NodeVersionInfo[]) */
   ListNodeVersions: 'container:list-node-versions',
   /** download + install one Node runtime over the bundled one; streams OnNodeUpdateProgress */

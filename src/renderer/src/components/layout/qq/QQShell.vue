@@ -70,14 +70,13 @@ const popTop = ref(0)
 const caretTop = ref(0)
 
 /**
- * The 看板 page is palette-only (Ctrl+K) — it has no rail icon, so the rail-anchored bubble would
- * fall back to a stale top with a caret pointing at nothing. Center it as a modal-like card and
- * give it an explicit ✕ (there is no active icon to click again to dismiss it).
+ * The 看板 page now owns a rail icon (see qqNav UTILITY_GROUPS), so it behaves like every other
+ * group: a rail-anchored bubble with a caret, dismissed by re-clicking the icon or clicking away.
  */
-const isBoard = computed(() => props.current === 'board')
-const wrapStyle = computed<Record<string, string> | null>(() =>
-  isBoard.value ? null : { top: `${popTop.value}px`, height: `${popHeight.value}px` }
-)
+const wrapStyle = computed<Record<string, string>>(() => ({
+  top: `${popTop.value}px`,
+  height: `${popHeight.value}px`
+}))
 
 function layoutPop(): void {
   const shell = shellRef.value
@@ -113,9 +112,6 @@ watch(
 // click on them must never read as "clicked away". pointerdown (not click) so an in-card drag that
 // ends outside (an el-slider thumb) doesn't dismiss it.
 function onDocPointerDown(e: PointerEvent): void {
-  // The 看板 page is a deliberate, palette-only modal: a stray blank-area click must NOT dismiss
-  // it (there is no rail icon to re-click either). Only its ✕ / Esc close it.
-  if (isBoard.value) return
   const el = e.target as HTMLElement | null
   if (!el) return
   if (el.closest('.qq-pop, .qq-rail')) return
@@ -193,32 +189,9 @@ onBeforeUnmount(() => {
       </div>
     </nav>
 
-    <!-- Floating bubble panel: the classic MenuPanelContent card, anchored beside the rail. -->
-    <div
-      v-if="current"
-      class="qq-pop-wrap"
-      :class="{ 'is-centered': isBoard }"
-      :style="wrapStyle"
-    >
+    <div v-if="current" class="qq-pop-wrap" :style="wrapStyle">
       <section class="qq-pop glass" role="dialog" aria-modal="false">
-        <span v-if="!isBoard" class="qq-caret" :style="{ top: caretTop + 'px' }" aria-hidden="true" />
-        <header v-if="isBoard" class="qq-pop-head">
-          <span class="qq-pop-title">{{ t('menu.board') }}</span>
-          <el-tooltip
-            :content="t('menu.closeEsc')"
-            placement="bottom"
-            popper-class="dsh-tip-popper"
-          >
-            <button
-              type="button"
-              class="qq-pop-close"
-              :aria-label="t('menu.closeEsc')"
-              @click="emit('open-panel', null)"
-            >
-              ✕
-            </button>
-          </el-tooltip>
-        </header>
+        <span class="qq-caret" :style="{ top: caretTop + 'px' }" aria-hidden="true" />
         <div class="qq-pop-body">
           <MenuPanelContent
             :panel="current"
@@ -417,6 +390,7 @@ onBeforeUnmount(() => {
 }
 .qq-pop-body:has(.el-tabs) :deep(.panel-content),
 .qq-pop-body:has(.el-tabs) :deep(.sec),
+.qq-pop-body:has(.el-tabs) :deep(.task-board),
 .qq-pop-body:has(.el-tabs) :deep(.settings-panel),
 .qq-pop-body:has(.el-tabs) :deep(.page-manager),
 .qq-pop-body:has(.el-tabs) :deep(.dsh-manager) {
@@ -523,72 +497,6 @@ onBeforeUnmount(() => {
   to {
     opacity: 1;
     transform: translateX(0);
-  }
-}
-
-/* ---- centered 看板 card, positioned like the classic floating panel (top-center) ---- */
-/* The classic card drops in at `top:100%` of the menu bar with `margin:4px auto` — i.e. horizontally
-   centred across the window, hugging the top under the bar. `.qq-shell` already starts below the
-   title bar, so `top:4px` there reproduces that offset; but the shell is only the 48px rail wide,
-   so we span `width:100vw` (its left edge is the window's) and top-align + centre to mirror classic
-   rather than floating the card in the vertical middle. */
-.qq-pop-wrap.is-centered {
-  position: absolute;
-  top: 4px;
-  bottom: 8px;
-  left: 0;
-  width: 100vw;
-  align-items: flex-start;
-  justify-content: center;
-}
-.qq-pop-wrap.is-centered .qq-pop {
-  margin-left: 0;
-  height: auto;
-  max-height: 100%;
-  width: min(860px, calc(100vw - 24px));
-  animation: qq-pop-center-in 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) both;
-}
-.qq-pop-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex: none;
-  padding: 10px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
-}
-.qq-pop-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-.qq-pop-close {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  transition:
-    background 0.15s ease,
-    color 0.15s ease;
-}
-.qq-pop-close:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-@keyframes qq-pop-center-in {
-  from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
   }
 }
 </style>

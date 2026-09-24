@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path'
 import * as os from 'node:os'
 import * as pty from 'node-pty'
 import { getNodeExePath } from './node-runtime'
+import { splitCommandArgs, quoteForCreateProcess, isJsLauncher } from './command-line'
 import { pnpmBinDirs } from './dsh'
 import { m } from '../shell/i18n'
 import type { PtyShellInfo } from '../../shared/types'
@@ -228,10 +229,22 @@ export class PtyManager {
     let env = await terminalEnv()
     const run = opts?.run
     if (run?.command.trim()) {
-      const [cmd, ...rest] = expandTilde(run.command.trim()).split(/\s+/)
+      // Quote-aware split: a capability page launches `node "<entry path>"`, and a bare
+      // whitespace split would hand node the quotes as part of the filename (MODULE_NOT_FOUND).
+      let [cmd, ...rest] = splitCommandArgs(expandTilde(run.command.trim()))
       env = { ...env, ...(run.env || {}) }
+      // Stale-manifest guard: an older importer wrote `node "<entry>"` even for a native binary
+      // (claude-code's bin/claude.exe), which node can't load — ERR_UNKNOWN_FILE_EXTENSION, now a
+      // bare code=1. When the single "script" arg isn't a JS module, drop node and exec the binary
+      // directly. Scoped to the exact `node "<one non-js path>"` shape so `node --flag x.js` etc.
+      // are never touched.
+      if (cmd === 'node' && rest.length === 1 && !rest[0].startsWith('-') && !isJsLauncher(rest[0])) {
+        cmd = rest[0]
+        rest = []
+      }
       shell = cmd === 'node' ? getNodeExePath() : (whichOnPath(cmd, env) ?? cmd)
-      args = rest
+      // Re-quote spaced args: node-pty joins them into a CreateProcess command line unquoted.
+      args = quoteForCreateProcess(rest)
       // node-pty hands the command straight to CreateProcess, which needs a real
       // file: a bare name (or a PATH miss) fails with "CreateProcess failed" and
       // surfaces as a dead terminal. Say which command is missing instead.

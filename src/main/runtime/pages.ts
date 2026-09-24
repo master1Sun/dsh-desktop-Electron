@@ -6,6 +6,7 @@ import { get as httpGet } from 'node:http'
 import { get as httpsGet } from 'node:https'
 import { nativeTheme } from 'electron'
 import { getNodeExePath, bundledEnv } from './node-runtime'
+import { splitCommandArgs } from './command-line'
 import { resolvePageEnv, resolvePageTextEnv, expandHome, getSettings, resolvePageCustomEnvs } from '../shell/store'
 import { logPageLine } from '../shell/logger'
 import { logEvent } from '../shell/events'
@@ -597,7 +598,9 @@ export class PageRegistry extends EventEmitter {
         this.setStatus(e, 'stopped')
         throw new Error(msg('page.cliNeedsTerminal', { name: e.meta.name }))
       }
-      const [cmd, ...args] = expandStartCommand(e.meta.startCommand).split(/\s+/)
+      // Quote-aware: an npm capability page starts with `node "<entry path>"`, and a bare
+      // whitespace split would pass the quotes to node as part of the file name.
+      const [cmd, ...args] = splitCommandArgs(expandStartCommand(e.meta.startCommand))
       const executable = cmd === 'node' ? getNodeExePath() : cmd
       launch = {
         cmd: executable,
@@ -824,12 +827,15 @@ export class PageRegistry extends EventEmitter {
       proc.once('close', onExit)
       // fallback: the declared port may come up before the token line reaches us. dsh *requires*
       // the token in the launch URL, so a bare origin is a guaranteed 401 — never hand one back the
-      // moment the short grace lapses. Keep waiting for the announcement (matching the detached
-      // paths, which tail the merged stdout+stderr file for ANNOUNCE_GRACE_MS*4) so a late line on
-      // either stream still wins; only settle for `announced?.url` once we've given it that window.
+      // moment a short grace lapses. The announce line can trail the port bind by many seconds when
+      // dsh first spawns its child services (each prints "Debugger listening…" before the final
+      // "dsh web: …" line), so keep waiting for the announcement until the OVERALL dsh-ready
+      // deadline (with the ANNOUNCE_GRACE_MS*4 floor for a very late port) rather than a fixed 6s.
+      // onChunk still wins the race the instant the line lands, and a dying child fails fast via
+      // onExit — so extending this window only avoids the token-less 401, it never hangs a real boot.
       waitPortReady(wantPort, timeoutMs).then(
         (port) => {
-          const settleDeadline = Date.now() + ANNOUNCE_GRACE_MS * 4
+          const settleDeadline = Math.max(deadline, Date.now() + ANNOUNCE_GRACE_MS * 4)
           const settle = (): void => {
             clearInterval(poll)
             cleanup()

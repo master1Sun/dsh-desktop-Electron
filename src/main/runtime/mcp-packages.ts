@@ -13,6 +13,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { McpPkgStatus } from '../../shared/types'
+import { isJsLauncher } from './command-line'
 
 /** Built-in MCP row id → its npm package name. Order mirrors mcp-hub's curated defs. */
 export const BUILTIN_MCP_PKG: Record<string, string> = {
@@ -79,6 +80,17 @@ export function resolveMcpPkgEntry(pkgName: string, base = root): string | null 
   if (!rel) return null
   const entry = join(pkgDir, rel.replace(/^\.\//, ''))
   return existsSync(entry) ? entry : null
+}
+
+/**
+ * The `startCommand` that launches an npm capability's resolved bin in the embedded terminal.
+ * A JS launcher (`.js`/`.cjs`/`.mjs` — codex, gemini, qwen) must run under node; a native binary
+ * (`@anthropic-ai/claude-code` ships `bin/claude.exe`) must be exec'd directly — handing it to
+ * node dies with ERR_UNKNOWN_FILE_EXTENSION. The path is quoted because the capability dir may
+ * contain spaces (both launchers split the command quote-aware, see command-line.ts).
+ */
+export function buildCapabilityStartCommand(entry: string): string {
+  return isJsLauncher(entry) ? `node "${entry}"` : `"${entry}"`
 }
 
 /** Installed version of one package (undefined when missing or package.json has none). */

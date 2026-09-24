@@ -559,10 +559,12 @@ async function saveConfig(): Promise<void> {
     }
     // #4: commit the dep override only when it changed, so a plain port/env edit never
     // rewrites the page's dependency wiring. Main rejects a set that closes a cycle.
+    // Spread off the reactive Proxy here: a Proxy array handed to contextBridge throws
+    // "An object could not be cloned", which would fail the whole save the moment a dep is picked.
     const curDeps = page.dependsOn ?? []
-    const nextDeps = configDraft.deps
+    const nextDeps = [...configDraft.deps]
     const sameDeps =
-      curDeps.length === nextDeps.length && [...curDeps].sort().join() === [...nextDeps].sort().join()
+      curDeps.length === nextDeps.length && [...curDeps].sort().join() === nextDeps.slice().sort().join()
     if (!sameDeps) {
       const res = await window.container.setPageDeps?.(page.id, nextDeps)
       if (res && !res.ok) {

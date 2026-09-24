@@ -3,6 +3,7 @@ import {
   Box,
   Connection,
   Cpu,
+  DataBoard,
   Grid,
   MagicStick,
   Monitor,
@@ -104,6 +105,12 @@ const UTILITY_GROUPS: QQGroup[] = [
     labelKey: 'palette.panelWorkspace',
     icon: Box,
     leaves: [{ route: 'workspace', labelKey: 'palette.panelWorkspace' }]
+  },
+  {
+    group: 'board',
+    labelKey: 'palette.panelBoard',
+    icon: DataBoard,
+    leaves: [{ route: 'board', labelKey: 'palette.panelBoard' }]
   },
   {
     group: 'mcp',

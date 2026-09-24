@@ -65,7 +65,7 @@ describe('page meta parsing', () => {
   it('reads the dsh-web page as dsh kind', () => {
     const meta = readPageMeta(pagesDir, 'dsh-web')
     expect(meta.kind).toBe('dsh')
-    expect(meta.port).toBe(8899)
+    expect(meta.port).toBe(3080)
     expect(meta.startCommand).toBe('dsh --profile web')
     expect(meta.dshProfile).toBe('web')
     expect(meta.builtin).toBe(true)

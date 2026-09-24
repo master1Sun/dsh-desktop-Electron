@@ -30,6 +30,8 @@ const IPC = {
   DownloadDir: "container:download-dir",
   CheckUpdates: "container:check-updates",
   PerformUpdate: "container:perform-update",
+  /** npm versions of one package, newest first — the 指定版本 picker's source (string[]) */
+  ListPkgVersions: "container:list-pkg-versions",
   /** list Node versions eligible to replace the bundled runtime (NodeVersionInfo[]) */
   ListNodeVersions: "container:list-node-versions",
   /** download + install one Node runtime over the bundled one; streams OnNodeUpdateProgress */
@@ -222,7 +224,8 @@ const api = {
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
   getDownloadDir: () => ipcRenderer.invoke(IPC.DownloadDir),
   checkUpdates: (force) => ipcRenderer.invoke(IPC.CheckUpdates, force),
-  performUpdate: (target) => ipcRenderer.invoke(IPC.PerformUpdate, target),
+  performUpdate: (target, pinned) => ipcRenderer.invoke(IPC.PerformUpdate, target, pinned),
+  listPackageVersions: (pkg) => ipcRenderer.invoke(IPC.ListPkgVersions, pkg),
   openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
   listLogFiles: () => ipcRenderer.invoke(IPC.ListLogFiles),
   readLogs: (args) => ipcRenderer.invoke(IPC.ReadLogs, args),

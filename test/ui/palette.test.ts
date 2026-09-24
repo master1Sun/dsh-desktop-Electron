@@ -163,7 +163,8 @@ beforeEach(() => {
   persistedSettings.externalSites = []
   persistedSettings.theme = 'auto'
   persistedSettings.locale = 'zh'
-  // Settings is reached through the classic top menu here, so pin classic (the shell defaults to IM).
+  // Settings is reached through the classic top menu here, so pin classic explicitly (the shell
+  // defaults to classic too, but the palette commands must not depend on that).
   persistedSettings.layoutMode = 'classic'
   ;(window as unknown as { container: unknown }).container = makeContainerMock()
 })
@@ -223,7 +224,7 @@ describe('command palette contents', () => {
     expect(paletteOpen()).toBe(false)
   })
 
-  it('fires a Ctrl+letter quick-open for a 操作/页面 row while the palette is open', async () => {
+  it('fires a Ctrl+letter quick-open for a 操作 row while the palette is open', async () => {
     await mountApp()
     await openPalette()
     // The first row that carries a quick-open badge; its letter is assigned deterministically.
@@ -238,6 +239,17 @@ describe('command palette contents', () => {
     await flush(40)
     // run() closes the palette before dispatching the command, so closing proves the quick-open fired.
     expect(paletteOpen()).toBe(false)
+  })
+
+  it('gives 页面 rows no Ctrl+letter quick-open badge', async () => {
+    await mountApp()
+    await openPalette()
+    const pagesSec = [...document.querySelectorAll('.palette-group')].find(
+      (g) => (g.querySelector('.group-label')?.textContent || '').trim() === '页面'
+    )
+    expect(pagesSec).toBeTruthy()
+    // Pages are numerous and change with what is installed, so none of their rows take a slot.
+    expect(pagesSec!.querySelector('.item-key')).toBeNull()
   })
 
   it('also gives a 面板 entry a Ctrl+letter quick-open badge', async () => {

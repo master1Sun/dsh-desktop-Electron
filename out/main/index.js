@@ -91,6 +91,8 @@ const IPC = {
   DownloadDir: "container:download-dir",
   CheckUpdates: "container:check-updates",
   PerformUpdate: "container:perform-update",
+  /** npm versions of one package, newest first — the 指定版本 picker's source (string[]) */
+  ListPkgVersions: "container:list-pkg-versions",
   /** list Node versions eligible to replace the bundled runtime (NodeVersionInfo[]) */
   ListNodeVersions: "container:list-node-versions",
   /** download + install one Node runtime over the bundled one; streams OnNodeUpdateProgress */
@@ -373,6 +375,42 @@ const nodeRuntime = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineP
   overrideNodeDir,
   resolveDshNodeExePath
 }, Symbol.toStringTag, { value: "Module" }));
+function splitCommandArgs(raw) {
+  const out = [];
+  const chars = [];
+  let quote = null;
+  let started = false;
+  for (const ch of raw) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else chars.push(ch);
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (started) {
+        out.push(chars.join(""));
+        chars.length = 0;
+        started = false;
+      }
+      continue;
+    }
+    chars.push(ch);
+    started = true;
+  }
+  if (started) out.push(chars.join(""));
+  return out;
+}
+function quoteForCreateProcess(args) {
+  return args.map((a) => /\s/.test(a) ? `"${a}"` : a);
+}
+function isJsLauncher(entry) {
+  return /\.(c|m)?js$/i.test(entry);
+}
 const isObject = (value) => {
   const type2 = typeof value;
   return value !== null && (type2 === "object" || type2 === "function");
@@ -11545,6 +11583,8 @@ const DEFAULTS = {
   theme: "auto",
   // UI display language; defaults to Chinese
   locale: "zh",
+  // shell layout: 'classic' (top menu + floating panels) is the default; 'im' = rail + bubbles
+  layoutMode: "classic",
   // env root is no longer user-configurable: fixed at userData/env (the system-common spot).
   // The field only survives in old settings files; resolveEnvRoot() ignores it. '@system' was
   // also a persisted choice there and resolves to the same place, so nothing needs migrating.
@@ -12026,6 +12066,11 @@ const zh = {
   "upd.localNoAuto": "本地项目不支持自动更新，请在其仓库拉取新版后重装/复制",
   "upd.builtinFollowsContainer": "容器内置页面，随桌面控制台源码一起更新",
   "upd.unknownChannel": "未知的更新方式",
+  "upd.badVersion": "版本号 {v} 不合法（仅允许字母、数字与 . - +）",
+  "upd.migrateRunning": "页面正在运行，请先停止后再执行迁移更新",
+  "upd.manifestUnreadable": "无法读取页面的 container.json，迁移已中止",
+  "upd.capabilityMigrated": "已迁移为容器能力并更新：{dir}",
+  "upd.capabilityMigratedPartial": "已迁移为容器能力并更新：{dir}（页面目录内部分旧文件被占用，未能清理）",
   // #15 配置快照 / 迁移包
   "snapshot.exportTitle": "导出迁移包",
   "snapshot.importTitle": "导入迁移包",
@@ -12241,6 +12286,11 @@ const en = {
   "upd.localNoAuto": "Local projects do not support auto-update; pull the new version in their repo, then reinstall/copy",
   "upd.builtinFollowsContainer": "Built-in container page — updates with the desktop container source",
   "upd.unknownChannel": "Unknown update channel",
+  "upd.badVersion": "Version {v} is not valid (letters, digits, . - + only)",
+  "upd.migrateRunning": "The page is running — stop it before the migrate-update",
+  "upd.manifestUnreadable": "Could not read the page container.json; migration aborted",
+  "upd.capabilityMigrated": "Migrated to a container capability and updated: {dir}",
+  "upd.capabilityMigratedPartial": "Migrated to a container capability and updated: {dir} (some old files in the page dir were locked and left behind)",
   // #15 config snapshot / migration package
   "snapshot.exportTitle": "Export migration package",
   "snapshot.importTitle": "Import migration package",
@@ -13221,6 +13271,9 @@ function resolveMcpPkgEntry(pkgName, base = root) {
   if (!rel) return null;
   const entry = join(pkgDir, rel.replace(/^\.\//, ""));
   return existsSync(entry) ? entry : null;
+}
+function buildCapabilityStartCommand(entry) {
+  return isJsLauncher(entry) ? `node "${entry}"` : `"${entry}"`;
 }
 function mcpPkgVersion(pkgName, base = root) {
   if (!base) return void 0;
@@ -14430,7 +14483,7 @@ class PageRegistry extends EventEmitter {
         this.setStatus(e, "stopped");
         throw new Error(m("page.cliNeedsTerminal", { name: e.meta.name }));
       }
-      const [cmd, ...args] = expandStartCommand(e.meta.startCommand).split(/\s+/);
+      const [cmd, ...args] = splitCommandArgs(expandStartCommand(e.meta.startCommand));
       const executable = cmd === "node" ? getNodeExePath() : cmd;
       launch = {
         cmd: executable,
@@ -14612,7 +14665,7 @@ class PageRegistry extends EventEmitter {
       proc.once("close", onExit);
       waitPortReady(wantPort, timeoutMs).then(
         (port) => {
-          const settleDeadline = Date.now() + ANNOUNCE_GRACE_MS * 4;
+          const settleDeadline = Math.max(deadline, Date.now() + ANNOUNCE_GRACE_MS * 4);
           const settle = () => {
             clearInterval(poll);
             cleanup();
@@ -16222,10 +16275,14 @@ class PtyManager {
     let env2 = await terminalEnv();
     const run = opts?.run;
     if (run?.command.trim()) {
-      const [cmd, ...rest] = expandTilde(run.command.trim()).split(/\s+/);
+      let [cmd, ...rest] = splitCommandArgs(expandTilde(run.command.trim()));
       env2 = { ...env2, ...run.env || {} };
+      if (cmd === "node" && rest.length === 1 && !rest[0].startsWith("-") && !isJsLauncher(rest[0])) {
+        cmd = rest[0];
+        rest = [];
+      }
       shell2 = cmd === "node" ? getNodeExePath() : whichOnPath(cmd, env2) ?? cmd;
-      args = rest;
+      args = quoteForCreateProcess(rest);
       if (cmd !== "node" && !existsSync(shell2)) {
         throw new Error(m("pty.commandNotFound", { cmd }));
       }
@@ -17006,6 +17063,48 @@ async function fetchNpmLatest(name, tag = "latest") {
 function semverTuple(v) {
   return (v.replace(/^v/, "").split(/[-+]/)[0].match(/\d+/g) || []).map(Number);
 }
+function sortVersionsDesc(versions, limit2 = 60) {
+  const uniq = [...new Set(versions.filter((v) => /^v?\d/.test(v)))];
+  uniq.sort((a, b) => {
+    const ta = semverTuple(a);
+    const tb = semverTuple(b);
+    for (let i = 0; i < Math.max(ta.length, tb.length); i++) {
+      const d = (tb[i] ?? 0) - (ta[i] ?? 0);
+      if (d) return d;
+    }
+    const pa = /[-+]/.test(a) ? 1 : 0;
+    const pb = /[-+]/.test(b) ? 1 : 0;
+    if (pa !== pb) return pa - pb;
+    return b.localeCompare(a, void 0, { numeric: true });
+  });
+  return uniq.slice(0, Math.max(0, limit2));
+}
+const versionListCache = /* @__PURE__ */ new Map();
+const VERSIONS_TTL_MS = 10 * 6e4;
+const PLATFORM_BUILD_RE = /-(?:linux|win32|darwin|freebsd|android)-(?:x64|arm64|ia32|x86|arm)$/i;
+async function listPackageVersions(name, limit2 = 60) {
+  const hit = versionListCache.get(name);
+  if (hit && Date.now() - hit.at < VERSIONS_TTL_MS) return hit.versions.slice(0, limit2);
+  const url = new URL(encodeURIComponent(name).replace(/^%40/, "@"), registryUrl()).toString();
+  for (const accept of ["application/vnd.npm.install-v1+json", "application/json"]) {
+    try {
+      const res = await fetch(url, {
+        headers: { Accept: accept },
+        signal: AbortSignal.timeout(2e4)
+      });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const list = Object.keys(json.versions || {}).filter((v) => !PLATFORM_BUILD_RE.test(v));
+      if (list.length) {
+        const sorted = sortVersionsDesc(list);
+        versionListCache.set(name, { at: Date.now(), versions: sorted });
+        return sorted.slice(0, limit2);
+      }
+    } catch {
+    }
+  }
+  return [];
+}
 function isNewer(current2, latest) {
   const a = semverTuple(current2);
   const b = semverTuple(latest);
@@ -17025,6 +17124,9 @@ function readPkgJson(dir) {
   return null;
 }
 async function checkPage(p) {
+  return { ...await checkPageRow(p), pageKind: p.kind };
+}
+async function checkPageRow(p) {
   if (p.builtin) {
     return {
       name: p.name,
@@ -17054,7 +17156,7 @@ async function checkPage(p) {
       currentVersion: pkg.version,
       error: m("upd.registryUnreachable")
     };
-  return {
+  const npmRow = {
     name: p.name,
     dir: p.dir,
     isContainer: false,
@@ -17063,10 +17165,11 @@ async function checkPage(p) {
     packageName: pkg.name,
     currentVersion: pkg.version,
     latestVersion: latest,
-    hasUpdate: isNewer(pkg.version, latest),
-    canAutoUpdate: false,
-    action: "manual"
+    hasUpdate: isNewer(pkg.version, latest)
   };
+  if (p.kind === "terminal")
+    return { ...npmRow, canAutoUpdate: true, action: "migrateCapability", pageId: p.id };
+  return { ...npmRow, canAutoUpdate: false, action: "manual" };
 }
 async function checkBuiltin(name, dir, packageName, currentVersion, tag = "latest") {
   const base = {
@@ -17099,6 +17202,7 @@ async function checkNpmCapability(p) {
     source: "npm",
     packageName: p.npmPackage,
     capabilityId: p.id,
+    pageKind: p.kind,
     action: "reprovision",
     canAutoUpdate: true
   };
@@ -17344,6 +17448,66 @@ async function updateCapability(packageName, capDir, rowName, pinned, onProgress
     message: after && after !== before ? m("upd.dshUpgraded", { after }) : m("upd.dshUpToDate", { after: after || "?" })
   };
 }
+function healCapabilityStartCommand(pageId, pkg, capDir) {
+  const entry = resolveMcpPkgEntry(pkg, capDir);
+  if (!entry) return;
+  const manifestFile = join(resolvePagesDir(), pageId, "container.json");
+  if (!existsSync(manifestFile)) return;
+  try {
+    const raw = JSON.parse(readFileSync(manifestFile, "utf-8"));
+    const next2 = buildCapabilityStartCommand(entry);
+    if (raw.startCommand !== next2) {
+      raw.startCommand = next2;
+      writeFileSync$1(manifestFile, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+    }
+  } catch {
+  }
+}
+async function migrateCapabilityUpdate(target, onProgress, pinned) {
+  const name = target.name;
+  const pageId = target.pageId;
+  const pkg = target.packageName;
+  const pageDir = target.dir;
+  if (!pageId || !pkg || !pageDir)
+    return { name, ok: false, updated: false, error: m("upd.unknownChannel") };
+  const capDir = join(resolveCapabilitiesDir(), pageId);
+  const prov = await updateCapability(pkg, capDir, name, pinned, onProgress);
+  if (!prov.ok) return prov;
+  const entry = resolveMcpPkgEntry(pkg, capDir);
+  if (!entry) return { name, ok: false, updated: false, error: m("install.npmNoBin", { pkg }) };
+  const manifestFile = join(pageDir, "container.json");
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(manifestFile, "utf-8"));
+  } catch {
+    return { name, ok: false, updated: false, error: m("upd.manifestUnreadable") };
+  }
+  raw.startCommand = buildCapabilityStartCommand(entry);
+  raw.npmPackage = pkg;
+  raw.capabilityDir = capDir;
+  writeFileSync$1(manifestFile, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+  let cleaned = true;
+  try {
+    for (const e of readdirSync(pageDir)) {
+      if (e === "container.json") continue;
+      rmSync(join(pageDir, e), { recursive: true, force: true });
+    }
+  } catch {
+    cleaned = false;
+  }
+  logEvent({
+    level: "info",
+    kind: "update.migrate",
+    pageId,
+    detail: `in-page npm install → capability ${capDir}`
+  });
+  return {
+    name,
+    ok: true,
+    updated: true,
+    message: cleaned ? m("upd.capabilityMigrated", { dir: capDir }) : m("upd.capabilityMigratedPartial", { dir: capDir })
+  };
+}
 async function checkMcpPackages() {
   const name = m("upd.mcpName");
   const base = {
@@ -17432,28 +17596,41 @@ async function provisionBuiltin(kind, pinned) {
   return result;
 }
 const inFlightUpdates = /* @__PURE__ */ new Map();
-function performUpdate(target, onProgress) {
-  const running = inFlightUpdates.get(target.name);
+function performUpdate(target, onProgress, pinned) {
+  const key = `${target.name}|${(pinned || "").trim()}`;
+  const running = inFlightUpdates.get(key);
   if (running) {
     console.log(`[update] ${target.name}: update already in flight, joining`);
     return running;
   }
-  const done = runUpdate(target, onProgress).finally(() => {
-    inFlightUpdates.delete(target.name);
+  const done = runUpdate(target, onProgress, pinned).finally(() => {
+    inFlightUpdates.delete(key);
   });
-  inFlightUpdates.set(target.name, done);
+  inFlightUpdates.set(key, done);
   return done;
 }
-async function runUpdate(target, onProgress) {
+async function runUpdate(target, onProgress, pinned) {
+  const want = (pinned || "").trim() || void 0;
   switch (target.action) {
     case "pull":
       return performUpdate$1({ name: target.name, dir: target.dir });
     case "apply-asar":
       return applyAsarUpdate(target.name, onProgress);
     case "reprovision":
-      if (target.capabilityId && target.packageName && target.dir)
-        return updateCapability(target.packageName, target.dir, target.name, void 0, onProgress);
-      return target.packageName === MCP_PKG_GROUP ? installMcpPackages(void 0, onProgress, target.name) : target.packageName === DSH_PKG ? updateDshSelf(void 0, onProgress, target.name) : reprovisionOpenclaw(void 0, onProgress, target.name);
+      if (target.capabilityId && target.packageName && target.dir) {
+        const r = await updateCapability(
+          target.packageName,
+          target.dir,
+          target.name,
+          want,
+          onProgress
+        );
+        if (r.ok) healCapabilityStartCommand(target.capabilityId, target.packageName, target.dir);
+        return r;
+      }
+      return target.packageName === MCP_PKG_GROUP ? installMcpPackages(want, onProgress, target.name) : target.packageName === DSH_PKG ? updateDshSelf(want, onProgress, target.name) : reprovisionOpenclaw(want, onProgress, target.name);
+    case "migrateCapability":
+      return migrateCapabilityUpdate(target, onProgress, want);
     case "manual":
       return {
         name: target.name,
@@ -19233,7 +19410,7 @@ async function installFromNpm(pagesDir, spec, name, onProgress, capabilitiesDir 
       en: msgIn("en", "install.importedNpmDesc")
     },
     kind: "terminal",
-    startCommand: `node "${entry}"`,
+    startCommand: buildCapabilityStartCommand(entry),
     npmPackage: pkg,
     capabilityDir: capDir
   };
@@ -20174,21 +20351,40 @@ function registerUpdatesIpc(ctx) {
   setTimeout(() => runSurvey(), 45e3).unref?.();
   surveyTimer = setInterval(() => runSurvey(), UPDATE_SURVEY_MS);
   surveyTimer.unref?.();
-  ipcMain$1.handle(IPC.PerformUpdate, async (_e, target) => {
-    const sender = _e.sender;
-    const onProgress = (p) => {
-      if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p);
-    };
+  ipcMain$1.handle(IPC.ListPkgVersions, async (_e, pkg) => {
     try {
-      const res = await performUpdate(target, onProgress);
-      clearUpdateCache();
-      return ok2(res);
+      const name = String(pkg || "").trim();
+      return ok2(name ? await listPackageVersions(name) : []);
     } catch (err) {
       return fail2(err);
-    } finally {
-      onProgress({ name: target.name, phase: "done", percent: 100 });
     }
   });
+  ipcMain$1.handle(
+    IPC.PerformUpdate,
+    async (_e, target, pinned) => {
+      const sender = _e.sender;
+      const onProgress = (p) => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p);
+      };
+      const want = String(pinned || "").trim();
+      try {
+        if (want && !/^[\w.+-]+$/.test(want))
+          return fail2(new Error(m("upd.badVersion", { v: want })));
+        if (target.action === "migrateCapability" && target.pageId) {
+          const st = registry2.get(target.pageId)?.status;
+          if (st === "running" || st === "starting") return fail2(new Error(m("upd.migrateRunning")));
+        }
+        const res = await performUpdate(target, onProgress, want || void 0);
+        if (res.ok && target.action === "migrateCapability") registry2.reconcile();
+        clearUpdateCache();
+        return ok2(res);
+      } catch (err) {
+        return fail2(err);
+      } finally {
+        onProgress({ name: target.name, phase: "done", percent: 100 });
+      }
+    }
+  );
 }
 function readTailText(file, cap) {
   try {

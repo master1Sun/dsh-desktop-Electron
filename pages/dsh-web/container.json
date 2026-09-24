@@ -7,7 +7,7 @@
   "kind": "dsh",
   "dsh": {
     "profile": "web",
-    "port": 8899
+    "port": 3080
   },
   "envVars": [
     {

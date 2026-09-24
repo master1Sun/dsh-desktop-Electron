@@ -8,9 +8,16 @@ import { useSettingsStore } from '@renderer/stores/settings'
 import { useIsLight } from '@renderer/composables/useTheme'
 import { TERMINAL_SCROLLBACK_DEFAULT, TERMINAL_SCROLLBACK_MAX } from '@shared/types'
 import TerminalSearchBar from './TerminalSearchBar.vue'
+import { useTerminalClipboard } from './clipboard'
 import { t } from '@renderer/i18n'
 
-const props = defineProps<{ page: PageState | null }>()
+/**
+ * `active` marks the surface currently on screen. App keeps one instance per opened CLI page
+ * mounted (v-show flips visibility), so a running CLI must survive a page switch untouched — the
+ * watch below distinguishes “revealed while still running” (refit + focus only) from “revealed
+ * after it stopped/exited” (auto-start on switch), which is what makes the terminal resident.
+ */
+const props = defineProps<{ page: PageState | null; active?: boolean }>()
 const emit = defineEmits<{ exit: [] }>()
 const settingsStore = useSettingsStore()
 
@@ -67,15 +74,47 @@ function queueWrite(data: string): void {
 }
 
 /** 终端配色跟随应用白天/黑夜主题（与内嵌终端抽屉一致）。isLight 是 html.light 类的
-    响应式镜像：直接 watch DOM 属性永远不会触发，主题切换靠它驱动下面的 watch。 */
+    响应式镜像：直接 watch DOM 属性永远不会触发，主题切换靠它驱动下面的 watch。
+    必须显式给 cursor/cursorAccent：xterm 默认光标是浅色，在白底上几乎看不见。 */
 const { isLight } = useIsLight()
-function themeColors(): { bg: string; fg: string } {
-  return isLight.value ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
+function themeColors(): {
+  background: string
+  foreground: string
+  cursor: string
+  cursorAccent: string
+  selection: string
+} {
+  return isLight.value
+    ? {
+        background: '#ffffff',
+        foreground: '#1f2328',
+        cursor: '#1f2328',
+        cursorAccent: '#ffffff',
+        selection: 'rgba(31, 35, 40, 0.2)'
+      }
+    : {
+        background: '#000000',
+        foreground: '#e8ecf3',
+        cursor: '#e8ecf3',
+        cursorAccent: '#000000',
+        selection: 'rgba(255, 255, 255, 0.25)'
+      }
 }
+
+/* Copy / paste + right-click menu, shared with the split-pane terminal (see clipboard.ts). */
+const {
+  onTerminalKey,
+  menu,
+  menuHasSel,
+  openMenu,
+  closeMenu,
+  menuCopy,
+  menuPaste,
+  menuSelectAll
+} = useTerminalClipboard(() => term)
 
 function ensureTerm(): void {
   if (term || !containerEl.value) return
-  const c = themeColors()
   term = new Terminal({
     // Full-screen TUIs position the cursor themselves. Translating every bare \n
     // into \r\n makes each repaint land one line lower, so the screen scrolls/
@@ -85,11 +124,13 @@ function ensureTerm(): void {
     fontFamily: 'Consolas, Menlo, "Cascadia Code", monospace',
     fontSize: 13,
     scrollback: scrollbackLines(),
-    theme: { background: c.bg, foreground: c.fg }
+    theme: themeColors()
   })
   fit = new FitAddon()
   term.loadAddon(fit)
   term.open(containerEl.value)
+  // Own the copy/paste chords before xterm/PTY turn Ctrl+C into SIGINT (see clipboard.ts).
+  term.attachCustomKeyEventHandler(onTerminalKey)
   term.onData((data) => {
     if (ptyId.value) window.container.ptyWrite(ptyId.value, data).catch(() => undefined)
   })
@@ -173,10 +214,12 @@ function stopPty(): void {
   ptyId.value = null
 }
 
-/** Leave the CLI terminal and give the user back the normal workbench. */
+/**
+ * Leave the CLI terminal and give the user back the normal workbench. This only hides the surface
+ * (App flips `active` off): the CLI keeps running as a resident session, so an explicit stop from
+ * the switcher / palette / toolbar is the only thing that ends the process.
+ */
 function leave(): void {
-  stopPty()
-  state.value = 'idle'
   emit('exit')
 }
 
@@ -191,12 +234,28 @@ watch(
   { immediate: true }
 )
 
+/* Revealed again after being hidden: keep a live PTY exactly as it was (just re-fit and focus),
+   but auto-start one whose process already ended — a page switch back to a stopped CLI starts it. */
+watch(
+  () => props.active,
+  (on) => {
+    if (!on) return
+    if (state.value === 'running' || state.value === 'starting') {
+      nextTick(() => {
+        fitActive()
+        term?.focus()
+      })
+      return
+    }
+    if (props.page) void run(props.page)
+  }
+)
+
 watch(
   isLight,
   () => {
     if (!term) return
-    const c = themeColors()
-    term.options.theme = { ...term.options.theme, background: c.bg, foreground: c.fg }
+    term.options.theme = { ...term.options.theme, ...themeColors() }
   }
 )
 
@@ -204,7 +263,7 @@ onBeforeUnmount(stopPty)
 </script>
 
 <template>
-  <div class="cli-term">
+  <div class="cli-term" @contextmenu="openMenu">
     <div ref="containerEl" class="cli-term-surface" />
     <TerminalSearchBar :get-term="() => term" />
     <div v-if="state === 'starting'" class="cli-term-overlay">
@@ -227,6 +286,27 @@ onBeforeUnmount(stopPty)
         </div>
       </div>
     </div>
+    <!-- Electron has no native context menu; right-click opens our own copy/paste/select-all.
+         Teleported to <body> so the card's overflow:hidden can't clip it. -->
+    <Teleport to="body">
+      <template v-if="menu">
+        <div class="cli-term-menu-backdrop" @pointerdown="closeMenu" @contextmenu.prevent />
+        <div class="cli-term-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }">
+          <button class="ctm-row" :disabled="!menuHasSel" @click="menuCopy">
+            <span>{{ t('terminal.copy') }}</span
+            ><span class="ctm-hint">{{ t('terminal.copyHint') }}</span>
+          </button>
+          <button class="ctm-row" @click="menuPaste">
+            <span>{{ t('terminal.paste') }}</span
+            ><span class="ctm-hint">{{ t('terminal.pasteHint') }}</span>
+          </button>
+          <div class="ctm-sep"></div>
+          <button class="ctm-row" @click="menuSelectAll">
+            <span>{{ t('terminal.selectAll') }}</span>
+          </button>
+        </div>
+      </template>
+    </Teleport>
   </div>
 </template>
 
@@ -327,5 +407,59 @@ html.dark .cli-term-surface {
   display: flex;
   gap: 10px;
   margin-top: 8px;
+}
+/* Right-click copy/paste menu (teleported to <body>, so fixed to the viewport). */
+.cli-term-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+}
+.cli-term-menu {
+  position: fixed;
+  z-index: 3001;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 10px;
+  box-shadow: var(--shadow), 0 6px 22px rgba(0, 0, 0, 0.18);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
+  backdrop-filter: blur(14px) saturate(130%);
+  user-select: none;
+}
+.ctm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.ctm-row:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.ctm-row:disabled {
+  color: var(--text-dim);
+  opacity: 0.55;
+  cursor: default;
+}
+.ctm-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ctm-sep {
+  height: 1px;
+  margin: 3px 6px;
+  background: var(--border);
 }
 </style>

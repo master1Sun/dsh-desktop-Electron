@@ -9,6 +9,7 @@ import {
   mcpPkgVersion,
   mcpPackagesStatus,
   mcpPackagesInstalled,
+  buildCapabilityStartCommand,
   setMcpPackagesRoot
 } from '../src/main/runtime/mcp-packages'
 
@@ -131,6 +132,27 @@ describe('mcpPackagesStatus / mcpPackagesInstalled', () => {
     expect(st.find((s) => s.id === first[0])?.installed).toBe(true)
     expect(rest.every(([, pkg]) => st.find((s) => s.pkg === pkg)?.installed === false)).toBe(true)
     expect(mcpPackagesInstalled()).toBe(false)
+  })
+})
+
+describe('buildCapabilityStartCommand', () => {
+  it('runs a JS launcher under node', () => {
+    expect(buildCapabilityStartCommand('C:\\cap\\codex\\bin\\codex.js')).toBe(
+      'node "C:\\cap\\codex\\bin\\codex.js"'
+    )
+    expect(buildCapabilityStartCommand('/cap/qwen/cli-entry.js')).toBe('node "/cap/qwen/cli-entry.js"')
+    expect(buildCapabilityStartCommand('/cap/x/bundle/gemini.mjs')).toBe(
+      'node "/cap/x/bundle/gemini.mjs"'
+    )
+    expect(buildCapabilityStartCommand('/cap/x/run.cjs')).toBe('node "/cap/x/run.cjs"')
+  })
+
+  it('execs a native binary directly (no node) — the claude-code claude.exe case', () => {
+    expect(buildCapabilityStartCommand('C:\\cap\\claude\\bin\\claude.exe')).toBe(
+      '"C:\\cap\\claude\\bin\\claude.exe"'
+    )
+    // extensionless native binary (mac/linux)
+    expect(buildCapabilityStartCommand('/cap/claude/bin/claude')).toBe('"/cap/claude/bin/claude"')
   })
 })
 

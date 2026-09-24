@@ -55,6 +55,7 @@ const en: Dict = {
     detach:
       'The embedded view is limited (popups, clipboard, dialogs…); open this page in the browser',
     restartTerminal: 'Restart terminal',
+    stopTerminal: 'Stop terminal',
     externalAddress: 'External addresses',
     closeEsc: 'Close (Esc)',
     restartApp: 'Restart app',
@@ -393,6 +394,8 @@ const en: Dict = {
     updatesEmpty: 'Click "Check now" at the top right',
     tagContainer: 'Container',
     tagBuiltin: 'Built-in',
+    tagCli: 'CLI',
+    tagWeb: 'Web',
     aboutPagesRunning: '{running} / {total} running',
     copyright: '© {year} DesktopContainer · master1Sun · Proprietary · All rights reserved',
     updateBtn: 'Update',
@@ -477,24 +480,24 @@ const en: Dict = {
     eventsNoLogFile: 'This page has no log file yet',
     eventsCount: '{n} entries',
     eventsRawKind: 'kind: {kind}',
-    /* ---- release channels ---- */
-    channelTitle: 'Update channel',
-    channelContainer: 'Container channel',
-    channelDsh: 'DSH channel',
-    channelStable: 'stable release',
-    channelBeta: 'beta release-beta',
-    channelAlpha: 'prerelease @alpha',
-    channelLatest: 'official @latest',
-    channelSaved: 'Channel saved — re-checking updates…',
     /* ---- pinned-version reinstall ---- */
     versionBtn: 'Pinned version…',
-    versionPrompt: 'Version to install for {name} (empty = latest on the selected channel)',
     versionPlaceholder: 'e.g. 1.2.3',
-    mcpPkgName: 'MCP built-in components',
-    versionLatest: 'No version given — installing the channel latest'
+    versionTitle: 'Pick a version for {name}',
+    versionCurrent: 'Installed {v}',
+    versionLatestVer: 'Latest {v}',
+    versionFollowLatest: 'Follow latest',
+    versionIsCurrent: 'installed',
+    versionLoading: 'Loading versions…',
+    versionLoadFail: 'The registry returned no versions — type one instead',
+    versionManual: 'Type a version',
+    versionPickList: 'Pick from the list',
+    versionInstall: 'Install',
+    versionAppliesAll: 'Applied to every bundled MCP server — the batch fails if one lacks it',
+    mcpPkgName: 'MCP built-in components'
   },
   app: {
-    title: 'Desktop Console',
+    title: 'DesktopContainer',
     selectPage: 'Select page',
     starting: 'Starting {name}…',
     pageStartFail: '{name} failed to start',
@@ -939,6 +942,11 @@ const en: Dict = {
     closeSearch: 'Close search',
     searchNoMatch: 'No match',
     searchCount: '{index} / {total}',
+    copy: 'Copy',
+    paste: 'Paste',
+    selectAll: 'Select all',
+    copyHint: 'Ctrl+Shift+C',
+    pasteHint: 'Ctrl+Shift+V',
     restorePrompt: 'Restore {n} terminal tab(s) from last session?',
     restoreAction: 'Restore session',
     restoreDismiss: 'Not now'
@@ -1237,13 +1245,13 @@ const en: Dict = {
     backToWorkbench: 'Back to workbench'
   },
   market: {
-    title: 'Desktop Console',
+    title: 'DesktopContainer',
     tagline:
       'A desktop multi-page container with built-in Node v24.21.0: projects under pages/ are hosted and started/stopped by the built-in node. Switch running pages from the "Select page" dropdown at the top; closing the main window minimizes to the taskbar and keeps running.',
     installBtn: 'Install & manage Pages',
-    termName: '— desktop console',
-    termOut: 'Desktop console ready · 6 modules loaded',
-    okBadge: 'Desktop console is ready · open any module to enter',
+    termName: '— DesktopContainer',
+    termOut: 'DesktopContainer ready · 6 modules loaded',
+    okBadge: 'DesktopContainer is ready · open any module to enter',
     termCmd: 'systeminfo /v',
     sysLoading: 'Reading system status…',
     sysLblOs: 'OS',
@@ -1279,7 +1287,7 @@ const en: Dict = {
     plugin3Tag: 'QQ bot',
     plugin3Desc:
       'DSH × QQ bot bridge plugin: connect a dsh session to a QQ channel; messages drive tasks and return results in the group.',
-    consoleHeading: 'Desktop Console · Feature panorama',
+    consoleHeading: 'DesktopContainer · Feature panorama',
     consoleSub:
       'A desktop multi-page container with built-in Node: below are all core modules — click any card to jump straight to its config screen.',
     consoleKicker: 'CAPABILITY MAP',

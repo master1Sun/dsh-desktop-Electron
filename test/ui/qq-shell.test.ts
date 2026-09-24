@@ -47,10 +47,10 @@ function factory(current: string | null, attachTo?: HTMLElement): VueWrapper {
   })
 }
 
-// Static core + utility groups (pages/dsh/openclaw/external/workspace/mcp) + 1 dynamic app
+// Static core + utility groups (pages/dsh/openclaw/external/workspace/board/mcp) + 1 dynamic app
 // (agent-app; dsh-web is a built-in owning the dsh group, plain has none). 帮助 and 设置 are both
 // pinned to the rail foot (帮助 above 设置), so neither is a scrolling `.rail-btn`.
-const GROUP_COUNT = 7
+const GROUP_COUNT = 8
 
 describe('QQShell (IM layout)', () => {
   it('renders one icon per group + footer actions, and no bubble when closed', () => {
@@ -82,25 +82,21 @@ describe('QQShell (IM layout)', () => {
     expect(w.findComponent({ name: 'MenuPanelContent' }).props('panel')).toBe('settings')
   })
 
-  it('centers the palette-only 看板 card with a ✕ header and no rail caret', async () => {
+  it('renders the 看板 as a rail group and pops it as an anchored bubble', () => {
     const w = factory('board')
-    const wrap = w.find('.qq-pop-wrap')
-    expect(wrap.classes()).toContain('is-centered')
-    // No inline top/height (the CSS centers it) and no caret pointing at a nonexistent icon.
-    expect(wrap.attributes('style') ?? '').not.toContain('top:')
-    expect(w.find('.qq-caret').exists()).toBe(false)
-    // An explicit close button lives in the header (there is no active rail icon to re-click).
-    expect(w.find('.qq-pop-head').exists()).toBe(true)
+    // The board owns a rail icon now (任务看板 sits in the sidebar next to 共享上下文).
+    expect(w.findAll('.rail-btn').length).toBe(GROUP_COUNT)
+    expect(w.find('.qq-pop').exists()).toBe(true)
     expect(w.findComponent({ name: 'MenuPanelContent' }).props('panel')).toBe('board')
-    await w.find('.qq-pop-close').trigger('click')
-    expect(w.emitted('open-panel')?.at(-1)).toEqual([null])
   })
 
-  it('a rail-anchored group stays non-centered with a caret and no header', () => {
-    const w = factory('settings')
-    expect(w.find('.qq-pop-wrap').classes()).not.toContain('is-centered')
-    expect(w.find('.qq-caret').exists()).toBe(true)
-    expect(w.find('.qq-pop-head').exists()).toBe(false)
+  it('every group bubble is rail-anchored with a caret and no header (看板 included)', () => {
+    for (const current of ['settings', 'board']) {
+      const w = factory(current)
+      expect(w.find('.qq-pop-wrap').attributes('style') ?? '').toContain('top:')
+      expect(w.find('.qq-caret').exists()).toBe(true)
+      expect(w.find('.qq-pop-head').exists()).toBe(false)
+    }
   })
 
   it('dismisses on a blank-area click, but not on the card or a rail button', async () => {
@@ -127,19 +123,17 @@ describe('QQShell (IM layout)', () => {
     host.remove()
   })
 
-  it('does NOT dismiss the 看板 card on a blank-area click (modal: ✕ / Esc only)', async () => {
+  it('dismisses the 看板 bubble on a blank-area click like any other group', async () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
     const w = factory('board', host)
-    const away = (el: Element): void => {
-      el.dispatchEvent(new Event('pointerdown', { bubbles: true }))
-    }
-    away(document.body)
-    away(host)
+    // Inside the card → stays open.
+    w.find('.qq-pop').element.dispatchEvent(new Event('pointerdown', { bubbles: true }))
     await w.vm.$nextTick()
     expect(w.emitted('open-panel')).toBeUndefined()
-    // …but the explicit ✕ still closes it.
-    await w.find('.qq-pop-close').trigger('click')
+    // A blank surface outside → collapses.
+    host.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await w.vm.$nextTick()
     expect(w.emitted('open-panel')?.at(-1)).toEqual([null])
     w.unmount()
     host.remove()

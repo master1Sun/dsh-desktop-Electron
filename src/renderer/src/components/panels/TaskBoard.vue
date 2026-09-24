@@ -11,7 +11,7 @@ import type { WorkspaceContext, WorkspaceInfo, WorkspaceTask, WorkspaceTaskStatu
 
 /**
  * The shared-context task board (the same queue agents drive through workspace_submit/claim/
- * complete). Lifted out of WorkspaceContext so it lives on the palette-only 看板 page beside the
+ * complete). Lifted out of WorkspaceContext so it lives on the 看板 page beside the
  * MCP call feed. Self-contained: it reads the shared doc for the task queue on mount and writes
  * back ONLY the `tasks` field — the main process merges partials (runtime/workspace.ts), so the
  * current task / shared-memory notes stay untouched even though they are edited elsewhere.

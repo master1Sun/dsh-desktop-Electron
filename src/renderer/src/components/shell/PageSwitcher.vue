@@ -155,27 +155,21 @@ defineExpose({ close })
 
 <template>
   <div class="switcher-wrap">
-    <el-tooltip
-      :content="activePage ? `${props.title} · ${statusText(activePage)}` : props.title"
-      placement="bottom"
-      popper-class="dsh-tip-popper"
+    <button
+      class="switcher"
+      :class="{ open }"
+      :aria-haspopup="'listbox'"
+      :aria-expanded="open"
+      :aria-controls="open ? listId : undefined"
+      @click="toggle"
     >
-      <button
-        class="switcher"
-        :class="{ open }"
-        :aria-haspopup="'listbox'"
-        :aria-expanded="open"
-        :aria-controls="open ? listId : undefined"
-        @click="toggle"
-      >
-        <!-- Live status of whatever is on screen, so the bar reads the state at a glance. -->
-        <i v-if="activeDotClass" class="status-dot" :class="activeDotClass" aria-hidden="true" />
-        <span class="switcher-title">{{ props.title }}</span>
-        <svg class="caret" :class="{ open }" width="8" height="5" viewBox="0 0 8 5" aria-hidden="true">
-          <path d="M1 1 L4 4 L7 1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-        </svg>
-      </button>
-    </el-tooltip>
+      <!-- Live status of whatever is on screen, so the bar reads the state at a glance. -->
+      <i v-if="activeDotClass" class="status-dot" :class="activeDotClass" aria-hidden="true" />
+      <span class="switcher-title">{{ props.title }}</span>
+      <svg class="caret" :class="{ open }" width="8" height="5" viewBox="0 0 8 5" aria-hidden="true">
+        <path d="M1 1 L4 4 L7 1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+      </svg>
+    </button>
     <Transition name="switcher-menu">
       <ul
         v-if="open"

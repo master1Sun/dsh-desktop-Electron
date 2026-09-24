@@ -76,7 +76,9 @@ const api = {
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
   getDownloadDir: () => ipcRenderer.invoke(IPC.DownloadDir),
   checkUpdates: (force?: boolean) => ipcRenderer.invoke(IPC.CheckUpdates, force),
-  performUpdate: (target: UpdateCheckResult) => ipcRenderer.invoke(IPC.PerformUpdate, target),
+  performUpdate: (target: UpdateCheckResult, pinned?: string) =>
+    ipcRenderer.invoke(IPC.PerformUpdate, target, pinned),
+  listPackageVersions: (pkg: string) => ipcRenderer.invoke(IPC.ListPkgVersions, pkg),
   openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
   listLogFiles: () => ipcRenderer.invoke(IPC.ListLogFiles),
   readLogs: (args: ReadLogsArgs) => ipcRenderer.invoke(IPC.ReadLogs, args),

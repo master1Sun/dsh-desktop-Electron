@@ -5,7 +5,7 @@ import type { McpCallEvent, McpServerState } from '@shared/types'
 
 /**
  * The MCP hub's recent tool-call feed (see runtime/mcp-bridge.ts ring buffer). Lifted out of
- * McpManager so it can live on the palette-only 看板 page alongside the task board. Self-contained:
+ * McpManager so it can live on the 看板 page alongside the task board. Self-contained:
  * it cold-reads the buffer + the server list (only for friendly names) on mount, then live-appends
  * over OnMcpCalls / OnMcpStateChanged. Only hub-forwarded calls appear here — an agent's own
  * third-party stdio server never routes through the container, so it can't show up.

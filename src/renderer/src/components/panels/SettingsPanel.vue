@@ -784,7 +784,7 @@ watch(
               }}<InfoTip :content="t('settings.layoutModeTip')"
             /></template>
             <el-radio-group
-              :model-value="settingsStore.settings.layoutMode ?? 'im'"
+              :model-value="settingsStore.settings.layoutMode ?? 'classic'"
               @update:model-value="patch({ layoutMode: $event as 'classic' | 'im' })"
             >
               <el-radio-button value="classic">{{ t('settings.layoutClassic') }}</el-radio-button>

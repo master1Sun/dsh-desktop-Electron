@@ -14,7 +14,7 @@ import {
 } from './project-classify'
 import { getSettings, isValidPort, updateSettings, applyNpmRegistryEnv } from '../shell/store'
 import { getNodeExePath, bundledEnv } from './node-runtime'
-import { resolveMcpPkgEntry } from './mcp-packages'
+import { resolveMcpPkgEntry, buildCapabilityStartCommand } from './mcp-packages'
 import { normalizeRepoUrl, cloneWithAuthFallback, type CloneProgress } from '../update/git-updates'
 import { logEvent } from '../shell/events'
 import type { ImportOptions, InstallProgress } from '../../shared/types'
@@ -380,9 +380,10 @@ export async function installFromNpm(
     logEvent({ level: 'warn', kind: 'install.rejected', pageId: dirName, detail: 'install.npmNoBin' })
     throw new Error(m('install.npmNoBin', { pkg }))
   }
-  // Thin terminal manifest in pages/<id>: no port, and the pty launches `node "<entry>"` (quoted —
-  // the capability dir may contain spaces) inside the embedded terminal. npmPackage/capabilityDir
-  // are what 更新检测 reads to offer a compare + re-provision against the registry.
+  // Thin terminal manifest in pages/<id>: no port, and the pty launches the resolved bin (quoted —
+  // the capability dir may contain spaces): `node "<entry>"` for a JS launcher, the native binary
+  // directly for a self-contained one like claude-code's claude.exe (see buildCapabilityStartCommand).
+  // npmPackage/capabilityDir are what 更新检测 reads to offer a compare + re-provision against the registry.
   mkdirSync(target, { recursive: true })
   const manifest: ContainerManifest = {
     name: dirName,
@@ -391,7 +392,7 @@ export async function installFromNpm(
       en: msgIn('en', 'install.importedNpmDesc')
     },
     kind: 'terminal',
-    startCommand: `node "${entry}"`,
+    startCommand: buildCapabilityStartCommand(entry),
     npmPackage: pkg,
     capabilityDir: capDir
   }

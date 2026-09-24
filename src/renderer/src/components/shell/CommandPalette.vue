@@ -50,22 +50,20 @@ const allCommands = computed<Command[]>(() => {
   return extra.length ? [...props.commands, ...extra] : props.commands
 })
 
-/* ---- palette-only Ctrl+letter quick-open (操作 + 页面 + 面板) ----------------------
+/* ---- palette-only Ctrl+letter quick-open (操作 + 面板) ------------------------------
    A fast path that lives entirely inside the palette: while it is open, Ctrl+<letter> fires the
    matching command and the combo shows as a badge on the row. No global binding is added (a hosted
    page never loses the key), and the letter is assigned by walking the *static* command list in
-   order, so a command keeps the same letter no matter what is typed. Only the editing keys and the
-   palette toggle stay out of the pool (Ctrl+A/C/V/X/Z + Ctrl+K); everything else is fair game, and
-   any command past the last free letter simply shows no badge (graceful overflow). */
+   order, so a command keeps the same letter no matter what is typed. Only 操作 / 面板 rows take a
+   slot (页面 rows are too numerous and change with what is installed, so they stay badge-free);
+   the editing keys and the palette toggle stay out of the pool (Ctrl+A/C/V/X/Z + Ctrl+K), and any
+   command past the last free letter simply shows no badge (graceful overflow). */
 const RESERVED_KEYS = new Set(['a', 'c', 'v', 'x', 'z', 'k'])
 const QUICK_KEY_POOL = 'abcdefghijklmnopqrstuvwxyz'.split('').filter((ch) => !RESERVED_KEYS.has(ch))
 
-/** 操作 / 面板 items are all eligible; 页面 items only their primary open/start/enter command. */
+/** Only 操作 / 面板 items take a quick-open slot; 页面 items never do. */
 function isQuickEligible(cmd: Command): boolean {
-  if (cmd.group === t('palette.groupActions')) return true
-  if (cmd.group === t('palette.groupPanels')) return true
-  if (cmd.group === t('palette.groupPages')) return /^(open-|start-|term-|site-)/.test(cmd.id)
-  return false
+  return cmd.group === t('palette.groupActions') || cmd.group === t('palette.groupPanels')
 }
 
 /** Stable id → letter map over the static commands (deep-search rows never take a slot). */

@@ -6,6 +6,8 @@ import '@xterm/xterm/css/xterm.css'
 import { useTerminalStore } from '@renderer/stores/terminal'
 import { useSettingsStore } from '@renderer/stores/settings'
 import { useIsLight } from '@renderer/composables/useTheme'
+import { t } from '@renderer/i18n'
+import { useTerminalClipboard } from './clipboard'
 import { TERMINAL_SCROLLBACK_DEFAULT, TERMINAL_SCROLLBACK_MAX } from '@shared/types'
 
 /**
@@ -145,6 +147,21 @@ function focusPane(): void {
   term?.focus()
 }
 
+/*
+ * Copy / paste + the right-click menu, shared with the full-page CLI view so both xterm surfaces
+ * behave identically (see clipboard.ts for why the chords have to be claimed away from the PTY).
+ */
+const {
+  onTerminalKey,
+  menu,
+  menuHasSel,
+  openMenu,
+  closeMenu,
+  menuCopy,
+  menuPaste,
+  menuSelectAll
+} = useTerminalClipboard(() => term)
+
 function ensureTerm(): void {
   if (term || !containerEl.value) return
   term = new Terminal({
@@ -162,6 +179,8 @@ function ensureTerm(): void {
   fit = new FitAddon()
   term.loadAddon(fit)
   term.open(containerEl.value)
+  // Own the copy/paste chords before xterm/PTY turn Ctrl+C into SIGINT (see onTerminalKey).
+  term.attachCustomKeyEventHandler(onTerminalKey)
   term.onData((data) => {
     window.container.ptyWrite(props.sessionId, data).catch(() => undefined)
   })
@@ -218,8 +237,35 @@ defineExpose({ getTerm: () => term })
 </script>
 
 <template>
-  <div class="term-pane" :class="{ active }" :style="paneStyle" @pointerdown="focusPane">
+  <div
+    class="term-pane"
+    :class="{ active }"
+    :style="paneStyle"
+    @pointerdown="focusPane"
+    @contextmenu="openMenu"
+  >
     <div ref="containerEl" class="term-pane-surface" />
+    <!-- Electron has no native context menu, so right-click opens our own copy/paste/select-all.
+         Teleported to <body> so the pane's overflow:hidden / any transformed ancestor can't clip it. -->
+    <Teleport to="body">
+      <template v-if="menu">
+        <div class="term-pane-menu-backdrop" @pointerdown="closeMenu" @contextmenu.prevent />
+        <div class="term-pane-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }">
+          <button class="tpm-row" :disabled="!menuHasSel" @click="menuCopy">
+            <span>{{ t('terminal.copy') }}</span
+            ><span class="tpm-hint">{{ t('terminal.copyHint') }}</span>
+          </button>
+          <button class="tpm-row" @click="menuPaste">
+            <span>{{ t('terminal.paste') }}</span
+            ><span class="tpm-hint">{{ t('terminal.pasteHint') }}</span>
+          </button>
+          <div class="tpm-sep"></div>
+          <button class="tpm-row" @click="menuSelectAll">
+            <span>{{ t('terminal.selectAll') }}</span>
+          </button>
+        </div>
+      </template>
+    </Teleport>
   </div>
 </template>
 
@@ -254,5 +300,59 @@ defineExpose({ getTerm: () => term })
 .term-pane :deep(.xterm-viewport),
 .term-pane :deep(.xterm-screen) {
   background-color: var(--term-bg, transparent);
+}
+/* Right-click copy/paste menu (teleported to <body>, so fixed to the viewport). */
+.term-pane-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+}
+.term-pane-menu {
+  position: fixed;
+  z-index: 3001;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 10px;
+  box-shadow: var(--shadow), 0 6px 22px rgba(0, 0, 0, 0.18);
+  -webkit-backdrop-filter: blur(14px) saturate(130%);
+  backdrop-filter: blur(14px) saturate(130%);
+  user-select: none;
+}
+.tpm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.tpm-row:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.tpm-row:disabled {
+  color: var(--text-dim);
+  opacity: 0.55;
+  cursor: default;
+}
+.tpm-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.tpm-sep {
+  height: 1px;
+  margin: 3px 6px;
+  background: var(--border);
 }
 </style>

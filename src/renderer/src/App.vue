@@ -45,9 +45,9 @@ const activePanel = ref<string | null>(null)
    docked sidebar (QQShell); 'classic' keeps the top menu bar + centered floating panels. It is a
    layout switch only — the frosted surfaces, theme and aurora are untouched. Driven off the
    reactive settings so the 设置 ▸ 布局 radio and the Ctrl+K command flip it live; an unset
-   (pre-setting) install defaults to 效率, and popout windows always render classic. */
+   (pre-setting) install defaults to 经典, and popout windows always render classic. */
 const isIm = computed(
-  () => !isPopout.value && (settingsStore.settings.layoutMode ?? 'im') === 'im'
+  () => !isPopout.value && (settingsStore.settings.layoutMode ?? 'classic') === 'im'
 )
 
 /**
@@ -173,6 +173,16 @@ const commands = computed<Command[]>(() => {
         group: t('palette.groupPages'),
         run: () => openPage(p.id)
       })
+      // A resident CLI is managed like an installed page: opening it auto-starts, so the only
+      // extra entry a running one needs is the explicit stop.
+      if (p.status === 'running') {
+        list.push({
+          id: `stop-${p.id}`,
+          title: t('palette.cmdStopPage', { name: p.name }),
+          group: t('palette.groupPages'),
+          run: () => stopPage(p.id)
+        })
+      }
       continue
     }
     if (p.status === 'running') {
@@ -468,7 +478,48 @@ const webviewSrc = computed(
 )
 const webviewLoading = ref(false)
 const homeRef = ref<InstanceType<typeof HomeView> | null>(null)
-const cliTermRef = ref<{ restart: () => void } | null>(null)
+/**
+ * One kept-mounted CliTerminalView per CLI page opened this session (mirrors `webviewSessions`):
+ * switching only flips `v-show`, so a running CLI's PTY is never reloaded by a page switch. A
+ * session is dropped (unmount → its PTY is killed) only when its page is removed or disabled.
+ */
+const cliTermSessions = ref<string[]>([])
+const cliTermRefs = new Map<string, InstanceType<typeof CliTerminalView>>()
+function setCliTermRef(id: string, el: unknown): void {
+  const inst = el as InstanceType<typeof CliTerminalView> | null
+  if (inst) cliTermRefs.set(id, inst)
+  else cliTermRefs.delete(id)
+}
+const isTerminalId = (id: string | null): boolean =>
+  pagesStore.pages.find((p) => p.id === id)?.kind === 'terminal'
+/** Restart the CLI on screen (top-bar restart). */
+function restartActiveCli(): void {
+  if (activePageId.value) cliTermRefs.get(activePageId.value)?.restart()
+}
+/** Stop the CLI on screen — the resident counterpart to opening/auto-starting it. */
+function stopActiveCli(): void {
+  if (activePageId.value) stopPage(activePageId.value)
+}
+// Opening a CLI page from any entry point (switcher, palette, launch auto-start, the main-process
+// OpenTerminalPage event) registers its resident session; watching activePageId covers them all.
+watch(
+  activePageId,
+  (id) => {
+    if (id && isTerminalId(id) && !cliTermSessions.value.includes(id)) cliTermSessions.value.push(id)
+  },
+  { immediate: true }
+)
+// A removed or disabled page loses its surface: dropping the session unmounts the view, whose
+// onBeforeUnmount kills the PTY. Enabled-but-stopped pages keep their (idle/exited) session.
+watch(
+  () => pagesStore.pages,
+  () => {
+    cliTermSessions.value = cliTermSessions.value.filter(
+      (id) =>
+        isTerminalId(id) && pagesStore.pages.find((p) => p.id === id)?.disabled !== true
+    )
+  }
+)
 /** Webview history availability, pushed up by HomeView, drives the top-bar back/forward buttons. */
 const webNav = ref({ back: false, forward: false })
 /** Whether the webview currently shows a loaded external address (keeps its nav in-view). */
@@ -1030,7 +1081,7 @@ function quickThemeToggle(): void {
 
 /** Flip the shell layout (classic ⇄ 效率) and persist it; the change is instant and reversible. */
 function toggleLayoutMode(): void {
-  const current = settingsStore.settings.layoutMode ?? 'im'
+  const current = settingsStore.settings.layoutMode ?? 'classic'
   const next = current === 'im' ? 'classic' : 'im'
   activePanel.value = null
   settingsStore.patch({ layoutMode: next }).catch(() => undefined)
@@ -1427,6 +1478,7 @@ const showNav = computed(() =>
         :can-go-forward="webNav.forward"
         :show-nav="showNav"
         :terminal-mode="Boolean(activeTerminalPage)"
+        :terminal-running="activeTerminalPage?.status === 'running'"
         :external-sites="settingsStore.settings.externalSites"
         @open="activePanel = $event"
         @open-panel="(p: string) => (activePanel = p)"
@@ -1440,7 +1492,8 @@ const showNav = computed(() =>
         @go-back="webviewGoBack"
         @go-forward="webviewGoForward"
         @detach="detachCurrentPage"
-        @restart-terminal="cliTermRef?.restart()"
+        @restart-terminal="restartActiveCli"
+        @stop-terminal="stopActiveCli"
         @restart-app="restartContainer"
       >
         <template #settings>
@@ -1649,10 +1702,15 @@ const showNav = computed(() =>
         <main class="content">
           <div class="content-main">
             <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
+            <!-- One resident CLI surface per opened page: v-show flips visibility so a running
+                 CLI is never unmounted (and its PTY reloaded) by a page switch. -->
             <CliTerminalView
-              v-if="activeTerminalPage"
-              ref="cliTermRef"
-              :page="activeTerminalPage"
+              v-for="id in cliTermSessions"
+              :key="id"
+              :ref="(el) => setCliTermRef(id, el)"
+              v-show="id === activePageId"
+              :page="pagesStore.pages.find((p) => p.id === id) || null"
+              :active="id === activePageId"
               @exit="backToWorkbench"
             />
             <HomeView
@@ -1682,7 +1740,7 @@ const showNav = computed(() =>
                  content click into a dismiss; it stops at .content-main so the rail, title bar
                  and window controls stay clickable. -->
             <div
-              v-if="isIm && activePanel && activePanel !== 'board'"
+              v-if="isIm && activePanel"
               class="qq-clickaway"
               @pointerdown="activePanel = null"
             />

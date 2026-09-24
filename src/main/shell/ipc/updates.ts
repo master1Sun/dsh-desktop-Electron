@@ -1,6 +1,11 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { IPC, type IpcResult, type UpdateCheckResult, type UpdateProgress } from '../../../shared/types'
-import { checkUpdates, performUpdate, clearUpdateCache } from '../../update/update-service'
+import {
+  checkUpdates,
+  performUpdate,
+  clearUpdateCache,
+  listPackageVersions
+} from '../../update/update-service'
 import { canRollbackAsar, rollbackToPreviousAsar, getUpdateHistory } from '../../update/asar-updates'
 import { setTrayUpdatePending } from '../tray'
 import { m } from '../i18n'
@@ -74,22 +79,50 @@ export function registerUpdatesIpc(ctx: IpcCtx): void {
   surveyTimer = setInterval(() => runSurvey(), UPDATE_SURVEY_MS)
   surveyTimer.unref?.()
 
-  ipcMain.handle(IPC.PerformUpdate, async (_e, target: UpdateCheckResult): Promise<IpcResult> => {
-    // Stream download progress back to the requesting window (see UpdateProgress).
-    const sender = _e.sender
-    const onProgress = (p: UpdateProgress): void => {
-      if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p)
-    }
+  // The 指定版本 picker's source: every published version of one package, newest first. An empty
+  // list means the registry could not be reached — the dialog then falls back to typing a version.
+  ipcMain.handle(IPC.ListPkgVersions, async (_e, pkg: string): Promise<IpcResult> => {
     try {
-      const res = await performUpdate(target, onProgress)
-      clearUpdateCache()
-      return ok(res)
+      const name = String(pkg || '').trim()
+      return ok(name ? await listPackageVersions(name) : [])
     } catch (err) {
       return fail(err)
-    } finally {
-      // See UpdateNodeRuntime: guarantee a terminal event keyed by the same `name` the stream
-      // used, so the persistent top-bar row is dropped even when the update failed.
-      onProgress({ name: target.name, phase: 'done', percent: 100 })
     }
   })
+
+  ipcMain.handle(
+    IPC.PerformUpdate,
+    async (_e, target: UpdateCheckResult, pinned?: string): Promise<IpcResult> => {
+      // Stream download progress back to the requesting window (see UpdateProgress).
+      const sender = _e.sender
+      const onProgress = (p: UpdateProgress): void => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p)
+      }
+      const want = String(pinned || '').trim()
+      try {
+        // The version arrives from a dialog, but it is spliced into an `npm install <pkg>@<version>`
+        // spec, so it is validated here rather than trusted.
+        if (want && !/^[\w.+-]+$/.test(want))
+          return fail(new Error(m('upd.badVersion', { v: want })))
+        // A capability migration rewrites the page dir (manifest + old package files), so a running
+        // page would have its launch files pulled out from under it — ask for a stop first.
+        if (target.action === 'migrateCapability' && target.pageId) {
+          const st = registry.get(target.pageId)?.status
+          if (st === 'running' || st === 'starting') return fail(new Error(m('upd.migrateRunning')))
+        }
+        const res = await performUpdate(target, onProgress, want || undefined)
+        // The migration changed startCommand/npmPackage on disk: re-read the manifests so the next
+        // survey (and the page row itself) sees the capability layout immediately.
+        if (res.ok && target.action === 'migrateCapability') registry.reconcile()
+        clearUpdateCache()
+        return ok(res)
+      } catch (err) {
+        return fail(err)
+      } finally {
+        // See UpdateNodeRuntime: guarantee a terminal event keyed by the same `name` the stream
+        // used, so the persistent top-bar row is dropped even when the update failed.
+        onProgress({ name: target.name, phase: 'done', percent: 100 })
+      }
+    }
+  )
 }

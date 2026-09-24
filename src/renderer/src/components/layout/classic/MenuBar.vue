@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, VideoPause } from '@element-plus/icons-vue'
 import whaleIcon from '@renderer/assets/whale.png'
 import PageSwitcher from '@renderer/components/shell/PageSwitcher.vue'
 import WindowControls from '@renderer/components/shell/WindowControls.vue'
@@ -43,6 +43,8 @@ const props = defineProps<{
   /** Whether the top-bar back / forward buttons should be shown (external address only). */
   showNav: boolean
   terminalMode: boolean
+  /** Whether the CLI on screen is currently running — gates the top-bar 停止 terminal button. */
+  terminalRunning?: boolean
   externalSites: ExternalSite[]
   /**
    * IM (QQ-like) layout: the menu bar collapses to a compact title bar. The group triggers and
@@ -66,6 +68,7 @@ const emit = defineEmits<{
   'go-forward': []
   detach: []
   'restart-terminal': []
+  'stop-terminal': []
   'restart-app': []
 }>()
 
@@ -133,6 +136,7 @@ const groups = computed<MenuGroup[]>(() => {
         { id: 'external', title: t('menu.externalAddress'), panel: 'external' as string },
         { id: 'mcp', title: t('menu.appMcp'), panel: 'mcp' as string },
         { id: 'workspace', title: t('menu.workspace'), panel: 'workspace' as string },
+        { id: 'board', title: t('menu.board'), panel: 'board' as string },
         // Dynamic agent apps (container.json `manageAsApp`) — one settings row each.
         ...props.pages
           .filter((p) => p.manageAsApp && p.kind !== 'dsh' && p.kind !== 'openclaw')
@@ -186,7 +190,7 @@ const childPanelLabels = computed<Record<string, string>>(() => ({
   openclaw: t('menu.appOpenclaw'),
   mcp: t('menu.appMcp'),
   workspace: t('menu.workspace'),
-  // Palette-only page (Ctrl+K 「看板」), reached through no top-level group.
+  // Reached from a 视图 row and the rail alike (also Ctrl+K 「看板」).
   board: t('menu.board'),
   external: t('menu.externalAddress'),
   // Reached through the 系统 drop list, so these panels are "children" too.
@@ -447,6 +451,20 @@ onBeforeUnmount(() => {
     <TopProgressBar />
 
     <div v-if="props.terminalMode" class="webview-actions">
+      <el-tooltip
+        v-if="props.terminalRunning"
+        :content="t('menu.stopTerminal')"
+        placement="bottom"
+        popper-class="dsh-tip-popper"
+      >
+        <button
+          class="act-btn"
+          :aria-label="t('menu.stopTerminal')"
+          @click="emit('stop-terminal')"
+        >
+          <el-icon><VideoPause /></el-icon>
+        </button>
+      </el-tooltip>
       <el-tooltip
         :content="t('menu.restartTerminal')"
         placement="bottom"

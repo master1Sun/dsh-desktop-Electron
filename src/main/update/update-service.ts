@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
 import { checkOne, performUpdate as gitPull } from './git-updates'
@@ -7,13 +7,14 @@ import { applyAsarUpdate, checkAsarUpdate, type ProgressCb } from './asar-update
 import { getNodeExePath } from '../runtime/node-runtime'
 import { getDshStatus, repairPnpmCmd } from '../runtime/dsh'
 import { openclawVersion } from '../runtime/openclaw'
-import { resolveInstallDir, getSettings } from '../shell/store'
+import { resolveCapabilitiesDir, resolvePagesDir, resolveInstallDir, getSettings } from '../shell/store'
 import {
   MCP_PKG_GROUP,
   mcpPackagesRoot,
   mcpPackagesStatus,
   mcpPkgVersion,
-  resolveMcpPkgEntry
+  resolveMcpPkgEntry,
+  buildCapabilityStartCommand
 } from '../runtime/mcp-packages'
 import { m } from '../shell/i18n'
 import { logEvent } from '../shell/events'
@@ -76,6 +77,78 @@ function semverTuple(v: string): number[] {
   return (v.replace(/^v/, '').split(/[-+]/)[0].match(/\d+/g) || []).map(Number)
 }
 
+/**
+ * Order published versions newest-first and cut the list to what fits a picker. Prereleases are
+ * kept (a `-beta`/`-linux-x64`-style tag is often the exact thing someone rolls back TO), they just
+ * sort below their numeric twin. Non-semver junk (npm's `latest` alias leaking in, empty strings)
+ * is dropped rather than sorted to the top.
+ */
+export function sortVersionsDesc(versions: string[], limit = 60): string[] {
+  const uniq = [...new Set(versions.filter((v) => /^v?\d/.test(v)))]
+  uniq.sort((a, b) => {
+    const ta = semverTuple(a)
+    const tb = semverTuple(b)
+    for (let i = 0; i < Math.max(ta.length, tb.length); i++) {
+      const d = (tb[i] ?? 0) - (ta[i] ?? 0)
+      if (d) return d
+    }
+    // Same numeric core: a plain release outranks its own prerelease/platform build (npm's own
+    // ordering), and two of those fall back to a natural-descending compare so `-beta.9` beats `-beta.1`.
+    const pa = /[-+]/.test(a) ? 1 : 0
+    const pb = /[-+]/.test(b) ? 1 : 0
+    if (pa !== pb) return pa - pb
+    return b.localeCompare(a, undefined, { numeric: true })
+  })
+  return uniq.slice(0, Math.max(0, limit))
+}
+
+/**
+ * Every published version of one package, newest first — the picker behind 更新检测's 指定版本
+ * button. Reads the registry packument; the abbreviated (install-v1) form is asked for first
+ * because it is a fraction of the size for a package with hundreds of releases, and the full
+ * document is the fallback for a registry that ignores the Accept header.
+ *
+ * Cached per package: an npm CLI with a build-stamped release train (@openai/codex ships ~4.8k
+ * versions) puts a multi-megabyte document behind that call, and a rollback list being a few
+ * minutes stale costs nothing.
+ */
+const versionListCache = new Map<string, { at: number; versions: string[] }>()
+const VERSIONS_TTL_MS = 10 * 60_000
+
+/**
+ * Per-platform build releases (`0.158.0-alpha.7-win32-x64`) are npm alias targets for a package's
+ * optionalDependencies, not versions anyone types into an install spec — yet a CLI that ships one
+ * build per os/arch publishes ~6 of them per release (@openai/codex: 4.8k versions, 1k real ones),
+ * which would bury every actual release in the picker. Both halves are required, so a plain
+ * `-linux` / `-arm64` suffix (which some packages do ship as a real release) still survives.
+ */
+const PLATFORM_BUILD_RE = /-(?:linux|win32|darwin|freebsd|android)-(?:x64|arm64|ia32|x86|arm)$/i
+
+export async function listPackageVersions(name: string, limit = 60): Promise<string[]> {
+  const hit = versionListCache.get(name)
+  if (hit && Date.now() - hit.at < VERSIONS_TTL_MS) return hit.versions.slice(0, limit)
+  const url = new URL(encodeURIComponent(name).replace(/^%40/, '@'), registryUrl()).toString()
+  for (const accept of ['application/vnd.npm.install-v1+json', 'application/json']) {
+    try {
+      const res = await fetch(url, {
+        headers: { Accept: accept },
+        signal: AbortSignal.timeout(20_000)
+      })
+      if (!res.ok) continue
+      const json = (await res.json()) as { versions?: Record<string, unknown> }
+      const list = Object.keys(json.versions || {}).filter((v) => !PLATFORM_BUILD_RE.test(v))
+      if (list.length) {
+        const sorted = sortVersionsDesc(list)
+        versionListCache.set(name, { at: Date.now(), versions: sorted })
+        return sorted.slice(0, limit)
+      }
+    } catch {
+      /* try the next form, then report an empty list */
+    }
+  }
+  return []
+}
+
 /** true when `latest` is strictly newer than `current` (component-wise, padded). */
 export function isNewer(current: string, latest: string): boolean {
   const a = semverTuple(current)
@@ -103,8 +176,17 @@ function readPkgJson(dir: string): NpmPkgInfo | null {
   return null
 }
 
-/** A page row: git repo → pull; otherwise an npm package → registry compare (manual update). */
+/**
+ * A page row, stamped with the kind its own container.json declares. The panel tags an import
+ * with it (CLI vs Web) so a row reads apart from the built-in product rows without guessing from
+ * the name; stamping here covers every channel branch below (git pull, npm, migration, builtin).
+ */
 async function checkPage(p: PageMeta): Promise<UpdateCheckResult> {
+  return { ...(await checkPageRow(p)), pageKind: p.kind }
+}
+
+/** A page row: git repo → pull; otherwise an npm package → registry compare (manual update). */
+async function checkPageRow(p: PageMeta): Promise<UpdateCheckResult> {
   // Container-shipped pages are just manifests here — the runtime they launch is a
   // built-in row (DSH 本体 / OpenClaw) that updates via npm, so no git/npm signal applies.
   if (p.builtin) {
@@ -136,19 +218,24 @@ async function checkPage(p: PageMeta): Promise<UpdateCheckResult> {
       currentVersion: pkg.version,
       error: m('upd.registryUnreachable')
     }
-  return {
+  const npmRow = {
     name: p.name,
     dir: p.dir,
     isContainer: false,
     ok: true,
-    source: 'npm',
+    source: 'npm' as const,
     packageName: pkg.name,
     currentVersion: pkg.version,
     latestVersion: latest,
-    hasUpdate: isNewer(pkg.version, latest),
-    canAutoUpdate: false,
-    action: 'manual'
+    hasUpdate: isNewer(pkg.version, latest)
   }
+  // A terminal-kind page whose dir IS the published package: a legacy npm import that installed
+  // the CLI in place (no npmPackage/capabilityDir), which used to dead-end as a buttonless
+  // "manual" row. Offer the one-click 更新 as a migration onto the capability layout instead.
+  // Web-project pages keep 'manual' — replacing a user's own source tree is never an "update".
+  if (p.kind === 'terminal')
+    return { ...npmRow, canAutoUpdate: true, action: 'migrateCapability', pageId: p.id }
+  return { ...npmRow, canAutoUpdate: false, action: 'manual' }
 }
 
 /** A built-in CLI row: installed version vs the registry version on its channel. */
@@ -197,6 +284,7 @@ async function checkNpmCapability(p: PageMeta): Promise<UpdateCheckResult> {
     source: 'npm',
     packageName: p.npmPackage,
     capabilityId: p.id,
+    pageKind: p.kind,
     action: 'reprovision',
     canAutoUpdate: true
   }
@@ -523,6 +611,93 @@ async function updateCapability(
 }
 
 /**
+ * Re-point a capability page's `startCommand` at its currently-resolved bin. A re-provision can
+ * change the launcher shape (`@anthropic-ai/claude-code` moved from a `cli.js` to a native
+ * `claude.exe`), so a page imported by an older build keeps a stale `node "<entry>"` that now dies
+ * with ERR_UNKNOWN_FILE_EXTENSION. Rewriting it after an update lets such pages self-heal without a
+ * re-import. Best-effort: a missing package bin or a foreign/unreadable page manifest is skipped.
+ */
+function healCapabilityStartCommand(pageId: string, pkg: string, capDir: string): void {
+  const entry = resolveMcpPkgEntry(pkg, capDir)
+  if (!entry) return
+  const manifestFile = join(resolvePagesDir(), pageId, 'container.json')
+  if (!existsSync(manifestFile)) return
+  try {
+    const raw = JSON.parse(readFileSync(manifestFile, 'utf-8')) as Record<string, unknown>
+    const next = buildCapabilityStartCommand(entry)
+    if (raw.startCommand !== next) {
+      raw.startCommand = next
+      writeFileSync(manifestFile, JSON.stringify(raw, null, 2) + '\n', 'utf-8')
+    }
+  } catch {
+    /* unreadable manifest — leave it exactly as the user has it */
+  }
+}
+
+/**
+ * Migrate a legacy in-page npm install onto the canonical capability layout, as its update path:
+ * an older import dropped the whole package into `pages/<id>` (no npmPackage/capabilityDir), which
+ * the checker could only ever report as "manual". Re-provision the package into
+ * `userData/capabilities/<id>`, rewrite the manifest to the thin capability form (absolute
+ * launcher `startCommand` + npmPackage/capabilityDir — user-set fields untouched), then clear the stale
+ * in-page copy so the page dir keeps only container.json. From the next survey on, the row is a
+ * regular capability row with one-click updates.
+ */
+async function migrateCapabilityUpdate(
+  target: UpdateCheckResult,
+  onProgress?: ProgressCb,
+  pinned?: string
+): Promise<UpdateOutcome> {
+  const name = target.name
+  const pageId = target.pageId
+  const pkg = target.packageName
+  const pageDir = target.dir
+  if (!pageId || !pkg || !pageDir)
+    return { name, ok: false, updated: false, error: m('upd.unknownChannel') }
+  const capDir = join(resolveCapabilitiesDir(), pageId)
+  const prov = await updateCapability(pkg, capDir, name, pinned, onProgress)
+  if (!prov.ok) return prov
+  const entry = resolveMcpPkgEntry(pkg, capDir)
+  if (!entry) return { name, ok: false, updated: false, error: m('install.npmNoBin', { pkg }) }
+  const manifestFile = join(pageDir, 'container.json')
+  let raw: Record<string, unknown>
+  try {
+    raw = JSON.parse(readFileSync(manifestFile, 'utf-8')) as Record<string, unknown>
+  } catch {
+    return { name, ok: false, updated: false, error: m('upd.manifestUnreadable') }
+  }
+  raw.startCommand = buildCapabilityStartCommand(entry)
+  raw.npmPackage = pkg
+  raw.capabilityDir = capDir
+  writeFileSync(manifestFile, JSON.stringify(raw, null, 2) + '\n', 'utf-8')
+  // Best-effort cleanup: the manifest already points at the capability dir, so a locked leftover
+  // (a file open elsewhere) costs disk, not correctness.
+  let cleaned = true
+  try {
+    for (const e of readdirSync(pageDir)) {
+      if (e === 'container.json') continue
+      rmSync(join(pageDir, e), { recursive: true, force: true })
+    }
+  } catch {
+    cleaned = false
+  }
+  logEvent({
+    level: 'info',
+    kind: 'update.migrate',
+    pageId,
+    detail: `in-page npm install → capability ${capDir}`
+  })
+  return {
+    name,
+    ok: true,
+    updated: true,
+    message: cleaned
+      ? m('upd.capabilityMigrated', { dir: capDir })
+      : m('upd.capabilityMigratedPartial', { dir: capDir })
+  }
+}
+
+/**
  * One aggregated update row for the curated MCP server packages (userData/mcp). The panel
  * shows a single group row rather than one per package: they install together and the version
  * column reads "installed/total" while some are still missing (no real npm package backs
@@ -672,24 +847,32 @@ const inFlightUpdates = new Map<string, Promise<UpdateOutcome>>()
 
 export function performUpdate(
   target: UpdateCheckResult,
-  onProgress?: ProgressCb
+  onProgress?: ProgressCb,
+  pinned?: string
 ): Promise<UpdateOutcome> {
-  const running = inFlightUpdates.get(target.name)
+  // Keyed by row AND requested version: joining an in-flight install of a *different* version
+  // would silently hand back the wrong outcome (a pinned rollback is the whole point of the flag).
+  const key = `${target.name}|${(pinned || '').trim()}`
+  const running = inFlightUpdates.get(key)
   if (running) {
     console.log(`[update] ${target.name}: update already in flight, joining`)
     return running
   }
-  const done = runUpdate(target, onProgress).finally(() => {
-    inFlightUpdates.delete(target.name)
+  const done = runUpdate(target, onProgress, pinned).finally(() => {
+    inFlightUpdates.delete(key)
   })
-  inFlightUpdates.set(target.name, done)
+  inFlightUpdates.set(key, done)
   return done
 }
 
 async function runUpdate(
   target: UpdateCheckResult,
-  onProgress?: ProgressCb
+  onProgress?: ProgressCb,
+  pinned?: string
 ): Promise<UpdateOutcome> {
+  // An explicit version wins over the channel everywhere — the same escape hatch 重装指定版本 is
+  // for the built-in runtimes; a git page has no versions to pick, so it keeps pulling its branch.
+  const want = (pinned || '').trim() || undefined
   switch (target.action) {
     case 'pull':
       return gitPull({ name: target.name, dir: target.dir })
@@ -699,15 +882,28 @@ async function runUpdate(
       // An imported npm CLI capability re-provisions its own userData/capabilities/<id> store
       // (npm install -g --prefix), ahead of the fixed dsh/openclaw/mcp targets it otherwise shares
       // this action with. Its row carries capabilityId + packageName + the capability dir in `dir`.
-      if (target.capabilityId && target.packageName && target.dir)
-        return updateCapability(target.packageName, target.dir, target.name, undefined, onProgress)
+      if (target.capabilityId && target.packageName && target.dir) {
+        const r = await updateCapability(
+          target.packageName,
+          target.dir,
+          target.name,
+          want,
+          onProgress
+        )
+        // A re-provision can change the launcher shape (claude-code: cli.js → native claude.exe);
+        // rewrite the page's startCommand so a plain update also heals an older broken import.
+        if (r.ok) healCapabilityStartCommand(target.capabilityId, target.packageName, target.dir)
+        return r
+      }
       // Stream npm's own output as an indeterminate row, keyed by this row's name so both the
       // panel's inline bar and the window top bar light up for a built-in runtime update.
       return target.packageName === MCP_PKG_GROUP
-        ? installMcpPackages(undefined, onProgress, target.name)
+        ? installMcpPackages(want, onProgress, target.name)
         : target.packageName === DSH_PKG
-          ? updateDshSelf(undefined, onProgress, target.name)
-          : reprovisionOpenclaw(undefined, onProgress, target.name)
+          ? updateDshSelf(want, onProgress, target.name)
+          : reprovisionOpenclaw(want, onProgress, target.name)
+    case 'migrateCapability':
+      return migrateCapabilityUpdate(target, onProgress, want)
     case 'manual':
       return {
         name: target.name,

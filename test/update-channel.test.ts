@@ -39,7 +39,13 @@ vi.mock('electron-store', () => ({
 }))
 
 import { updateSettings } from '../src/main/shell/store'
-import { dshChannel, fetchNpmLatest, isNewer } from '../src/main/update/update-service'
+import {
+  dshChannel,
+  fetchNpmLatest,
+  isNewer,
+  listPackageVersions,
+  sortVersionsDesc
+} from '../src/main/update/update-service'
 import {
   RELEASE_BRANCH_BETA,
   effectiveReleaseBranch,
@@ -130,5 +136,62 @@ describe('isNewer across a prerelease channel', () => {
     expect(isNewer('1.0.0', '1.0.0-alpha.2')).toBe(false)
     expect(isNewer('1.0.0-alpha.1', '1.0.0')).toBe(false)
     expect(isNewer('1.0.0-alpha.1', '1.0.1-beta.9')).toBe(true)
+  })
+})
+
+describe('指定版本 picker (published version list)', () => {
+  it('orders newest-first and drops non-semver noise', () => {
+    // 0.10.0 > 0.9.0 needs a numeric compare, not the string one a naive sort would use.
+    expect(sortVersionsDesc(['0.9.0', '0.10.0', '0.10.1', '', 'latest'])).toEqual([
+      '0.10.1',
+      '0.10.0',
+      '0.9.0'
+    ])
+  })
+
+  it('ranks a plain release above its own prerelease build, then cuts to the cap', () => {
+    const list = sortVersionsDesc(
+      ['0.156.1', '0.156.1-win32-x64', '0.157.0-beta.1', '0.155.1', '0.9.9'],
+      4
+    )
+    expect(list).toEqual(['0.157.0-beta.1', '0.156.1', '0.156.1-win32-x64', '0.155.1'])
+  })
+
+  it('falls back to the full packument when the abbreviated form is refused', async () => {
+    const accepts: string[] = []
+    const real = globalThis.fetch
+    globalThis.fetch = ((input: unknown, init?: RequestInit) => {
+      const accept = String((init?.headers as Record<string, string> | undefined)?.Accept || '')
+      accepts.push(accept)
+      if (accept === 'application/vnd.npm.install-v1+json')
+        return Promise.resolve({ ok: false } as Response)
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            versions: { '1.0.0': {}, '1.1.0': {}, '1.1.0-linux-x64': {}, '1.1.0-win32-arm64': {} }
+          })
+      } as Response) as Promise<Response>
+    }) as typeof fetch
+    try {
+      // The per-platform alias builds are dropped: they are optionalDependency targets, and a CLI
+      // that ships six of them per release would otherwise bury every real version in the picker.
+      expect(await listPackageVersions('@openai/codex')).toEqual(['1.1.0', '1.0.0'])
+    } finally {
+      globalThis.fetch = real
+    }
+    expect(accepts).toHaveLength(2)
+  })
+
+  it('reads an empty list rather than throwing when the registry is unreachable', async () => {
+    const real = globalThis.fetch
+    globalThis.fetch = (() => Promise.reject(new Error('offline'))) as typeof fetch
+    try {
+      // A distinct package name: the previous case cached its list under the module's cache, and a
+      // dead registry must not look like it succeeded through that entry.
+      expect(await listPackageVersions('@openai/unreachable')).toEqual([])
+    } finally {
+      globalThis.fetch = real
+    }
   })
 })

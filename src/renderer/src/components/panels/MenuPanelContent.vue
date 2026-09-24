@@ -16,7 +16,6 @@ import ResourceTrend from '@renderer/components/monitor/ResourceTrend.vue'
 import { usePagesStore } from '@renderer/stores/pages'
 import { useUpdatesStore } from '@renderer/stores/updates'
 import { useTasksStore } from '@renderer/stores/tasks'
-import { useSettingsStore } from '@renderer/stores/settings'
 import { useStaleCache } from '@renderer/composables/useStaleCache'
 import type {
   BuiltinKind,
@@ -25,6 +24,7 @@ import type {
   IpcResult,
   ListEventsArgs,
   NodeVersionInfo,
+  PageKind,
   UpdateCheckResult,
   UpdateProgress,
   UpdateHistory,
@@ -74,7 +74,6 @@ const emit = defineEmits<{
 const updates = useUpdatesStore()
 const pagesStore = usePagesStore()
 const tasks = useTasksStore()
-const settingsStore = useSettingsStore()
 
 /* Built-in agent runtimes (DSH 本体 / OpenClaw) surface as reprovision rows. When one is
    *missing* the row reads "检测失败 / 未检测到已安装版本"; here we turn it into an install
@@ -97,31 +96,94 @@ async function installBuiltinRow(row: UpdateCheckResult): Promise<void> {
   if (out) emit('check-updates')
 }
 
-/* B3 runtime rollback entry point: an upgrade that turns out worse can be re-provisioned at an
-   exact version (`npm install -g <pkg>@<version>`) — the only way back once the channel moved on. */
-async function provisionPinned(row: UpdateCheckResult): Promise<void> {
-  const kind = builtinKind(row)
-  if (!kind) return
-  let version = ''
+/* ---- 指定版本 — every updatable row, built-in or imported ----
+   The built-in runtimes have always offered an exact-version reinstall (the only way back once the
+   channel moved on); an imported npm CLI capability (and a legacy in-page install being migrated
+   onto the capability layout) is the very same `npm install -g <pkg>@<version>` shape, so both
+   share one dialog. A rollback is just a version *behind* the installed one, which the plain 更新
+   button can never offer (it only appears when a newer release exists). */
+const versionDlg = reactive({
+  visible: false,
+  row: null as UpdateCheckResult | null,
+  loading: false,
+  error: '',
+  versions: [] as string[],
+  sel: '',
+  /** the registry list came back empty (or there is none to list): type it in */
+  manual: false,
+  typed: ''
+})
+
+/** Rows an exact-version install makes sense for: built-in npm runtimes + npm-backed page rows. */
+function versionRow(row: UpdateCheckResult): boolean {
+  if (builtinKind(row)) return true
+  if (row.source !== 'npm' || !row.packageName) return false
+  return Boolean(row.capabilityId || (row.pageId && row.action === 'migrateCapability'))
+}
+
+/** The bundled MCP servers are a package *group*, so there is no single packument to list. */
+function isMcpGroup(row: UpdateCheckResult | null): boolean {
+  return row ? builtinKind(row) === 'mcp' : false
+}
+
+async function openVersionDlg(row: UpdateCheckResult): Promise<void> {
+  versionDlg.row = row
+  versionDlg.visible = true
+  versionDlg.sel = ''
+  versionDlg.typed = ''
+  versionDlg.error = ''
+  versionDlg.versions = []
+  // MCP group: one version is applied to every bundled server, so it stays free-text.
+  versionDlg.manual = isMcpGroup(row)
+  if (!versionDlg.manual) await loadVersions()
+}
+
+/** Pull the published version list (newest first) for the dialog's row. */
+async function loadVersions(): Promise<void> {
+  const row = versionDlg.row
+  if (!row?.packageName || versionDlg.loading || isMcpGroup(row)) return
+  versionDlg.loading = true
   try {
-    const res = await ElMessageBox.prompt(
-      t('panel.versionPrompt', { name: row.name }),
-      t('panel.versionBtn'),
-      {
-        confirmButtonText: t('common.ok'),
-        cancelButtonText: t('common.cancel'),
-        inputPlaceholder: t('panel.versionPlaceholder'),
-        inputValidator: (v: string) =>
-          !v.trim() || /^[\w.+-]+$/.test(v.trim()) || t('panel.versionPlaceholder')
-      }
-    )
-    version = String(res.value || '').trim()
-  } catch {
-    return // dismissed
+    const res = (await window.container.listPackageVersions?.(row.packageName)) as IpcResult | null
+    const list = res?.ok ? (res.data as string[]) || [] : []
+    versionDlg.versions = list
+    if (!list.length) {
+      // Registry unreachable (or the bridge is an older preload): typing still works, so fall back
+      // to the free-text field instead of stranding the dialog on an empty select.
+      versionDlg.error = res?.error || t('panel.versionLoadFail')
+      versionDlg.manual = true
+    } else {
+      const latest = row.latestVersion && list.includes(row.latestVersion) ? row.latestVersion : ''
+      versionDlg.sel = latest || list[0]
+    }
+  } catch (err) {
+    versionDlg.error = (err as Error).message
+    versionDlg.manual = true
+  } finally {
+    versionDlg.loading = false
   }
-  const out = await tasks.installBuiltin(kind, version || undefined)
-  if (out && !version) ElMessage.info(t('panel.versionLatest'))
-  if (out) emit('check-updates')
+}
+
+/** '' is a legitimate choice: follow the channel latest (an empty version means "no pin"). */
+async function confirmVersionInstall(): Promise<void> {
+  const row = versionDlg.row
+  if (!row || versionDlg.loading) return
+  const v = (versionDlg.manual ? versionDlg.typed : versionDlg.sel).trim()
+  versionDlg.visible = false
+  const kind = builtinKind(row)
+  if (kind) {
+    // Built-in runtime / MCP group: re-provision the shared -g prefix at exactly this version.
+    const out = await tasks.installBuiltin(kind, v || undefined)
+    if (out) emit('check-updates')
+    return
+  }
+  await updates.perform(row, v || undefined)
+  emit('check-updates')
+}
+
+function toggleVersionManual(): void {
+  versionDlg.manual = !versionDlg.manual
+  if (versionDlg.manual) versionDlg.typed = versionDlg.sel
 }
 
 /**
@@ -481,22 +543,6 @@ function openLogDir(): void {
   void window.container.openLogsDir?.()
 }
 
-/* ---- A2 release channels ---- */
-// Container OTA is fixed to the stable `release` branch (no UI switch); only DSH is selectable.
-const dshChannel = computed(() => settingsStore.settings.dshChannel || 'alpha')
-
-async function setChannel(value: string): Promise<void> {
-  try {
-    await settingsStore.patch({ dshChannel: value as 'alpha' | 'latest' })
-    ElMessage.success(t('panel.channelSaved'))
-    // The channel switch changes what the next probe should fetch *and* what "up to date"
-    // means, so main re-surveys; force a check so the table reflects it at once.
-    emit('check-updates')
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  }
-}
-
 onMounted(() => {
   if (props.panel !== 'help') return
   void loadNodeVersions()
@@ -521,20 +567,31 @@ const statusLabel = (r: UpdateCheckResult): string =>
 const statusType = (r: { ok: boolean; hasUpdate?: boolean }): string =>
   !r.ok ? 'info' : r.hasUpdate ? 'warning' : 'success'
 
-/** Short provenance tag for built-in rows so they read apart from git repos. Routed through
-    builtinKind (package-name based) instead of a name match: the MCP group row's bilingual
-    name contains neither 'DSH' nor 'OpenClaw', and used to fall through to the OpenClaw tag. */
+/** Short provenance tag: a built-in row reads as its product name, an imported row as the runtime
+    kind its own container.json declares (a CLI vs a web project). Routed through builtinKind
+    (package-name based) instead of a name match: the MCP group row's bilingual name contains
+    neither 'DSH' nor 'OpenClaw', and used to fall through to the OpenClaw tag. */
 const BUILTIN_TAGS: Record<BuiltinKind, string> = {
   dsh: 'DeepSeek Harness',
   openclaw: 'OpenClaw',
   mcp: 'MCP'
 }
-const sourceTag = (r: UpdateCheckResult): string | null =>
-  r.source === 'builtin'
-    ? r.action === 'none'
-      ? t('panel.tagBuiltin')
-      : BUILTIN_TAGS[builtinKind(r) ?? 'openclaw']
-    : null
+/** PageKind → label key. `dsh` / `openclaw` kinds only ever arrive as built-in rows above. */
+const KIND_TAGS: Partial<Record<PageKind, string>> = {
+  terminal: 'panel.tagCli',
+  page: 'panel.tagWeb'
+}
+const sourceTag = (r: UpdateCheckResult): { label: string; type: 'warning' | 'info' } | null => {
+  if (r.source === 'builtin')
+    return {
+      label:
+        r.action === 'none' ? t('panel.tagBuiltin') : BUILTIN_TAGS[builtinKind(r) ?? 'openclaw'],
+      // amber = shipped by the container itself
+      type: 'warning'
+    }
+  const key = r.pageKind ? KIND_TAGS[r.pageKind] : undefined
+  return key ? { label: t(key), type: 'info' } : null
+}
 
 /** The middle column shows a branch for git rows, the registry latest for version rows. */
 const refLabel = (r: { source?: string; branch?: string; latestVersion?: string }): string =>
@@ -824,7 +881,7 @@ async function doImportSnapshot(): Promise<void> {
       <WorkspaceContext />
     </section>
 
-    <!-- 看板: palette-only page; TaskBoard owns the board / dependency-topology / call-feed tabs. -->
+    <!-- 看板: rail / 视图 row / palette page; TaskBoard owns the board / dependency-topology / call-feed tabs. -->
     <section v-else-if="props.panel === 'board'" class="sec">
       <TaskBoard :tab-position="tabPosition" />
     </section>
@@ -1027,22 +1084,6 @@ async function doImportSnapshot(): Promise<void> {
               {{ t('panel.checkUpdates') }}
             </el-button>
           </div>
-          <!-- A2: only DSH exposes a channel switch; container OTA is locked to stable release. -->
-          <div class="channel-row">
-            <span class="channel-label">{{ t('panel.channelTitle') }}</span>
-            <label class="channel-pick">
-              {{ t('panel.channelDsh') }}
-              <el-select
-                size="small"
-                style="width: 140px"
-                :model-value="dshChannel"
-                @update:model-value="(v: string) => setChannel(v)"
-              >
-                <el-option value="alpha" :label="t('panel.channelAlpha')" />
-                <el-option value="latest" :label="t('panel.channelLatest')" />
-              </el-select>
-            </label>
-          </div>
           <el-table :data="updates.results" size="small" :empty-text="t('panel.updatesEmpty')">
             <el-table-column :label="t('panel.colName')" min-width="200">
               <template #default="{ row }">
@@ -1060,9 +1101,9 @@ async function doImportSnapshot(): Promise<void> {
                   size="small"
                   effect="plain"
                   round
-                  type="warning"
+                  :type="sourceTag(row)!.type"
                   style="margin-left: 8px"
-                  >{{ sourceTag(row) }}</el-tag
+                  >{{ sourceTag(row)!.label }}</el-tag
                 >
                 <div class="cell-sub">{{ subLabel(row) }}</div>
                 <div v-if="progressOf(row)" class="upd-progress">
@@ -1088,7 +1129,7 @@ async function doImportSnapshot(): Promise<void> {
                 <el-tag size="small" round :type="statusType(row)">{{ statusLabel(row) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column :label="t('panel.colAction')" width="150" align="right">
+            <el-table-column :label="t('panel.colAction')" width="176" align="right">
               <template #default="{ row }">
                 <div class="act-cell">
                   <el-button
@@ -1146,13 +1187,20 @@ async function doImportSnapshot(): Promise<void> {
                   >
                     {{ t('panel.resetBtn') }}
                   </el-button>
-                  <!-- B3: a built-in runtime can always be re-provisioned at an exact version. -->
+                  <!-- B3: a built-in runtime can always be re-provisioned at an exact version, and
+                       an imported npm page gets the same hatch off the registry version list (the
+                       更新 button can never offer a rollback — it only appears once a *newer*
+                       release exists). -->
                   <el-button
-                    v-if="builtinKind(row)"
+                    v-if="versionRow(row)"
                     size="small"
                     round
-                    :disabled="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
-                    @click="provisionPinned(row)"
+                    :disabled="
+                      builtinKind(row)
+                        ? tasks.busyBuiltin(builtinKind(row) || 'dsh')
+                        : updates.updating === row.name
+                    "
+                    @click="openVersionDlg(row)"
                   >
                     {{ t('panel.versionBtn') }}
                   </el-button>
@@ -1384,6 +1432,70 @@ async function doImportSnapshot(): Promise<void> {
         </el-tab-pane>
       </el-tabs>
     </section>
+
+    <!-- 指定版本 picker for any updatable row: the registry's published versions, newest first
+         (the bundled MCP servers are a package group, so that one stays free-text).
+         Kept at the template root (append-to-body) so the tab pane's scroll box can't clip it. -->
+    <el-dialog
+      v-model="versionDlg.visible"
+      :title="t('panel.versionTitle', { name: versionDlg.row?.name || '' })"
+      width="360px"
+      align-center
+      append-to-body
+    >
+      <div class="ver-pick">
+        <div class="ver-meta cell-sub">
+          <span>{{ t('panel.versionCurrent', { v: versionDlg.row?.currentVersion || '?' }) }}</span>
+          <span v-if="versionDlg.row?.latestVersion">
+            · {{ t('panel.versionLatestVer', { v: versionDlg.row.latestVersion }) }}
+          </span>
+        </div>
+        <!-- One typed version is installed for every bundled MCP server, so a release that only some
+             of them publish fails the whole batch — say so rather than imply one package. -->
+        <div v-if="isMcpGroup(versionDlg.row)" class="ver-meta cell-sub">
+          {{ t('panel.versionAppliesAll') }}
+        </div>
+        <el-select
+          v-if="!versionDlg.manual"
+          v-model="versionDlg.sel"
+          :loading="versionDlg.loading"
+          filterable
+          class="ver-field"
+          :no-data-text="t('panel.versionLoading')"
+        >
+          <el-option :label="t('panel.versionFollowLatest')" value="" />
+          <el-option
+            v-for="v in versionDlg.versions"
+            :key="v"
+            :value="v"
+            :label="
+              v === versionDlg.row?.currentVersion ? `${v} · ${t('panel.versionIsCurrent')}` : v
+            "
+          />
+        </el-select>
+        <el-input
+          v-else
+          v-model="versionDlg.typed"
+          :placeholder="t('panel.versionPlaceholder')"
+          clearable
+        />
+        <div v-if="versionDlg.error" class="ver-err cell-sub">{{ versionDlg.error }}</div>
+        <el-button size="small" text @click="toggleVersionManual">
+          {{ versionDlg.manual ? t('panel.versionPickList') : t('panel.versionManual') }}
+        </el-button>
+      </div>
+      <template #footer>
+        <el-button @click="versionDlg.visible = false">{{ t('common.cancel') }}</el-button>
+        <el-button
+          size="small"
+          type="primary"
+          :loading="versionDlg.loading"
+          @click="confirmVersionInstall"
+        >
+          {{ t('panel.versionInstall') }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1541,6 +1653,20 @@ async function doImportSnapshot(): Promise<void> {
   gap: 2px;
   margin-top: 4px;
   min-width: 160px;
+}
+
+/* 指定版本 dialog: one stacked column — the installed/latest reading, the picker (or the
+   free-text fallback), then the toggle between them. */
+.ver-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ver-field {
+  width: 100%;
+}
+.ver-err {
+  color: var(--el-color-danger);
 }
 
 .about p {
@@ -1809,28 +1935,6 @@ async function doImportSnapshot(): Promise<void> {
 }
 .iface-mac {
   max-width: none;
-}
-
-/* ---- A2 release-channel row ---- */
-.channel-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin: 0 0 10px;
-  font-size: 12.5px;
-}
-.channel-label {
-  font-weight: 550;
-}
-.channel-pick {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-dim);
-}
-.channel-row > .cell-sub {
-  flex-basis: 100%;
 }
 
 /* ---- A1 activity timeline ---- */

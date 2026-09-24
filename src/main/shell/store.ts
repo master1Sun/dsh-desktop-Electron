@@ -24,6 +24,8 @@ const DEFAULTS: ContainerSettings = {
   theme: 'auto',
   // UI display language; defaults to Chinese
   locale: 'zh',
+  // shell layout: 'classic' (top menu + floating panels) is the default; 'im' = rail + bubbles
+  layoutMode: 'classic',
   // env root is no longer user-configurable: fixed at userData/env (the system-common spot).
   // The field only survives in old settings files; resolveEnvRoot() ignores it. '@system' was
   // also a persisted choice there and resolves to the same place, so nothing needs migrating.

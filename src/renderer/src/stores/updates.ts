@@ -62,13 +62,14 @@ export const useUpdatesStore = defineStore('updates', () => {
     }
   }
 
-  async function perform(target: UpdateCheckResult): Promise<void> {
+  /** Run one row's update; `pinned` installs an exact npm version over the channel latest. */
+  async function perform(target: UpdateCheckResult, pinned?: string): Promise<void> {
     updating.value = target.name
     delete progress[target.name]
     try {
       // Strip Vue reactive proxy before IPC — structuredClone can't serialize proxies.
       const plain = JSON.parse(JSON.stringify(target)) as UpdateCheckResult
-      const res = await unwrap<UpdateOutcome>(window.container.performUpdate(plain))
+      const res = await unwrap<UpdateOutcome>(window.container.performUpdate(plain, pinned))
       if (res.message) ElMessage.success(res.message)
       else if (!res.ok)
         ElMessage.warning(res.error || t('updates.incomplete', { name: target.name }))

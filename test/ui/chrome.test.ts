@@ -17,7 +17,8 @@ const persistedSettings: Record<string, unknown> = {
   externalSites: [],
   theme: 'auto',
   // This suite exercises the classic top menu bar (.group-trigger / drop list / centered panel),
-  // which only renders in classic layout — the shell now defaults to the IM/效率 rail (qq-shell.test).
+  // which only renders in classic layout — pinned here explicitly even though classic is now also
+  // the shell default (qq-shell.test covers the IM/效率 rail).
   layoutMode: 'classic',
   dshHome: '',
   openclawHome: ''
