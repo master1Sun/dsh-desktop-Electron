@@ -18,12 +18,12 @@ import type { WebDataClearArgs, WebDataReport } from '../../shared/types'
  */
 
 /** HTTP cache dirs under userData (Chromium splits these; all three are safe to delete). */
-const CACHE_DIRS = ['Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'Shared Dictionary']
+export const CACHE_DIRS = ['Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'Shared Dictionary']
 /** Leveldb / file-backed storage dirs (localStorage, IndexedDB, …). */
-const STORAGE_DIRS = ['Local Storage', 'Session Storage', 'IndexedDB', 'FileSystem', 'WebStorage']
+export const STORAGE_DIRS = ['Local Storage', 'Session Storage', 'IndexedDB', 'FileSystem', 'WebStorage']
 
 /** Recursive byte size of a directory; a missing/locked path counts as 0, never throws. */
-async function dirBytes(path: string): Promise<number> {
+export async function dirBytes(path: string): Promise<number> {
   let entries: Dirent[]
   try {
     entries = await fs.readdir(path, { withFileTypes: true })

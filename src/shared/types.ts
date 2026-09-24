@@ -181,6 +181,14 @@ export interface PageMeta {
    */
   permissions?: string[]
   /**
+   * Set for an imported npm CLI capability (e.g. @openai/codex): the real package name whose
+   * version the update checker compares against the registry, and the absolute
+   * `userData/capabilities/<id>` dir its `node_modules` lives in. The page's own dir holds only
+   * a thin terminal manifest whose `startCommand` launches the entry under `capabilityDir`.
+   */
+  npmPackage?: string
+  capabilityDir?: string
+  /**
    * Non-fatal container.json problems found while reading the manifest (unknown keys, wrong
    * types). Surfaced in the page config dialog so an author sees typos instead of silently
    * having a field ignored.
@@ -332,6 +340,13 @@ export interface ContainerSettings {
   /** per-page port overrides: pageId -> port; wins over container.json so imported projects need no editing */
   pagePorts: Record<string, number>
   /**
+   * per-page dependency overrides: pageId -> [depId…]. Mirrors `pagePorts` by shadowing a page's
+   * container.json `dependsOn` WITHOUT rewriting the imported project's own file, so dependency
+   * wiring is a container-side concern editable from the Pages panel. An empty array is an
+   * explicit "no deps" override (clears a declared one); an absent key defers to container.json.
+   */
+  pageDeps?: Record<string, string[]>
+  /**
    * Free-form per-page environment variables (pageId -> KEY -> value) the user adds in the page
    * config dialog. Deliberately separate from `pageEnvs`: that map is directory-typed and fed to
    * the home-dir resolution chain, while these are injected verbatim into the child's env.
@@ -368,6 +383,18 @@ export interface ContainerSettings {
    * launch. Undefined = the stylesheet default (320), clamped to the window height at runtime.
    */
   terminalHeight?: number
+  /**
+   * Lines of scrollback kept per terminal surface. Undefined = the default (8000); clamped to
+   * [1, TERMINAL_SCROLLBACK_MAX] at session-create time so a hand-edited store can't blow up
+   * renderer memory.
+   */
+  terminalScrollback?: number
+  /**
+   * How the embedded terminal is shown: 'embedded' (default) docks it as a flow sibling of the
+   * page area so it pushes the webview up; 'floating' makes it a window-wide fixed overlay that
+   * can be minimized to the floating FAB. Minimize is only offered in floating mode.
+   */
+  terminalMode?: 'embedded' | 'floating'
   /** #26: remember the window size/position/maximized state and restore them on the next launch. */
   rememberWindowBounds?: boolean
   /**
@@ -387,6 +414,12 @@ export interface ContainerSettings {
    * when the OS asks for less motion.
    */
   reduceMotion?: 'auto' | 'on' | 'off'
+  /**
+   * The decorative flowing-light border (marquee ring) drawn on the app-window frame and the
+   * floating popups in dark mode. Defaults to on; off paints a `.no-marquee` class on `<html>`
+   * that glass.css keys off to hide every ring.
+   */
+  marqueeBorder?: boolean
   /**
    * #26: the npm registry every install / `npm view` the container runs goes through, also
    * injected into hosted pages as `npm_config_registry`. Empty = the built-in default mirror.
@@ -434,7 +467,47 @@ export interface ContainerSettings {
    * ever holds the user's overrides and stays small.
    */
   keybindings?: Record<string, string>
+  /**
+   * Master switch for the container's OWN MCP server (#11). On: the main process listens on a
+   * loopback Streamable-HTTP endpoint (Bearer-token guarded) whose URL/token are exported into
+   * the agent bridge, so any hosted/external agent can drive the container (list/start/stop
+   * pages, read logs, submit/complete workspace tasks). Off (default): no socket, no export.
+   */
+  containerMcpServer?: boolean
+  /**
+   * Autopilot task dispatch (#1). On: a todo task whose deps are all done is auto-claimed and
+   * run headlessly inside the chosen CLI agent page's PTY. Concurrency-capped and bounded by
+   * per-task attempts so a crash-looping executor can't spin forever.
+   */
+  autopilotEnabled?: boolean
+  /** pageId of the `kind:'terminal'` agent page autopilot dispatches tasks into. */
+  autopilotExecutorPage?: string
+  /** how many tasks autopilot runs at once; default 1. */
+  autopilotConcurrency?: number
+  /**
+   * Prompt template handed to the executor agent, with `{title}`/`{id}`/`{deps}` placeholders.
+   * Empty = the built-in default that also instructs the agent to call workspace_complete.
+   */
+  autopilotPrompt?: string
 }
+
+/**
+ * A shell the embedded terminal can run, discovered by the main process. `id` is the stable key the
+ * renderer sends back on `ptyStart`; `label` is a proper noun (PowerShell / Git Bash / ...) so it is
+ * never translated; `path`/`args` are how to launch it.
+ */
+export interface PtyShellInfo {
+  id: string
+  label: string
+  path: string
+  args: string[]
+}
+
+/** Ceiling for {@link ContainerSettings.terminalScrollback}; guards renderer memory. */
+export const TERMINAL_SCROLLBACK_MAX = 50000
+
+/** Default scrollback when the setting is unset. */
+export const TERMINAL_SCROLLBACK_DEFAULT = 8000
 
 /** Dist-tags {@link ContainerSettings.dshChannel} can pick between. */
 export type DshReleaseChannel = 'alpha' | 'latest'
@@ -570,6 +643,32 @@ export interface WebDataClearArgs {
   domain?: string
 }
 
+/** #8: one row of the disk-usage breakdown; `children` nest per-page / per-runtime detail. */
+export interface DiskScope {
+  /** stable key the UI keys off and `ClearDiskScope` accepts (only 'webcache'/'logs' are clearable) */
+  id: string
+  /** i18n key suffix resolved in the renderer (e.g. 'diskMgr.page' → t('diskMgr.page')) */
+  labelKey: string
+  /** plain label for rows whose name is data (an imported page's own name), not an i18n key */
+  label?: string
+  bytes: number
+  /** child scopes (a scope's bytes already include them; the UI can render both totals and leaves) */
+  children?: DiskScope[]
+}
+
+/** #8: the whole disk-usage report for the Settings ▸ 存储 tab. */
+export interface DiskReport {
+  /** bytes the scanned scopes occupy in total */
+  usedBytes: number
+  /** free bytes on the volume hosting userData (null when the platform can't report it) */
+  freeBytes: number | null
+  /** total bytes of the volume hosting userData (null when unknown) */
+  totalBytes: number | null
+  scopes: DiskScope[]
+  /** epoch ms the scan finished */
+  generatedAt: number
+}
+
 export interface UpdateCheckResult {
   name: string
   dir: string
@@ -596,6 +695,12 @@ export interface UpdateCheckResult {
   pendingRestart?: boolean
   /** builtin-page row (action 'none'): the pages/<id> this row manages — reset entry key */
   pageId?: string
+  /**
+   * npm-CLI-capability row (a page that declared `npmPackage`): the page id whose update runs a
+   * `npm install -g --prefix <capabilityDir>` re-provision — routes performUpdate away from the
+   * fixed dsh/openclaw/mcp reprovision targets to the per-capability updater.
+   */
+  capabilityId?: string
   /** container row: a pre-update app.asar.bak exists, so one-level 回退 is offered */
   canRollback?: boolean
   /** version the .bak copy belongs to (shown in the confirm dialog) */
@@ -849,6 +954,23 @@ export interface McpCallToolResult {
 /** Qualified key a tool is addressed by inside the hub UI (`serverId/name`). */
 export const mcpToolKey = (serverId: string, tool: string): string => `${serverId}/${tool}`
 
+/**
+ * One hub-side tool invocation, recorded for the panel's call feed. Only calls the hub
+ * itself forwards are observed (the panel's McpCallTool / internal listTools) — an agent
+ * that spawns its own third-party stdio server never routes through the main process.
+ */
+export interface McpCallEvent {
+  serverId: string
+  tool: string
+  /** wall-clock duration of the call in ms */
+  ms: number
+  ok: boolean
+  /** error text when ok is false */
+  err?: string
+  /** epoch ms the call finished */
+  at: number
+}
+
 /** Where the hub's agent-facing bridge exports live (see runtime/mcp-bridge.ts). */
 export interface McpBridgeInfo {
   /** userData/mcp-bridge — the export directory */
@@ -861,6 +983,23 @@ export interface McpBridgeInfo {
   codexConfigFile?: string
 }
 
+/**
+ * #11: state of the container's OWN MCP server (the reverse bridge that lets an external agent
+ * drive the container over Streamable HTTP). `enabled` mirrors the `containerMcpServer` setting;
+ * `running` is whether the loopback listener is actually up. URL/tokenFile are only present while
+ * running — when off there is no socket and nothing to hand an agent.
+ */
+export interface ContainerMcpInfo {
+  /** the `containerMcpServer` setting (default off) */
+  enabled: boolean
+  /** whether the HTTP listener is currently up */
+  running: boolean
+  /** Streamable HTTP endpoint (present only while running) */
+  url?: string
+  /** absolute path of the bearer-token file (present only while running) */
+  tokenFile?: string
+}
+
 /* ---- shared workspace / context layer (see runtime/workspace.ts) ---- */
 
 /** One entry in the shared workspace's append-only memory log. */
@@ -871,6 +1010,32 @@ export interface WorkspaceNote {
   text: string
   /** epoch ms; the panel orders and renders this in the display zone like every other timestamp */
   ts: number
+}
+
+/** Kanban column a queued task sits in. */
+export type WorkspaceTaskStatus = 'todo' | 'doing' | 'done'
+
+/**
+ * One entry of the shared task queue (the multi-agent orchestration layer on top of
+ * the context doc): any agent claims/submits/completes tasks through the dsh-workspace
+ * MCP server, and the panel renders the same rows as a kanban board.
+ */
+export interface WorkspaceTask {
+  id: string
+  title: string
+  status: WorkspaceTaskStatus
+  /** who picked it up once claimed; empty until then */
+  owner?: string
+  /** ids of tasks this one waits on (advisory — nothing auto-blocks) */
+  deps?: string[]
+  /** outcome note, mirrored into the shared memory when the task lands in done */
+  result?: string
+  /** epoch ms of creation / last transition */
+  at: number
+  /** #1 autopilot: epoch ms the container claimed + dispatched this task */
+  dispatchedAt?: number
+  /** #1 autopilot: dispatch attempts so far; a task at/over the cap stops auto-dispatching */
+  attempts?: number
 }
 
 /**
@@ -892,6 +1057,8 @@ export interface WorkspaceContext {
   /** the current shared task / goal, free text */
   task: string
   notes: WorkspaceNote[]
+  /** the shared task queue; absent on documents written before the queue existed */
+  tasks?: WorkspaceTask[]
 }
 
 /** Where the shared workspace lives + its current contents, handed to the panel. */
@@ -935,6 +1102,12 @@ export interface DshPluginUpdate {
   channel?: DshUpdateChannel
   /** repo(+ref) to install when `channel === 'git'`; the arg `updateDshPlugin` consumes */
   gitUrl?: string
+  /**
+   * Why this plugin's update check could not be answered (e.g. `git ls-remote` failed — git not on
+   * PATH, offline, or a private repo that needs auth). Set only when the lookup errored, so the
+   * panel can tell "check failed" apart from a genuine "already up to date" instead of going silent.
+   */
+  error?: string
 }
 
 export type DshUpdateChannel = 'npm' | 'git'
@@ -1019,6 +1192,8 @@ export const IPC = {
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
   ResetBuiltinPage: 'container:reset-builtin-page',
   SetPagePort: 'container:set-page-port',
+  /** #4: override a page's container.json dependsOn (pageDeps map) without editing its file */
+  SetPageDeps: 'container:set-page-deps',
   OpenPageExternal: 'container:open-page-external',
   GetSettings: 'container:get-settings',
   UpdateSettings: 'container:update-settings',
@@ -1080,6 +1255,7 @@ export const IPC = {
   GetIsMaximized: 'container:get-is-maximized',
   OnMaximizedChanged: 'container:maximized-changed',
   PtyStart: 'container:pty-start',
+  PtyShells: 'container:pty-shells',
   PageRunSpec: 'container:page-run-spec',
   PtyWrite: 'container:pty-write',
   PtyResize: 'container:pty-resize',
@@ -1126,6 +1302,10 @@ export const IPC = {
   GetWebData: 'container:get-web-data',
   /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
   ClearWebData: 'container:clear-web-data',
+  /** #8: recursive disk-usage breakdown of userData/pages/envRoot/logs/workspace/… → DiskReport */
+  GetDiskReport: 'container:get-disk-report',
+  /** #8: wipe one allowlisted disk scope ('webcache' | 'logs') → DiskReport */
+  ClearDiskScope: 'container:clear-disk-scope',
   /** activity timeline: read filtered events from logs/events.jsonl (ListEventsArgs → ContainerEvent[]) */
   ListEvents: 'container:list-events',
   /** broadcast: one new activity-timeline event (ContainerEvent) */
@@ -1155,8 +1335,14 @@ export const IPC = {
   McpCallTool: 'container:mcp-call-tool',
   /** broadcast: hub server states changed (McpServerState[]) */
   OnMcpStateChanged: 'container:mcp-state-changed',
+  /** broadcast: the hub's recent tool-call feed changed (McpCallEvent[], newest last) */
+  OnMcpCalls: 'container:mcp-calls',
+  /** MCP hub: cold-read the buffered tool-call feed → McpCallEvent[] */
+  GetMcpCalls: 'container:mcp-get-calls',
   /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
   McpBridgeInfo: 'container:mcp-bridge-info',
+  /** #11: connection info for the container's OWN MCP server (gated) → ContainerMcpInfo */
+  GetContainerMcpInfo: 'container:get-container-mcp-info',
   /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
   McpPackagesStatus: 'container:mcp-packages-status',
   /** shared workspace: read the container-owned context + its locations → WorkspaceInfo */
@@ -1164,8 +1350,17 @@ export const IPC = {
   /** shared workspace: persist a partial edit ({ task?, notes? }) → WorkspaceContext */
   WorkspaceSave: 'container:workspace-save',
   /** shared workspace: push the current task to running agents (bump revision + log a note) → WorkspaceContext */
-  WorkspaceBroadcast: 'container:workspace-broadcast'
+  WorkspaceBroadcast: 'container:workspace-broadcast',
+  /**
+   * route one renderer toast to the OS notification center (ToastLevel + text). The renderer
+   * suppresses its in-app corner toast and calls this only while `systemNotifications` is on;
+   * resolves false when the platform can't notify, so the renderer falls back to the toast.
+   */
+  ShowSystemToast: 'container:show-system-toast'
 } as const
+
+/** The four Element Plus toast severities a renderer message can carry. */
+export type ToastLevel = 'success' | 'error' | 'warning' | 'info'
 
 /** Payload of {@link IPC.OnHotkey}: which action fired and for which page, if any. */
 export interface HotkeySignal {

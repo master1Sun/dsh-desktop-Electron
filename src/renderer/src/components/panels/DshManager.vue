@@ -58,6 +58,15 @@ const latestByName = computed(() => {
     if (u.latest) m[name] = u.latest
   return m
 })
+/** IPC-level failure of the whole check (main unreachable), kept apart from a clean empty result. */
+const checkError = ref('')
+/** name -> reason a single plugin's check errored (git/network), so it isn't mistaken for "up to date". */
+const errorByName = computed(() => {
+  const m: Record<string, string> = {}
+  for (const u of pluginUpdates.value) if (u.error && !u.updateAvailable) m[u.name] = u.error
+  return m
+})
+const checkFailed = computed(() => !!checkError.value || Object.keys(errorByName.value).length > 0)
 
 /** the dsh web UI's auth token, read from the running page's launch URL (null while unavailable) */
 const tokenState = ref<DshTokenResult | null>(null)
@@ -195,17 +204,24 @@ async function install(): Promise<void> {
 }
 
 /**
- * Ask main which profile plugins have a newer version. Best-effort: a failed lookup just
- * leaves the list empty so the 全部更新 button stays hidden rather than raising an alarm.
+ * Ask main which profile plugins have a newer version. A whole-call failure is recorded in
+ * `checkError` (and per-plugin ones ride along on each update) so a broken check surfaces as
+ * "检测失败" rather than masquerading as "已全部是最新版本" — a silent empty list was exactly what
+ * made an unreachable git look like "nothing to update".
  */
 async function loadUpdates(): Promise<void> {
   updatesLoading.value = true
+  checkError.value = ''
   try {
     const r = await window.container.dshCheckUpdates(profile.value)
     if (r.ok) pluginUpdates.value = (r.data as DshPluginUpdate[]) || []
-    else pluginUpdates.value = []
-  } catch {
+    else {
+      pluginUpdates.value = []
+      checkError.value = r.error || t('dshMgr.checkFail')
+    }
+  } catch (err) {
     pluginUpdates.value = []
+    checkError.value = (err as Error).message || t('dshMgr.checkFail')
   } finally {
     updatesLoading.value = false
   }
@@ -355,26 +371,33 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
               t('dshMgr.tokenSourcePage', { id: token.pageId })
             }}</el-tag>
             <code class="token-val">{{ tokenRevealed ? token.token : maskedToken }}</code>
-            <el-button
-              size="small"
-              text
-              :title="tokenRevealed ? t('dshMgr.tokenHide') : t('dshMgr.tokenShow')"
-              @click="tokenRevealed = !tokenRevealed"
+            <el-tooltip
+              :content="tokenRevealed ? t('dshMgr.tokenHide') : t('dshMgr.tokenShow')"
+              placement="top"
+              popper-class="dsh-tip-popper"
             >
-              <el-icon><component :is="tokenRevealed ? Hide : View" /></el-icon>
-            </el-button>
-            <el-button size="small" text :title="t('dshMgr.tokenCopy')" @click="copyToken">
-              <el-icon><CopyDocument /></el-icon>
-            </el-button>
-            <el-button
-              size="small"
-              text
-              :loading="tokenLoading"
-              :title="t('dshMgr.tokenReread')"
-              @click="loadToken"
+              <el-button size="small" text @click="tokenRevealed = !tokenRevealed">
+                <el-icon><component :is="tokenRevealed ? Hide : View" /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip
+              :content="t('dshMgr.tokenCopy')"
+              placement="top"
+              popper-class="dsh-tip-popper"
             >
-              <el-icon><Refresh /></el-icon>
-            </el-button>
+              <el-button size="small" text @click="copyToken">
+                <el-icon><CopyDocument /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip
+              :content="t('dshMgr.tokenReread')"
+              placement="top"
+              popper-class="dsh-tip-popper"
+            >
+              <el-button size="small" text :loading="tokenLoading" @click="loadToken">
+                <el-icon><Refresh /></el-icon>
+              </el-button>
+            </el-tooltip>
           </div>
           <div v-else class="sub token-hint">
             {{ tokenHint }}
@@ -418,18 +441,25 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
 
           <!-- Plugin update toolbar: re-check on demand; 全部更新 only when N>0 updates are known -->
           <div class="plugin-tools">
-            <el-button
-              size="small"
-              text
-              :loading="updatesLoading"
-              :title="t('dshMgr.recheckUpdate')"
-              @click="loadUpdates"
+            <el-tooltip
+              :content="t('dshMgr.recheckUpdate')"
+              placement="top"
+              popper-class="dsh-tip-popper"
             >
-              {{ t('dshMgr.recheckUpdate') }}
-            </el-button>
-            <span v-if="!updatesLoading && !updatable.length" class="uptodate">
+              <el-button size="small" text :loading="updatesLoading" @click="loadUpdates">
+                {{ t('dshMgr.recheckUpdate') }}
+              </el-button>
+            </el-tooltip>
+            <span v-if="!updatesLoading && !updatable.length && !checkFailed" class="uptodate">
               {{ t('dshMgr.allUpToDate') }}
             </span>
+            <el-tooltip
+              v-else-if="!updatesLoading && checkFailed && !updatable.length"
+              :content="checkError || t('dshMgr.checkFailTip')"
+              placement="top"
+            >
+              <span class="check-fail">{{ t('dshMgr.checkFail') }}</span>
+            </el-tooltip>
             <el-button
               v-if="updatable.length"
               size="small"
@@ -476,6 +506,15 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
                   >
                     {{ t('dshMgr.updatableTag', { latest: latestByName[row.name] }) }}
                   </el-tag>
+                  <el-tooltip
+                    v-else-if="errorByName[row.name]"
+                    :content="errorByName[row.name]"
+                    placement="top"
+                  >
+                    <el-tag size="small" type="danger" effect="plain" round class="upd-tag">
+                      {{ t('dshMgr.checkFail') }}
+                    </el-tag>
+                  </el-tooltip>
                 </div>
               </template>
             </el-table-column>
@@ -487,18 +526,23 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
             <el-table-column :label="t('dshMgr.colActions')" width="150" align="right">
               <template #default="{ row }">
                 <template v-if="row.source === 'profile'">
-                  <el-button
+                  <el-tooltip
                     v-if="updateByName[row.name]"
-                    size="small"
-                    text
-                    type="primary"
-                    :loading="dsh.busy === row.name"
-                    :disabled="!!dsh.busy && dsh.busy !== row.name"
-                    :title="t('dshMgr.updatableTip')"
-                    @click="updateOne(row)"
+                    :content="t('dshMgr.updatableTip')"
+                    placement="top"
+                    popper-class="dsh-tip-popper"
                   >
-                    {{ t('dshMgr.update') }}
-                  </el-button>
+                    <el-button
+                      size="small"
+                      text
+                      type="primary"
+                      :loading="dsh.busy === row.name"
+                      :disabled="!!dsh.busy && dsh.busy !== row.name"
+                      @click="updateOne(row)"
+                    >
+                      {{ t('dshMgr.update') }}
+                    </el-button>
+                  </el-tooltip>
                   <el-button
                     size="small"
                     text
@@ -586,6 +630,11 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
 .plugin-tools .uptodate {
   font-size: 12px;
   color: var(--text-dim);
+}
+.plugin-tools .check-fail {
+  font-size: 12px;
+  color: var(--el-color-danger);
+  cursor: help;
 }
 .ua-count {
   margin-left: 2px;

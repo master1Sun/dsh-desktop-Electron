@@ -32,6 +32,37 @@ function newId() {
   return 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
+function newTaskId() {
+  return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+const TASK_STATUSES = ['todo', 'doing', 'done']
+
+/** Coerce unknown JSON into a trustworthy task queue (mirrors the container's normalizeTasks). */
+function normalizeTasks(raw) {
+  const seen = new Set()
+  return (Array.isArray(raw) ? raw : [])
+    .map((t) => {
+      if (!t || typeof t !== 'object') return null
+      const title = typeof t.title === 'string' ? t.title : ''
+      if (!title.trim()) return null
+      const id = typeof t.id === 'string' && t.id ? t.id : newTaskId()
+      if (seen.has(id)) return null
+      seen.add(id)
+      const deps = (Array.isArray(t.deps) ? t.deps : []).filter((d) => typeof d === 'string' && d)
+      return {
+        id,
+        title,
+        status: TASK_STATUSES.includes(t.status) ? t.status : 'todo',
+        ...(typeof t.owner === 'string' && t.owner ? { owner: t.owner } : {}),
+        ...(deps.length ? { deps } : {}),
+        ...(typeof t.result === 'string' && t.result ? { result: t.result } : {}),
+        at: typeof t.at === 'number' ? t.at : Date.now()
+      }
+    })
+    .filter(Boolean)
+}
+
 /** Coerce unknown JSON into a trustworthy doc without ever throwing (mirrors the container). */
 function normalize(raw) {
   if (!raw || typeof raw !== 'object') return emptyDoc()
@@ -54,7 +85,9 @@ function normalize(raw) {
     revision: typeof raw.revision === 'number' && raw.revision >= 0 ? raw.revision : 0,
     ...(typeof raw.broadcastAt === 'string' ? { broadcastAt: raw.broadcastAt } : {}),
     task: typeof raw.task === 'string' ? raw.task : '',
-    notes
+    notes,
+    // Absent stays absent so a pre-queue document round-trips unchanged on disk.
+    ...(Array.isArray(raw.tasks) ? { tasks: normalizeTasks(raw.tasks) } : {})
   }
 }
 
@@ -109,6 +142,52 @@ const TOOLS = [
       required: ['task'],
       additionalProperties: false
     }
+  },
+  {
+    name: 'workspace_submit',
+    description:
+      'Submit a new task into the shared task queue (todo column). Other agents can then claim it. Use for decomposed work items, not the overall goal (that is workspace_set_task).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'One-line task title (non-empty).' },
+        deps: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Ids of tasks this one waits on (advisory, optional).'
+        }
+      },
+      required: ['title'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'workspace_claim',
+    description:
+      'Claim a queued task for yourself: sets the owner and moves it to doing. Fails if it is already claimed or done.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The task id returned by workspace_submit/read.' },
+        owner: { type: 'string', description: 'Your agent name (non-empty).' }
+      },
+      required: ['taskId', 'owner'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'workspace_complete',
+    description:
+      'Mark a claimed task as done and optionally record its outcome. The result is mirrored into the shared-memory notes so every agent sees the outcome.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: 'The task id to close.' },
+        result: { type: 'string', description: 'Outcome summary (optional but recommended).' }
+      },
+      required: ['taskId'],
+      additionalProperties: false
+    }
   }
 ]
 
@@ -117,6 +196,20 @@ function textResult(text) {
 }
 function errorResult(text) {
   return { content: [{ type: 'text', text: String(text) }], isError: true }
+}
+
+/**
+ * Any task-queue mutation bumps `revision`: a polling agent diffs the counter, sees the move,
+ * and re-reads the queue. Notes stay untouched except workspace_complete's explicit mirror.
+ */
+function saveTasks(doc, tasks, note) {
+  doc.tasks = tasks
+  doc.revision = (typeof doc.revision === 'number' ? doc.revision : 0) + 1
+  doc.updatedAt = new Date().toISOString()
+  if (note) doc.notes.push({ id: newId(), ...note, ts: Date.now() })
+  return writeDoc(doc)
+    ? textResult(JSON.stringify({ ok: true, revision: doc.revision, tasks: doc.tasks }, null, 2))
+    : errorResult('Failed to write the shared context (read-only path?).')
 }
 
 function callTool(name, args) {
@@ -144,6 +237,55 @@ function callTool(name, args) {
     doc.updatedAt = new Date().toISOString()
     if (!writeDoc(doc)) return errorResult('Failed to write the shared context (read-only path?).')
     return textResult('Current shared task set.')
+  }
+  if (name === 'workspace_submit') {
+    const title = typeof a.title === 'string' ? a.title.trim() : ''
+    if (!title) return errorResult('workspace_submit needs a non-empty "title".')
+    const doc = readDoc()
+    const tasks = normalizeTasks(doc.tasks)
+    const deps = (Array.isArray(a.deps) ? a.deps : [])
+      .filter((d) => typeof d === 'string' && d.trim())
+      .map((d) => d.trim())
+    tasks.push({
+      id: newTaskId(),
+      title,
+      status: 'todo',
+      ...(deps.length ? { deps } : {}),
+      at: Date.now()
+    })
+    return saveTasks(doc, tasks)
+  }
+  if (name === 'workspace_claim') {
+    const owner = typeof a.owner === 'string' ? a.owner.trim() : ''
+    if (!owner) return errorResult('workspace_claim needs a non-empty "owner".')
+    const doc = readDoc()
+    const tasks = normalizeTasks(doc.tasks)
+    const t = tasks.find((x) => x.id === a.taskId)
+    if (!t) return errorResult('No such task: ' + String(a.taskId) + ' (see workspace_read).')
+    if (t.status === 'done') return errorResult(`Task ${t.id} is already done.`)
+    if (t.status === 'doing' && t.owner && t.owner !== owner)
+      return errorResult(`Task ${t.id} is already claimed by ${t.owner}.`)
+    t.status = 'doing'
+    t.owner = owner
+    t.at = Date.now()
+    return saveTasks(doc, tasks)
+  }
+  if (name === 'workspace_complete') {
+    const doc = readDoc()
+    const tasks = normalizeTasks(doc.tasks)
+    const t = tasks.find((x) => x.id === a.taskId)
+    if (!t) return errorResult('No such task: ' + String(a.taskId) + ' (see workspace_read).')
+    if (t.status === 'done') return errorResult(`Task ${t.id} is already done.`)
+    t.status = 'done'
+    const result = typeof a.result === 'string' ? a.result.trim() : ''
+    if (result) t.result = result
+    t.at = Date.now()
+    // Mirror the outcome into the shared memory — the plan's "done ⇒ visible to everyone".
+    const note = {
+      author: t.owner || 'agent',
+      text: `【任务完成】${t.title}${result ? ' — ' + result : ''}`
+    }
+    return saveTasks(doc, tasks, note)
   }
   return errorResult('Unknown tool: ' + name)
 }

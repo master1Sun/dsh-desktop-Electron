@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { copyFile, readdir, stat } from 'node:fs/promises'
 import { dirname, join, sep, basename } from 'node:path'
 import { simpleGit } from 'simple-git'
@@ -14,6 +14,7 @@ import {
 } from './project-classify'
 import { getSettings, isValidPort, updateSettings, applyNpmRegistryEnv } from '../shell/store'
 import { getNodeExePath, bundledEnv } from './node-runtime'
+import { resolveMcpPkgEntry } from './mcp-packages'
 import { normalizeRepoUrl, cloneWithAuthFallback, type CloneProgress } from '../update/git-updates'
 import { logEvent } from '../shell/events'
 import type { ImportOptions, InstallProgress } from '../../shared/types'
@@ -310,18 +311,21 @@ export function parseNpmSpec(spec: string): { pkg: string; version?: string } {
 }
 
 /**
- * Import a published npm package as a terminal (CLI) page — the cleanest way to host agent
- * CLIs (`@openai/codex`, `@anthropic-ai/claude-code`, …): the package's `bin` launcher runs
- * under the embedded terminal even when the tool itself is a native binary. A private wrapper
- * project is created under pages/ whose only dependency is the requested package, installed
- * with the bundled Node/npm through the container's configured registry; a package that
- * declares no runnable `bin` is rolled back — a library has nothing the container can start.
+ * Import a published npm package as a *capability* — the cleanest way to host agent CLIs
+ * (`@openai/codex`, `@anthropic-ai/claude-code`, …): the package's `bin` launcher runs under the
+ * embedded terminal even when the tool itself is a native binary. The package installs under
+ * `userData/capabilities/<id>` (a per-tool folder in the app-data dir, mirroring where dsh /
+ * openclaw / mcp are provisioned), while `pages/<id>` keeps only a thin terminal manifest whose
+ * `startCommand` launches the entry from that capability dir and which records `npmPackage` +
+ * `capabilityDir` so 「帮助 ▸ 更新检测」 can compare the installed version against the registry and
+ * re-provision it in place. A package that declares no runnable `bin` is rolled back.
  */
 export async function installFromNpm(
   pagesDir: string,
   spec: string,
   name?: string,
-  onProgress?: (p: InstallProgress) => void
+  onProgress?: (p: InstallProgress) => void,
+  capabilitiesDir = join(pagesDir, '..', 'capabilities')
 ): Promise<string> {
   const { pkg, version } = parseNpmSpec(spec)
   let dirName = (name || '').trim().replace(/[^\w.-]/g, '')
@@ -329,21 +333,24 @@ export async function installFromNpm(
   if (!dirName || dirName === '.' || dirName === '..') throw new Error(m('install.dirNameNeeded'))
   const target = join(pagesDir, dirName)
   if (existsSync(target)) throw new Error(m('dsh.pageExists', { id: dirName }))
+  // The capability's real files live in a sibling-of-pages store (userData/capabilities/<id>),
+  // not in the page dir — the page keeps only its manifest.
+  const capDir = join(capabilitiesDir, dirName)
   const specLabel = `${pkg}@${version || 'latest'}`
   // See installFromGit: expose the source spec + target folder to the top progress bar.
   const emit = (p: Partial<InstallProgress>): void =>
     onProgress?.({ op: 'npm', phase: 'preparing', source: specLabel, target: dirName, ...p } as InstallProgress)
   emit({ phase: 'preparing' })
-  mkdirSync(target, { recursive: true })
+  mkdirSync(capDir, { recursive: true })
   writeFileSync(
-    join(target, 'package.json'),
+    join(capDir, 'package.json'),
     JSON.stringify({ name: dirName.toLowerCase(), version: '0.0.0', private: true }, null, 2) + '\n',
     'utf-8'
   )
   applyNpmRegistryEnv()
   const cli = bundledNpmCli()
   if (!existsSync(cli)) {
-    rmSync(target, { recursive: true, force: true })
+    rmSync(capDir, { recursive: true, force: true })
     throw new Error(m('install.npmMissing'))
   }
   // Indeterminate phase: npm has no byte progress, so stream its last output line as the caption.
@@ -352,7 +359,7 @@ export async function installFromNpm(
     await runStream(
       getNodeExePath(),
       [cli, 'install', specLabel, '--no-audit', '--no-fund'],
-      target,
+      capDir,
       `npm install ${specLabel}`,
       (line) => emit({ phase: 'installing', message: line }),
       // mirror the npm install into the new page's own log file, like a hosted page's output
@@ -360,28 +367,23 @@ export async function installFromNpm(
     )
   } catch (err) {
     // Nothing usable landed (bad name, unpublished version, registry offline) — remove the empty
-    // wrapper so a retry starts clean; the message already names the npm failure.
-    rmSync(target, { recursive: true, force: true })
+    // capability store so a retry starts clean; the message already names the npm failure.
+    rmSync(capDir, { recursive: true, force: true })
     throw err
   }
   emit({ phase: 'validating' })
-  // Resolve the package's own runnable bin inside node_modules (scoped names nest one deeper).
-  const pkgDir = join(target, 'node_modules', ...pkg.split('/'))
-  const meta = readPkgSafe(pkgDir)
-  let binRel: string | null = null
-  const bin = meta?.bin
-  if (typeof bin === 'string') binRel = bin
-  else if (bin && typeof bin === 'object') {
-    const short = pkg.split('/').pop() as string
-    binRel = bin[short] ?? Object.values(bin)[0] ?? null
-  }
-  const entry = binRel ? binRel.replace(/^\.\//, '') : null
-  if (!entry || !existsSync(join(pkgDir, entry))) {
-    rmSync(target, { recursive: true, force: true })
+  // Resolve the package's runnable bin inside the capability dir (shared with the MCP resolver:
+  // string bin → use it; object bin → prefer the short-name key, else the first value).
+  const entry = resolveMcpPkgEntry(pkg, capDir)
+  if (!entry) {
+    rmSync(capDir, { recursive: true, force: true })
     logEvent({ level: 'warn', kind: 'install.rejected', pageId: dirName, detail: 'install.npmNoBin' })
     throw new Error(m('install.npmNoBin', { pkg }))
   }
-  // Terminal-kind manifest: no port, and the pty launches `node <entry>` from the page folder.
+  // Thin terminal manifest in pages/<id>: no port, and the pty launches `node "<entry>"` (quoted —
+  // the capability dir may contain spaces) inside the embedded terminal. npmPackage/capabilityDir
+  // are what 更新检测 reads to offer a compare + re-provision against the registry.
+  mkdirSync(target, { recursive: true })
   const manifest: ContainerManifest = {
     name: dirName,
     description: {
@@ -389,7 +391,9 @@ export async function installFromNpm(
       en: msgIn('en', 'install.importedNpmDesc')
     },
     kind: 'terminal',
-    startCommand: `node node_modules/${pkg}/${entry}`
+    startCommand: `node "${entry}"`,
+    npmPackage: pkg,
+    capabilityDir: capDir
   }
   writeFileSync(join(target, 'container.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf-8')
   // Same non-fatal validation contract as the git/dir paths.
@@ -546,7 +550,25 @@ export function removePage(pagesDir: string, id: string): void {
   if (BUILTIN_PAGE_IDS.has(id)) throw new Error(m('install.builtinUndeletable', { id }))
   const target = join(pagesDir, id)
   if (!target.startsWith(pagesDir + sep)) throw new Error(m('install.illegalPageId'))
+  // An imported npm CLI keeps its real files in userData/capabilities/<id> (see installFromNpm) —
+  // drop that store too so removing the page never orphans a globally-provisioned package.
+  let capabilityDir: string | undefined
+  try {
+    const raw = JSON.parse(readFileSync(join(target, 'container.json'), 'utf-8')) as ContainerManifest
+    if (typeof raw.capabilityDir === 'string' && raw.capabilityDir.trim()) capabilityDir = raw.capabilityDir.trim()
+  } catch {
+    /* no manifest / unreadable — only the page dir gets removed */
+  }
   rmSync(target, { recursive: true, force: true })
+  if (capabilityDir) rmSync(capabilityDir, { recursive: true, force: true })
   const { [id]: _dropped, ...pagePorts } = getSettings().pagePorts ?? {}
-  updateSettings({ pagePorts })
+  // #4: drop the removed page's own dep override and any surviving reference to it, so a
+  // deleted page can't linger as a dangling dep that would wedge another page's startWithDeps.
+  const { [id]: _depDropped, ...pageDepsRest } = getSettings().pageDeps ?? {}
+  const pageDeps: Record<string, string[]> = {}
+  for (const [k, v] of Object.entries(pageDepsRest)) {
+    const kept = (v ?? []).filter((d) => d !== id)
+    if (kept.length) pageDeps[k] = kept
+  }
+  updateSettings({ pagePorts, pageDeps })
 }

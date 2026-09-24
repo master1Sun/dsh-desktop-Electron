@@ -250,9 +250,15 @@ onMounted(() => {
           {{ t('pageMgr.actionTerminal') }}
         </el-button>
         <!-- C2: the page in its own window; a CLI page starts a second, independent session there. -->
-        <el-button size="small" :title="t('pageMgr.popoutTip')" @click="popout">
-          {{ t('pageMgr.actionPopout') }}
-        </el-button>
+        <el-tooltip
+          :content="t('pageMgr.popoutTip')"
+          placement="top"
+          popper-class="dsh-tip-popper"
+        >
+          <el-button size="small" @click="popout">
+            {{ t('pageMgr.actionPopout') }}
+          </el-button>
+        </el-tooltip>
       </div>
       <label class="row-switch">
         <el-switch v-model="autoStart" size="small" />

@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import * as nodeFs from 'node:fs'
 import {
+  createReadStream,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -13,6 +14,7 @@ import {
 } from 'node:fs'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { app } from 'electron'
 import {
@@ -105,6 +107,41 @@ const MIN_ASAR_BYTES = 1024 * 1024
 export interface StagedAsarUpdate {
   version: string
   commit: string
+}
+
+/**
+ * Streaming SHA-512 (hex) of an on-disk file. The release zip is ~130 MB, so this never
+ * slurps it into a buffer — it flows through the hash chunk by chunk.
+ */
+export async function sha512OfFile(path: string): Promise<string> {
+  const hash = createHash('sha512')
+  await pipeline(
+    createReadStream(path),
+    new Transform({
+      transform(chunk: Buffer, _enc, cb) {
+        hash.update(chunk)
+        cb()
+      }
+    })
+  )
+  return hash.digest('hex')
+}
+
+/**
+ * Re-hash the staged app.zip against the sha512 recorded at download time — the integrity gate
+ * the OTA row runs before offering 重启应用, so a zip truncated or tampered with after staging
+ * never gets swapped in. Releases staged before hashing existed (no meta.sha512) keep passing on
+ * the legacy size-only contract.
+ */
+export async function verifyStagedIntegrity(): Promise<boolean> {
+  const meta = readMeta()
+  if (!meta?.pendingAsar || !meta.sha512) return true
+  const zip = join(updatesRoot(), dirname(meta.pendingAsar), 'app.zip')
+  try {
+    return (await sha512OfFile(zip)) === meta.sha512
+  } catch {
+    return false // zip gone / unreadable — as unverifiable as a mismatch
+  }
 }
 
 /**
@@ -390,6 +427,23 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
   mkdirSync(dir, { recursive: true })
   const part = join(dir, 'app.zip.part')
 
+  // Content integrity: the publisher ships sha512.txt next to app.zip. Releases published
+  // before that field existed have none — log the gap once and keep the legacy size-only
+  // contract for them (a re-publish picks the check up with no client update needed).
+  let expectedHash: string | null = null
+  try {
+    expectedHash =
+      runGit(['--git-dir', gitDir(), 'show', `${tip.commit}:sha512.txt`]).trim().split(/\r?\n/)[0] ||
+      null
+  } catch {
+    logEvent({
+      level: 'warn',
+      kind: 'ota.hashMissing',
+      detail: `release ${tip.commit.slice(0, 8)} carries no sha512.txt — size-only check`,
+      meta: { commit: tip.commit.slice(0, 8) }
+    })
+  }
+
   let resumeFrom = 0
   if (existsSync(part)) {
     const size = statSync(part).size
@@ -401,6 +455,19 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
 
   if (statSync(part).size !== total)
     throw new Error(m('git.asarSizeMismatch', { want: total, got: statSync(part).size }))
+
+  // Hash the complete download before it is renamed onto the final name. A mismatch deletes the
+  // .part outright: resuming from bytes we now know are broken could never converge anyway.
+  const actualHash = await sha512OfFile(part)
+  if (expectedHash && actualHash !== expectedHash) {
+    rmSync(part, { force: true })
+    logEvent({
+      level: 'error',
+      kind: 'ota.hashMismatch',
+      meta: { commit: tip.commit.slice(0, 8), want: expectedHash.slice(0, 16), got: actualHash.slice(0, 16) }
+    })
+    throw new Error(m('update.hashMismatch'))
+  }
 
   const zipPath = join(dir, 'app.zip')
   rmSync(zipPath, { force: true }) // same-commit re-download: replace the prior copy
@@ -439,7 +506,8 @@ async function downloadAsar(tip: ReleaseTip, name: string, onProgress?: Progress
       broken: false,
       pendingAsar: join(tip.commit, 'app.asar'),
       version: tip.version,
-      commit: tip.commit
+      commit: tip.commit,
+      sha512: actualHash
     })
   )
   // Sweep older release folders we no longer reference; never touch the running/current one.
@@ -478,6 +546,13 @@ export async function checkAsarUpdate(name: string, dir: string): Promise<Update
       // Staged but NOT newer than what's running (a leftover download of an older release,
       // or one already applied): offering a restart here would downgrade the app, so drop
       // the pending entry and let the row read as up-to-date instead.
+      clearStagedUpdate()
+      staged = null
+    }
+    if (staged && !(await verifyStagedIntegrity())) {
+      // The staged zip no longer matches its recorded hash (truncated sweep, disk rot, manual
+      // edit): drop the pending pointer so the restart offer never swaps in a bad artifact.
+      logEvent({ level: 'warn', kind: 'ota.stagedCorrupt', meta: { version: staged.version } })
       clearStagedUpdate()
       staged = null
     }
@@ -692,6 +767,8 @@ interface UpdateMeta {
   broken?: boolean
   /** version that was running when the last staged swap replaced it (rollback target) */
   rollbackFromVersion?: string | null
+  /** hex SHA-512 of the staged app.zip, verified against the published sha512.txt at download */
+  sha512?: string | null
 }
 
 function readMeta(): UpdateMeta | null {

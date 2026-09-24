@@ -1,6 +1,11 @@
 import { reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ExternalSite, Locale, DshReleaseChannel, ContainerReleaseChannel } from '../../../shared/types'
+import type {
+  ExternalSite,
+  Locale,
+  DshReleaseChannel,
+  ContainerReleaseChannel
+} from '../../../shared/types'
 import { t } from '../i18n'
 
 export interface DefaultView {
@@ -47,10 +52,16 @@ export interface Settings {
   memWarnMb?: number
   /** 内嵌终端面板被拖出的高度（px），下次启动恢复 */
   terminalHeight?: number
+  /** 每个终端会话保留的 scrollback 行数；缺省 8000，上限 50000 */
+  terminalScrollback?: number
+  /** 终端展示模式：内嵌页面容器（默认，不可最小化）/ 浮窗覆盖层（可最小化） */
+  terminalMode?: 'embedded' | 'floating'
   /** #26: 记住并恢复窗口尺寸/位置/最大化状态 */
   rememberWindowBounds?: boolean
   /** #26: 'auto' 跟随系统减少动效偏好，'on'/'off' 仅对本应用强制 */
   reduceMotion?: 'auto' | 'on' | 'off'
+  /** 深色主题下窗口边框与浮层的流光描边（装饰）；关=隐藏所有跑马灯环，缺省视为开 */
+  marqueeBorder?: boolean
   /** #26: 容器与其托管页面安装依赖走的 npm registry；空 = 内置镜像 */
   npmRegistry?: string
   /** #26: 托盘菜单列出页面的程度 */
@@ -71,6 +82,16 @@ export interface Settings {
   persistentServices?: boolean
   /** 自定义快捷键：action id -> accelerator；缺省的 action 用内置默认值 */
   keybindings?: Record<string, string>
+  /** #11：容器自身 MCP Server 总开关（默认关）：开=主进程监听回环 HTTP，导出 URL/token 给 agent */
+  containerMcpServer?: boolean
+  /** #1：autopilot 自动派发总开关：入队即派发到选定的 CLI 智能体页 PTY */
+  autopilotEnabled?: boolean
+  /** #1：autopilot 执行器页 pageId（kind:'terminal' 的智能体页） */
+  autopilotExecutorPage?: string
+  /** #1：autopilot 并发数，默认 1 */
+  autopilotConcurrency?: number
+  /** #1：注入执行器的 prompt 模板，含 {title}/{id}/{deps} 占位符；空=内置默认 */
+  autopilotPrompt?: string
 }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
@@ -125,6 +146,7 @@ export const useSettingsStore = defineStore('settings', () => {
     terminalHeight: 320,
     rememberWindowBounds: true,
     reduceMotion: 'auto',
+    marqueeBorder: true,
     npmRegistry: '',
     trayPageEntries: 'all',
     trayBadge: 'all',

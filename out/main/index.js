@@ -1,28 +1,31 @@
-import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, net, BrowserWindow, nativeImage, Tray, Menu, dialog, session, screen, ipcMain as ipcMain$1, webContents } from "electron";
+import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, BrowserWindow, net, screen, ipcMain as ipcMain$1, dialog, webContents, session, nativeImage, Tray, Menu } from "electron";
 import * as fs from "node:fs";
-import fs__default, { existsSync, mkdirSync, readdirSync, statSync, openSync, readSync, closeSync, appendFileSync, renameSync, watch, readFileSync, unlinkSync, writeFileSync as writeFileSync$1, rmSync, createWriteStream, cpSync, promises, copyFileSync } from "node:fs";
+import fs__default, { existsSync, mkdirSync, readdirSync, appendFileSync, statSync, renameSync, openSync, readSync, closeSync, watch, readFileSync, unlinkSync, writeFileSync as writeFileSync$1, rmSync, cpSync, createWriteStream, createReadStream, promises, copyFileSync } from "node:fs";
 import path, { join, delimiter, extname, basename, dirname, sep } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { spawn, execFile, execFileSync, spawnSync } from "node:child_process";
 import { createServer, createConnection } from "node:net";
-import { get as get$2 } from "node:http";
+import { get as get$2, createServer as createServer$1 } from "node:http";
 import { get as get$1 } from "node:https";
 import * as os from "node:os";
 import os__default, { homedir as homedir$1 } from "node:os";
 import process$1 from "node:process";
 import { promisify, isDeepStrictEqual } from "node:util";
-import crypto, { randomBytes } from "node:crypto";
+import crypto, { randomBytes, createHash } from "node:crypto";
 import assert from "node:assert";
 import { Transform } from "node:stream";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import * as pty from "node-pty";
 import { pipeline } from "node:stream/promises";
-import { copyFile, readdir, stat } from "node:fs/promises";
 import { simpleGit } from "simple-git";
 import { join as join$1 } from "path";
+import { copyFile, readdir, stat } from "node:fs/promises";
 import { createSocket } from "node:dgram";
-import * as pty from "node-pty";
 import __cjs_mod__ from "node:module";
 const __filename = import.meta.filename;
 const __dirname = import.meta.dirname;
@@ -78,6 +81,8 @@ const IPC = {
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
   ResetBuiltinPage: "container:reset-builtin-page",
   SetPagePort: "container:set-page-port",
+  /** #4: override a page's container.json dependsOn (pageDeps map) without editing its file */
+  SetPageDeps: "container:set-page-deps",
   OpenPageExternal: "container:open-page-external",
   GetSettings: "container:get-settings",
   UpdateSettings: "container:update-settings",
@@ -139,6 +144,7 @@ const IPC = {
   GetIsMaximized: "container:get-is-maximized",
   OnMaximizedChanged: "container:maximized-changed",
   PtyStart: "container:pty-start",
+  PtyShells: "container:pty-shells",
   PageRunSpec: "container:page-run-spec",
   PtyWrite: "container:pty-write",
   PtyResize: "container:pty-resize",
@@ -185,6 +191,10 @@ const IPC = {
   GetWebData: "container:get-web-data",
   /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
   ClearWebData: "container:clear-web-data",
+  /** #8: recursive disk-usage breakdown of userData/pages/envRoot/logs/workspace/… → DiskReport */
+  GetDiskReport: "container:get-disk-report",
+  /** #8: wipe one allowlisted disk scope ('webcache' | 'logs') → DiskReport */
+  ClearDiskScope: "container:clear-disk-scope",
   /** activity timeline: read filtered events from logs/events.jsonl (ListEventsArgs → ContainerEvent[]) */
   ListEvents: "container:list-events",
   /** broadcast: one new activity-timeline event (ContainerEvent) */
@@ -214,8 +224,14 @@ const IPC = {
   McpCallTool: "container:mcp-call-tool",
   /** broadcast: hub server states changed (McpServerState[]) */
   OnMcpStateChanged: "container:mcp-state-changed",
+  /** broadcast: the hub's recent tool-call feed changed (McpCallEvent[], newest last) */
+  OnMcpCalls: "container:mcp-calls",
+  /** MCP hub: cold-read the buffered tool-call feed → McpCallEvent[] */
+  GetMcpCalls: "container:mcp-get-calls",
   /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
   McpBridgeInfo: "container:mcp-bridge-info",
+  /** #11: connection info for the container's OWN MCP server (gated) → ContainerMcpInfo */
+  GetContainerMcpInfo: "container:get-container-mcp-info",
   /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
   McpPackagesStatus: "container:mcp-packages-status",
   /** shared workspace: read the container-owned context + its locations → WorkspaceInfo */
@@ -223,7 +239,13 @@ const IPC = {
   /** shared workspace: persist a partial edit ({ task?, notes? }) → WorkspaceContext */
   WorkspaceSave: "container:workspace-save",
   /** shared workspace: push the current task to running agents (bump revision + log a note) → WorkspaceContext */
-  WorkspaceBroadcast: "container:workspace-broadcast"
+  WorkspaceBroadcast: "container:workspace-broadcast",
+  /**
+   * route one renderer toast to the OS notification center (ToastLevel + text). The renderer
+   * suppresses its in-app corner toast and calls this only while `systemNotifications` is on;
+   * resolves false when the platform can't notify, so the renderer falls back to the toast.
+   */
+  ShowSystemToast: "container:show-system-toast"
 };
 let cached = null;
 function invalidateNodeRuntimeCache() {
@@ -11535,6 +11557,8 @@ const DEFAULTS = {
   downloadDir: "",
   pageEnvs: {},
   pagePorts: {},
+  // #4: container-side per-page dependency overrides (pageId -> [depId…]); shadows container.json
+  pageDeps: {},
   // free-form per-page KEY=VALUE overrides, kept apart from the directory-typed pageEnvs
   pageCustomEnvs: {},
   // DSH tracks the `alpha` dist-tag (where its prereleases are published); switchable in Settings.
@@ -11561,11 +11585,17 @@ const DEFAULTS = {
   // bottom-docked terminal height the user dragged out; keep the default in sync with
   // TerminalDrawer's DEFAULT_H.
   terminalHeight: 320,
+  // scrollback lines kept per terminal surface; clamped to TERMINAL_SCROLLBACK_MAX at create time.
+  terminalScrollback: 8e3,
+  // how the terminal is shown: docked into the page area, or a floating overlay that can minimize.
+  terminalMode: "embedded",
   // #26: restore the last window geometry/maximized state. On by default: a container that
   // relaunches at 1280x860 every time is annoying once you've arranged it beside other windows.
   rememberWindowBounds: true,
   // #26: 'auto' keeps the previous behaviour of following the OS reduced-motion preference.
   reduceMotion: "auto",
+  // the dark-mode flowing-light border ring is on by default (decorative; switchable in Settings).
+  marqueeBorder: true,
   // #26: '' = the built-in mirror (NPM_REGISTRY_DEFAULT), i.e. the pre-setting behaviour.
   npmRegistry: "",
   // #26: tray defaults mirror what the menu/badge did before they were configurable.
@@ -11623,6 +11653,10 @@ function resolvePagesDir() {
   if (process.env.DSH_PAGES_DIR) return process.env.DSH_PAGES_DIR;
   if (app$1.isPackaged) return join(app$1.getPath("userData"), "pages");
   return join(resolveProjectDir(), "pages");
+}
+function resolveCapabilitiesDir() {
+  if (process.env.DSH_CAPABILITIES_DIR) return process.env.DSH_CAPABILITIES_DIR;
+  return join(app$1.getPath("userData"), "capabilities");
 }
 function resolveInstallDir() {
   if (app$1.isPackaged) {
@@ -11843,6 +11877,7 @@ const zh = {
   "download.doneTitle": "下载完成",
   "download.doneBody": "{name} 已保存到 {dir}",
   "ipc.portRange": "端口需为 1-65535 的整数",
+  "ipc.depsCycle": "依赖存在循环：{chain}",
   "ipc.notTerminal": "{id} 不是终端类项目",
   "ipc.unknownTarget": "未知的目标: {target}",
   "ipc.containerRoot": "容器根目录",
@@ -11890,6 +11925,7 @@ const zh = {
   "notify.updateReadyBody": "桌面控制台 v{version} 已下载完成，重启后生效",
   "log.mainLabel": "主进程日志",
   "update.noRollback": "当前没有可回退的上一版本备份（仅在完成过一次在线更新后可用）",
+  "update.hashMismatch": "更新包内容校验失败（SHA-512 不匹配），已丢弃本次下载，请重试",
   "update.rollbackFailed": "回退调度失败，请查看日志",
   "update.relaunchDev": "当前处于开发模式（npm run dev），自我重启会连带关闭开发服务器并留下黑屏窗口，已取消本次重启。主进程改动会由 electron-vite 自动重建并重启；如需完全重启，请手动停止并重新运行 npm run dev",
   "diag.exportTitle": "导出诊断报告",
@@ -11983,7 +12019,7 @@ const zh = {
   "upd.openclawUpToDate": "OpenClaw 已是最新（{after}）",
   "upd.mcpName": "MCP 内置组件",
   "upd.mcpMissingCount": "{n} 个待下载",
-  "upd.mcpOutdatedPrefix": "可更新",
+  "upd.mcpUpdatableCount": "{n} 个可更新",
   "upd.mcpRootMissing": "未确定 MCP 组件目录",
   "upd.mcpReady": "MCP 内置组件已就绪",
   "upd.mcpAlreadyReady": "MCP 内置组件已是最新（{after}）",
@@ -12056,6 +12092,7 @@ const en = {
   "download.doneTitle": "Download complete",
   "download.doneBody": "{name} saved to {dir}",
   "ipc.portRange": "Port must be an integer from 1 to 65535",
+  "ipc.depsCycle": "Dependency cycle: {chain}",
   "ipc.notTerminal": "{id} is not a terminal project",
   "ipc.unknownTarget": "Unknown target: {target}",
   "ipc.containerRoot": "Container root",
@@ -12103,6 +12140,7 @@ const en = {
   "notify.updateReadyBody": "Desktop container v{version} downloaded — restart to apply",
   "log.mainLabel": "Main process log",
   "update.noRollback": "No previous-version backup is available to roll back to (only offered after one OTA update has completed)",
+  "update.hashMismatch": "The update package failed its SHA-512 content check; the download was discarded — please retry",
   "update.rollbackFailed": "Failed to schedule the rollback — check the logs",
   "update.relaunchDev": "Running in dev mode (npm run dev): a self-relaunch would tear down the renderer dev server and leave a black window, so this relaunch was cancelled. electron-vite already rebuilds and restarts the app for main-process edits — to fully restart, stop and re-run npm run dev manually",
   "diag.exportTitle": "Export diagnostic report",
@@ -12196,7 +12234,7 @@ const en = {
   "upd.openclawUpToDate": "OpenClaw is up to date ({after})",
   "upd.mcpName": "MCP built-in components",
   "upd.mcpMissingCount": "{n} to download",
-  "upd.mcpOutdatedPrefix": "update available",
+  "upd.mcpUpdatableCount": "{n} updatable",
   "upd.mcpRootMissing": "MCP components directory not resolved",
   "upd.mcpReady": "MCP built-in components are ready",
   "upd.mcpAlreadyReady": "MCP built-in components are up to date ({after})",
@@ -12293,7 +12331,7 @@ function isoShanghai(d = /* @__PURE__ */ new Date()) {
   return `${shifted.toISOString().replace("Z", "")}${sign}${hh}:${mm}`;
 }
 const MAX_BYTES$1 = 5 * 1024 * 1024;
-const ROTATED_KEEP = 1;
+const ROTATED_KEEP = 2;
 let logsRoot = null;
 let installed = false;
 function logsDir() {
@@ -12738,6 +12776,12 @@ async function killPortHolder(port) {
   await new Promise((r) => setTimeout(r, 700));
   return first;
 }
+const portHolder = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  findPortHolder,
+  killPortHolder,
+  probePortBind
+}, Symbol.toStringTag, { value: "Module" }));
 function notifyEvent(titleKey, bodyKey, params, revealPath) {
   try {
     if (getSettings().systemNotifications === false) return;
@@ -12748,6 +12792,44 @@ function notifyEvent(titleKey, bodyKey, params, revealPath) {
   } catch (err) {
     console.warn("[notify] failed (ignored):", err.message);
   }
+}
+function notifyToast(_level, text) {
+  if (getSettings().systemNotifications === false) return Promise.resolve(false);
+  if (!Notification.isSupported()) return Promise.resolve(false);
+  const body = (text || "").trim();
+  if (!body) return Promise.resolve(false);
+  return new Promise((resolve2) => {
+    let settled = false;
+    const done = (shown) => {
+      if (settled) return;
+      settled = true;
+      resolve2(shown);
+    };
+    try {
+      const n = new Notification({ title: m("app.title"), body });
+      n.once("show", () => done(true));
+      n.once("click", () => done(true));
+      n.once("close", () => done(true));
+      n.show();
+      setTimeout(() => done(false), 1500);
+    } catch (err) {
+      console.warn("[notify] toast failed (ignored):", err.message);
+      done(false);
+    }
+  });
+}
+let current = null;
+function setContainerEndpoint(v) {
+  current = v;
+}
+function getContainerEndpoint() {
+  return current;
+}
+const CONTAINER_BRIDGE_ID = "dsh-container";
+function containerHttpEntry() {
+  const ep = getContainerEndpoint();
+  if (!ep) return null;
+  return { id: CONTAINER_BRIDGE_ID, url: ep.url, headers: { authorization: `Bearer ${ep.bearerToken}` } };
 }
 function bridgeDir() {
   return join(app$1.getPath("userData"), "mcp-bridge");
@@ -12762,7 +12844,7 @@ function buildCatalog(servers, tools) {
   return {
     version: 1,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    servers: servers.filter((s) => s.spec.enabled !== false && s.spec.autoStart === true).map((s) => ({
+    servers: servers.filter((s) => s.spec.enabled !== false).map((s) => ({
       ...s.spec,
       status: s.status,
       tools: (s.status === "connected" ? tools : []).filter((t) => t.serverId === s.spec.id).map((t) => ({
@@ -12784,6 +12866,8 @@ function buildMcpServersJson(servers) {
       ...s.cwd ? { cwd: s.cwd } : {}
     };
   }
+  const c = containerHttpEntry();
+  if (c) out[c.id] = { url: c.url, headers: c.headers };
   return { mcpServers: out };
 }
 const BRIDGE_BEGIN = "# >>> dsh-mcp-bridge >>> (managed by 桌面控制台 MCP hub; edit above/below, never between)";
@@ -12801,6 +12885,14 @@ function renderCodexBlock(servers) {
       lines.push(`[mcp_servers.${s.id}.env]`);
       for (const [k, v] of Object.entries(s.env)) lines.push(`${k} = ${JSON.stringify(v)}`);
     }
+    lines.push("");
+  }
+  const c = containerHttpEntry();
+  if (c) {
+    lines.push(`[mcp_servers.${c.id}]`);
+    lines.push(`url = ${JSON.stringify(c.url)}`);
+    lines.push(`[mcp_servers.${c.id}.headers]`);
+    for (const [k, v] of Object.entries(c.headers)) lines.push(`${k} = ${JSON.stringify(v)}`);
     lines.push("");
   }
   lines.push(BRIDGE_END);
@@ -12870,6 +12962,8 @@ function mergeOpenclawMcpConfig(cfg, servers) {
       enabled: true
     };
   }
+  const c = containerHttpEntry();
+  if (c) out[openclawServerKey(c.id)] = { url: c.url, headers: c.headers, enabled: true };
   return { ...cfg, mcp: { ...mcp, servers: out } };
 }
 function syncOpenclawMcpConfig(servers, cfgPath) {
@@ -12906,6 +13000,14 @@ function renderDshMcpPatch(servers) {
       ...s.env && Object.keys(s.env).length ? { env: s.env } : {}
     }
   }));
+  const c = containerHttpEntry();
+  if (c) {
+    entries2.push({
+      id: `dsh-mcp-${mcpNamespaceSlug(c.id)}`,
+      name: "@deepseek-ai/dsh-mcp-client",
+      config: { serverName: dshServerName(c.id), transport: "http", url: c.url, headers: c.headers }
+    });
+  }
   return entries2.length ? [{ insert: entries2 }] : [];
 }
 function syncDshMcpPatch(servers) {
@@ -12929,6 +13031,38 @@ function emptyContext() {
 function newNoteId() {
   return `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
+const TASK_STATUSES = ["todo", "doing", "done"];
+function normalizeTasks(raw) {
+  const seen = /* @__PURE__ */ new Set();
+  return (Array.isArray(raw) ? raw : []).map((t) => {
+    if (!t || typeof t !== "object") return null;
+    const r = t;
+    const title2 = typeof r.title === "string" ? r.title : "";
+    if (!title2.trim()) return null;
+    const id2 = typeof r.id === "string" && r.id ? r.id : newTaskId();
+    if (seen.has(id2)) return null;
+    seen.add(id2);
+    const deps = (Array.isArray(r.deps) ? r.deps : []).filter(
+      (d) => typeof d === "string" && !!d
+    );
+    return {
+      id: id2,
+      title: title2,
+      status: TASK_STATUSES.includes(r.status) ? r.status : "todo",
+      ...typeof r.owner === "string" && r.owner ? { owner: r.owner } : {},
+      ...deps.length ? { deps } : {},
+      ...typeof r.result === "string" && r.result ? { result: r.result } : {},
+      at: typeof r.at === "number" ? r.at : Date.now(),
+      // #1 autopilot bookkeeping must survive every normalize, or a task would forget it was
+      // already dispatched / how many tries it spent and get re-run in a loop.
+      ...typeof r.dispatchedAt === "number" ? { dispatchedAt: r.dispatchedAt } : {},
+      ...typeof r.attempts === "number" ? { attempts: r.attempts } : {}
+    };
+  }).filter((t) => t !== null);
+}
+function newTaskId() {
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
 function normalizeContext(raw) {
   if (!raw || typeof raw !== "object") return emptyContext();
   const o = raw;
@@ -12950,8 +13084,23 @@ function normalizeContext(raw) {
     revision: typeof o.revision === "number" && o.revision >= 0 ? o.revision : 0,
     ...typeof o.broadcastAt === "string" ? { broadcastAt: o.broadcastAt } : {},
     task: typeof o.task === "string" ? o.task : "",
-    notes
+    notes,
+    // Absent stays absent so a pre-queue document round-trips unchanged on disk.
+    ...Array.isArray(o.tasks) ? { tasks: normalizeTasks(o.tasks) } : {}
   };
+}
+const taskListeners = /* @__PURE__ */ new Set();
+function onWorkspaceTasksChanged(fn) {
+  taskListeners.add(fn);
+  return () => taskListeners.delete(fn);
+}
+function notifyTasksChanged(ctx) {
+  for (const fn of [...taskListeners]) {
+    try {
+      fn(ctx);
+    } catch {
+    }
+  }
 }
 function readWorkspace() {
   try {
@@ -12980,19 +13129,23 @@ function ensureWorkspace() {
 }
 function writeWorkspace(patch) {
   const cur = ensureWorkspace();
+  const nextTasks = patch.tasks !== void 0 ? normalizeTasks(patch.tasks) : cur.tasks;
+  const tasksChanged = JSON.stringify(nextTasks ?? null) !== JSON.stringify(cur.tasks ?? null);
   const next2 = {
     version: 1,
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    // A plain edit keeps the broadcast signal; only broadcastWorkspace moves it forward.
-    revision: cur.revision,
+    // A plain edit keeps the broadcast signal; broadcasts and task changes move it forward.
+    revision: cur.revision + (tasksChanged ? 1 : 0),
     ...cur.broadcastAt ? { broadcastAt: cur.broadcastAt } : {},
     task: patch.task !== void 0 ? patch.task : cur.task,
-    notes: patch.notes !== void 0 ? normalizeContext({ notes: patch.notes }).notes : cur.notes
+    notes: patch.notes !== void 0 ? normalizeContext({ notes: patch.notes }).notes : cur.notes,
+    ...nextTasks !== void 0 ? { tasks: nextTasks } : {}
   };
   try {
     writeFileSync$1(workspaceFile(), JSON.stringify(next2, null, 2), "utf8");
   } catch {
   }
+  if (tasksChanged) notifyTasksChanged(next2);
   return next2;
 }
 function broadcastWorkspace() {
@@ -13006,7 +13159,8 @@ function broadcastWorkspace() {
     revision: (Number.isFinite(cur.revision) ? cur.revision : 0) + 1,
     broadcastAt: now.toISOString(),
     task: cur.task,
-    notes
+    notes,
+    ...cur.tasks !== void 0 ? { tasks: cur.tasks } : {}
   };
   try {
     writeFileSync$1(workspaceFile(), JSON.stringify(next2, null, 2), "utf8");
@@ -13081,7 +13235,7 @@ function mcpPackagesStatus() {
     version: mcpPkgVersion(pkg)
   }));
 }
-const WORKSPACE_SERVER_SOURCE = "#!/usr/bin/env node\n/**\n * dsh-workspace MCP server — the container's shared-context layer, exposed as MCP tools.\n *\n * Why this exists: the container hands every hosted agent a pointer to one shared document\n * (DSH_WORKSPACE_FILE) via env, but a bare path is only useful to an agent that happens to be\n * written to read it. Registering this server in the bridge (mcp-servers.json / codex\n * config.toml) means any MCP-speaking agent can `workspace_read` the current task + shared\n * memory and `workspace_append` a finding back into it — a real read/write channel, not just a\n * path. The agent spawns its own copy of this process (stdio), exactly like it does for the\n * curated npm servers; the container never proxies the calls.\n *\n * Dependency-free on purpose: it runs under the bundled node.exe from userData, where app.asar\n * — and therefore @modelcontextprotocol/sdk — is not readable. The only external piece is the\n * MCP stdio wire format: newline-delimited JSON-RPC 2.0. It reads/writes the same context.json\n * the container's UI edits, tolerating anything a hand-edit or a peer agent may have written.\n */\nimport { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'\nimport { dirname } from 'node:path'\nimport readline from 'node:readline'\n\n/** Absolute path to the shared context.json, injected by the bridge spec's env. */\nconst FILE = process.env.DSH_WORKSPACE_FILE || ''\n/** Fallback when the client does not negotiate a version; clients accept an equal/older one. */\nconst PROTOCOL = '2024-11-05'\n\nfunction emptyDoc() {\n  return { version: 1, updatedAt: new Date().toISOString(), revision: 0, task: '', notes: [] }\n}\n\nfunction newId() {\n  return 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)\n}\n\n/** Coerce unknown JSON into a trustworthy doc without ever throwing (mirrors the container). */\nfunction normalize(raw) {\n  if (!raw || typeof raw !== 'object') return emptyDoc()\n  const notes = (Array.isArray(raw.notes) ? raw.notes : [])\n    .map((n) => {\n      if (!n || typeof n !== 'object') return null\n      const text = typeof n.text === 'string' ? n.text : ''\n      if (!text.trim()) return null\n      return {\n        id: typeof n.id === 'string' && n.id ? n.id : newId(),\n        author: typeof n.author === 'string' && n.author ? n.author : 'agent',\n        text,\n        ts: typeof n.ts === 'number' ? n.ts : Date.now()\n      }\n    })\n    .filter(Boolean)\n  return {\n    version: 1,\n    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),\n    revision: typeof raw.revision === 'number' && raw.revision >= 0 ? raw.revision : 0,\n    ...(typeof raw.broadcastAt === 'string' ? { broadcastAt: raw.broadcastAt } : {}),\n    task: typeof raw.task === 'string' ? raw.task : '',\n    notes\n  }\n}\n\nfunction readDoc() {\n  try {\n    if (!FILE || !existsSync(FILE)) return emptyDoc()\n    return normalize(JSON.parse(readFileSync(FILE, 'utf8')))\n  } catch {\n    return emptyDoc()\n  }\n}\n\n/** Best-effort write: a read-only root surfaces through the tool result, never kills the child. */\nfunction writeDoc(doc) {\n  if (!FILE) return false\n  try {\n    mkdirSync(dirname(FILE), { recursive: true })\n    writeFileSync(FILE, JSON.stringify(doc, null, 2), 'utf8')\n    return true\n  } catch {\n    return false\n  }\n}\n\nconst TOOLS = [\n  {\n    name: 'workspace_read',\n    description:\n      'Read the container-owned shared context: the current task, the append-only shared-memory log (notes), and the broadcast revision. Call this to load cross-agent context.',\n    inputSchema: { type: 'object', properties: {}, additionalProperties: false }\n  },\n  {\n    name: 'workspace_append',\n    description:\n      'Append one entry to the shared-memory log so other hosted agents can see it. Use for findings or decisions worth sharing across agents.',\n    inputSchema: {\n      type: 'object',\n      properties: {\n        text: { type: 'string', description: 'The note to share (non-empty).' },\n        author: { type: 'string', description: 'Who is writing (defaults to your agent name).' }\n      },\n      required: ['text'],\n      additionalProperties: false\n    }\n  },\n  {\n    name: 'workspace_set_task',\n    description: 'Set the single current shared task/goal that all hosted agents work toward.',\n    inputSchema: {\n      type: 'object',\n      properties: { task: { type: 'string', description: 'The current task text.' } },\n      required: ['task'],\n      additionalProperties: false\n    }\n  }\n]\n\nfunction textResult(text) {\n  return { content: [{ type: 'text', text: String(text) }], isError: false }\n}\nfunction errorResult(text) {\n  return { content: [{ type: 'text', text: String(text) }], isError: true }\n}\n\nfunction callTool(name, args) {\n  const a = args && typeof args === 'object' ? args : {}\n  if (name === 'workspace_read') return textResult(JSON.stringify(readDoc(), null, 2))\n  if (name === 'workspace_append') {\n    const text = typeof a.text === 'string' ? a.text.trim() : ''\n    if (!text) return errorResult('workspace_append needs a non-empty \"text\".')\n    const doc = readDoc()\n    doc.notes.push({\n      id: newId(),\n      author: (typeof a.author === 'string' && a.author.trim()) || 'agent',\n      text,\n      ts: Date.now()\n    })\n    doc.updatedAt = new Date().toISOString()\n    if (!writeDoc(doc)) return errorResult('Failed to write the shared context (read-only path?).')\n    return textResult(\n      'Appended shared-memory note; the context now has ' + doc.notes.length + ' note(s).'\n    )\n  }\n  if (name === 'workspace_set_task') {\n    const doc = readDoc()\n    doc.task = typeof a.task === 'string' ? a.task : ''\n    doc.updatedAt = new Date().toISOString()\n    if (!writeDoc(doc)) return errorResult('Failed to write the shared context (read-only path?).')\n    return textResult('Current shared task set.')\n  }\n  return errorResult('Unknown tool: ' + name)\n}\n\nfunction send(msg) {\n  process.stdout.write(JSON.stringify(msg) + '\\n')\n}\nfunction reply(id, result) {\n  send({ jsonrpc: '2.0', id, result })\n}\nfunction replyError(id, code, message) {\n  send({ jsonrpc: '2.0', id, error: { code, message } })\n}\n\nfunction handle(msg) {\n  if (!msg || typeof msg !== 'object') return\n  const id = msg.id\n  const method = msg.method\n  const params = msg.params\n  const isRequest = id !== undefined && id !== null\n  switch (method) {\n    case 'initialize': {\n      const clientProto = params && params.protocolVersion\n      reply(id, {\n        // Echo the client's requested version when present so older/newer clients both handshake.\n        protocolVersion: typeof clientProto === 'string' ? clientProto : PROTOCOL,\n        capabilities: { tools: {} },\n        serverInfo: { name: 'dsh-workspace', version: '1.0.0' }\n      })\n      return\n    }\n    case 'ping':\n      if (isRequest) reply(id, {})\n      return\n    case 'notifications/initialized':\n    case 'initialized':\n    case 'notifications/cancelled':\n      return // notifications: no response\n    case 'tools/list':\n      reply(id, { tools: TOOLS })\n      return\n    case 'tools/call': {\n      const p = params || {}\n      reply(id, callTool(p.name, p.arguments))\n      return\n    }\n    // Declare only `tools`, but answer these cheaply in case a client probes them anyway.\n    case 'resources/list':\n      reply(id, { resources: [] })\n      return\n    case 'prompts/list':\n      reply(id, { prompts: [] })\n      return\n    default:\n      if (isRequest) replyError(id, -32601, 'Method not found: ' + method)\n  }\n}\n\nconst rl = readline.createInterface({ input: process.stdin, terminal: false })\nrl.on('line', (line) => {\n  const s = line.trim()\n  if (!s) return\n  let msg\n  try {\n    msg = JSON.parse(s)\n  } catch {\n    return // a non-JSON line is not a protocol message; ignore rather than crash\n  }\n  try {\n    handle(msg)\n  } catch (err) {\n    if (msg && msg.id !== undefined) replyError(msg.id, -32603, String((err && err.message) || err))\n  }\n})\nrl.on('close', () => process.exit(0))\n";
+const WORKSPACE_SERVER_SOURCE = "#!/usr/bin/env node\r\n/**\r\n * dsh-workspace MCP server — the container's shared-context layer, exposed as MCP tools.\r\n *\r\n * Why this exists: the container hands every hosted agent a pointer to one shared document\r\n * (DSH_WORKSPACE_FILE) via env, but a bare path is only useful to an agent that happens to be\r\n * written to read it. Registering this server in the bridge (mcp-servers.json / codex\r\n * config.toml) means any MCP-speaking agent can `workspace_read` the current task + shared\r\n * memory and `workspace_append` a finding back into it — a real read/write channel, not just a\r\n * path. The agent spawns its own copy of this process (stdio), exactly like it does for the\r\n * curated npm servers; the container never proxies the calls.\r\n *\r\n * Dependency-free on purpose: it runs under the bundled node.exe from userData, where app.asar\r\n * — and therefore @modelcontextprotocol/sdk — is not readable. The only external piece is the\r\n * MCP stdio wire format: newline-delimited JSON-RPC 2.0. It reads/writes the same context.json\r\n * the container's UI edits, tolerating anything a hand-edit or a peer agent may have written.\r\n */\r\nimport { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'\r\nimport { dirname } from 'node:path'\r\nimport readline from 'node:readline'\r\n\r\n/** Absolute path to the shared context.json, injected by the bridge spec's env. */\r\nconst FILE = process.env.DSH_WORKSPACE_FILE || ''\r\n/** Fallback when the client does not negotiate a version; clients accept an equal/older one. */\r\nconst PROTOCOL = '2024-11-05'\r\n\r\nfunction emptyDoc() {\r\n  return { version: 1, updatedAt: new Date().toISOString(), revision: 0, task: '', notes: [] }\r\n}\r\n\r\nfunction newId() {\r\n  return 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)\r\n}\r\n\r\nfunction newTaskId() {\r\n  return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)\r\n}\r\n\r\nconst TASK_STATUSES = ['todo', 'doing', 'done']\r\n\r\n/** Coerce unknown JSON into a trustworthy task queue (mirrors the container's normalizeTasks). */\r\nfunction normalizeTasks(raw) {\r\n  const seen = new Set()\r\n  return (Array.isArray(raw) ? raw : [])\r\n    .map((t) => {\r\n      if (!t || typeof t !== 'object') return null\r\n      const title = typeof t.title === 'string' ? t.title : ''\r\n      if (!title.trim()) return null\r\n      const id = typeof t.id === 'string' && t.id ? t.id : newTaskId()\r\n      if (seen.has(id)) return null\r\n      seen.add(id)\r\n      const deps = (Array.isArray(t.deps) ? t.deps : []).filter((d) => typeof d === 'string' && d)\r\n      return {\r\n        id,\r\n        title,\r\n        status: TASK_STATUSES.includes(t.status) ? t.status : 'todo',\r\n        ...(typeof t.owner === 'string' && t.owner ? { owner: t.owner } : {}),\r\n        ...(deps.length ? { deps } : {}),\r\n        ...(typeof t.result === 'string' && t.result ? { result: t.result } : {}),\r\n        at: typeof t.at === 'number' ? t.at : Date.now()\r\n      }\r\n    })\r\n    .filter(Boolean)\r\n}\r\n\r\n/** Coerce unknown JSON into a trustworthy doc without ever throwing (mirrors the container). */\r\nfunction normalize(raw) {\r\n  if (!raw || typeof raw !== 'object') return emptyDoc()\r\n  const notes = (Array.isArray(raw.notes) ? raw.notes : [])\r\n    .map((n) => {\r\n      if (!n || typeof n !== 'object') return null\r\n      const text = typeof n.text === 'string' ? n.text : ''\r\n      if (!text.trim()) return null\r\n      return {\r\n        id: typeof n.id === 'string' && n.id ? n.id : newId(),\r\n        author: typeof n.author === 'string' && n.author ? n.author : 'agent',\r\n        text,\r\n        ts: typeof n.ts === 'number' ? n.ts : Date.now()\r\n      }\r\n    })\r\n    .filter(Boolean)\r\n  return {\r\n    version: 1,\r\n    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),\r\n    revision: typeof raw.revision === 'number' && raw.revision >= 0 ? raw.revision : 0,\r\n    ...(typeof raw.broadcastAt === 'string' ? { broadcastAt: raw.broadcastAt } : {}),\r\n    task: typeof raw.task === 'string' ? raw.task : '',\r\n    notes,\r\n    // Absent stays absent so a pre-queue document round-trips unchanged on disk.\r\n    ...(Array.isArray(raw.tasks) ? { tasks: normalizeTasks(raw.tasks) } : {})\r\n  }\r\n}\r\n\r\nfunction readDoc() {\r\n  try {\r\n    if (!FILE || !existsSync(FILE)) return emptyDoc()\r\n    return normalize(JSON.parse(readFileSync(FILE, 'utf8')))\r\n  } catch {\r\n    return emptyDoc()\r\n  }\r\n}\r\n\r\n/** Best-effort write: a read-only root surfaces through the tool result, never kills the child. */\r\nfunction writeDoc(doc) {\r\n  if (!FILE) return false\r\n  try {\r\n    mkdirSync(dirname(FILE), { recursive: true })\r\n    writeFileSync(FILE, JSON.stringify(doc, null, 2), 'utf8')\r\n    return true\r\n  } catch {\r\n    return false\r\n  }\r\n}\r\n\r\nconst TOOLS = [\r\n  {\r\n    name: 'workspace_read',\r\n    description:\r\n      'Read the container-owned shared context: the current task, the append-only shared-memory log (notes), and the broadcast revision. Call this to load cross-agent context.',\r\n    inputSchema: { type: 'object', properties: {}, additionalProperties: false }\r\n  },\r\n  {\r\n    name: 'workspace_append',\r\n    description:\r\n      'Append one entry to the shared-memory log so other hosted agents can see it. Use for findings or decisions worth sharing across agents.',\r\n    inputSchema: {\r\n      type: 'object',\r\n      properties: {\r\n        text: { type: 'string', description: 'The note to share (non-empty).' },\r\n        author: { type: 'string', description: 'Who is writing (defaults to your agent name).' }\r\n      },\r\n      required: ['text'],\r\n      additionalProperties: false\r\n    }\r\n  },\r\n  {\r\n    name: 'workspace_set_task',\r\n    description: 'Set the single current shared task/goal that all hosted agents work toward.',\r\n    inputSchema: {\r\n      type: 'object',\r\n      properties: { task: { type: 'string', description: 'The current task text.' } },\r\n      required: ['task'],\r\n      additionalProperties: false\r\n    }\r\n  },\r\n  {\r\n    name: 'workspace_submit',\r\n    description:\r\n      'Submit a new task into the shared task queue (todo column). Other agents can then claim it. Use for decomposed work items, not the overall goal (that is workspace_set_task).',\r\n    inputSchema: {\r\n      type: 'object',\r\n      properties: {\r\n        title: { type: 'string', description: 'One-line task title (non-empty).' },\r\n        deps: {\r\n          type: 'array',\r\n          items: { type: 'string' },\r\n          description: 'Ids of tasks this one waits on (advisory, optional).'\r\n        }\r\n      },\r\n      required: ['title'],\r\n      additionalProperties: false\r\n    }\r\n  },\r\n  {\r\n    name: 'workspace_claim',\r\n    description:\r\n      'Claim a queued task for yourself: sets the owner and moves it to doing. Fails if it is already claimed or done.',\r\n    inputSchema: {\r\n      type: 'object',\r\n      properties: {\r\n        taskId: { type: 'string', description: 'The task id returned by workspace_submit/read.' },\r\n        owner: { type: 'string', description: 'Your agent name (non-empty).' }\r\n      },\r\n      required: ['taskId', 'owner'],\r\n      additionalProperties: false\r\n    }\r\n  },\r\n  {\r\n    name: 'workspace_complete',\r\n    description:\r\n      'Mark a claimed task as done and optionally record its outcome. The result is mirrored into the shared-memory notes so every agent sees the outcome.',\r\n    inputSchema: {\r\n      type: 'object',\r\n      properties: {\r\n        taskId: { type: 'string', description: 'The task id to close.' },\r\n        result: { type: 'string', description: 'Outcome summary (optional but recommended).' }\r\n      },\r\n      required: ['taskId'],\r\n      additionalProperties: false\r\n    }\r\n  }\r\n]\r\n\r\nfunction textResult(text) {\r\n  return { content: [{ type: 'text', text: String(text) }], isError: false }\r\n}\r\nfunction errorResult(text) {\r\n  return { content: [{ type: 'text', text: String(text) }], isError: true }\r\n}\r\n\r\n/**\r\n * Any task-queue mutation bumps `revision`: a polling agent diffs the counter, sees the move,\r\n * and re-reads the queue. Notes stay untouched except workspace_complete's explicit mirror.\r\n */\r\nfunction saveTasks(doc, tasks, note) {\r\n  doc.tasks = tasks\r\n  doc.revision = (typeof doc.revision === 'number' ? doc.revision : 0) + 1\r\n  doc.updatedAt = new Date().toISOString()\r\n  if (note) doc.notes.push({ id: newId(), ...note, ts: Date.now() })\r\n  return writeDoc(doc)\r\n    ? textResult(JSON.stringify({ ok: true, revision: doc.revision, tasks: doc.tasks }, null, 2))\r\n    : errorResult('Failed to write the shared context (read-only path?).')\r\n}\r\n\r\nfunction callTool(name, args) {\r\n  const a = args && typeof args === 'object' ? args : {}\r\n  if (name === 'workspace_read') return textResult(JSON.stringify(readDoc(), null, 2))\r\n  if (name === 'workspace_append') {\r\n    const text = typeof a.text === 'string' ? a.text.trim() : ''\r\n    if (!text) return errorResult('workspace_append needs a non-empty \"text\".')\r\n    const doc = readDoc()\r\n    doc.notes.push({\r\n      id: newId(),\r\n      author: (typeof a.author === 'string' && a.author.trim()) || 'agent',\r\n      text,\r\n      ts: Date.now()\r\n    })\r\n    doc.updatedAt = new Date().toISOString()\r\n    if (!writeDoc(doc)) return errorResult('Failed to write the shared context (read-only path?).')\r\n    return textResult(\r\n      'Appended shared-memory note; the context now has ' + doc.notes.length + ' note(s).'\r\n    )\r\n  }\r\n  if (name === 'workspace_set_task') {\r\n    const doc = readDoc()\r\n    doc.task = typeof a.task === 'string' ? a.task : ''\r\n    doc.updatedAt = new Date().toISOString()\r\n    if (!writeDoc(doc)) return errorResult('Failed to write the shared context (read-only path?).')\r\n    return textResult('Current shared task set.')\r\n  }\r\n  if (name === 'workspace_submit') {\r\n    const title = typeof a.title === 'string' ? a.title.trim() : ''\r\n    if (!title) return errorResult('workspace_submit needs a non-empty \"title\".')\r\n    const doc = readDoc()\r\n    const tasks = normalizeTasks(doc.tasks)\r\n    const deps = (Array.isArray(a.deps) ? a.deps : [])\r\n      .filter((d) => typeof d === 'string' && d.trim())\r\n      .map((d) => d.trim())\r\n    tasks.push({\r\n      id: newTaskId(),\r\n      title,\r\n      status: 'todo',\r\n      ...(deps.length ? { deps } : {}),\r\n      at: Date.now()\r\n    })\r\n    return saveTasks(doc, tasks)\r\n  }\r\n  if (name === 'workspace_claim') {\r\n    const owner = typeof a.owner === 'string' ? a.owner.trim() : ''\r\n    if (!owner) return errorResult('workspace_claim needs a non-empty \"owner\".')\r\n    const doc = readDoc()\r\n    const tasks = normalizeTasks(doc.tasks)\r\n    const t = tasks.find((x) => x.id === a.taskId)\r\n    if (!t) return errorResult('No such task: ' + String(a.taskId) + ' (see workspace_read).')\r\n    if (t.status === 'done') return errorResult(`Task ${t.id} is already done.`)\r\n    if (t.status === 'doing' && t.owner && t.owner !== owner)\r\n      return errorResult(`Task ${t.id} is already claimed by ${t.owner}.`)\r\n    t.status = 'doing'\r\n    t.owner = owner\r\n    t.at = Date.now()\r\n    return saveTasks(doc, tasks)\r\n  }\r\n  if (name === 'workspace_complete') {\r\n    const doc = readDoc()\r\n    const tasks = normalizeTasks(doc.tasks)\r\n    const t = tasks.find((x) => x.id === a.taskId)\r\n    if (!t) return errorResult('No such task: ' + String(a.taskId) + ' (see workspace_read).')\r\n    if (t.status === 'done') return errorResult(`Task ${t.id} is already done.`)\r\n    t.status = 'done'\r\n    const result = typeof a.result === 'string' ? a.result.trim() : ''\r\n    if (result) t.result = result\r\n    t.at = Date.now()\r\n    // Mirror the outcome into the shared memory — the plan's \"done ⇒ visible to everyone\".\r\n    const note = {\r\n      author: t.owner || 'agent',\r\n      text: `【任务完成】${t.title}${result ? ' — ' + result : ''}`\r\n    }\r\n    return saveTasks(doc, tasks, note)\r\n  }\r\n  return errorResult('Unknown tool: ' + name)\r\n}\r\n\r\nfunction send(msg) {\r\n  process.stdout.write(JSON.stringify(msg) + '\\n')\r\n}\r\nfunction reply(id, result) {\r\n  send({ jsonrpc: '2.0', id, result })\r\n}\r\nfunction replyError(id, code, message) {\r\n  send({ jsonrpc: '2.0', id, error: { code, message } })\r\n}\r\n\r\nfunction handle(msg) {\r\n  if (!msg || typeof msg !== 'object') return\r\n  const id = msg.id\r\n  const method = msg.method\r\n  const params = msg.params\r\n  const isRequest = id !== undefined && id !== null\r\n  switch (method) {\r\n    case 'initialize': {\r\n      const clientProto = params && params.protocolVersion\r\n      reply(id, {\r\n        // Echo the client's requested version when present so older/newer clients both handshake.\r\n        protocolVersion: typeof clientProto === 'string' ? clientProto : PROTOCOL,\r\n        capabilities: { tools: {} },\r\n        serverInfo: { name: 'dsh-workspace', version: '1.0.0' }\r\n      })\r\n      return\r\n    }\r\n    case 'ping':\r\n      if (isRequest) reply(id, {})\r\n      return\r\n    case 'notifications/initialized':\r\n    case 'initialized':\r\n    case 'notifications/cancelled':\r\n      return // notifications: no response\r\n    case 'tools/list':\r\n      reply(id, { tools: TOOLS })\r\n      return\r\n    case 'tools/call': {\r\n      const p = params || {}\r\n      reply(id, callTool(p.name, p.arguments))\r\n      return\r\n    }\r\n    // Declare only `tools`, but answer these cheaply in case a client probes them anyway.\r\n    case 'resources/list':\r\n      reply(id, { resources: [] })\r\n      return\r\n    case 'prompts/list':\r\n      reply(id, { prompts: [] })\r\n      return\r\n    default:\r\n      if (isRequest) replyError(id, -32601, 'Method not found: ' + method)\r\n  }\r\n}\r\n\r\nconst rl = readline.createInterface({ input: process.stdin, terminal: false })\r\nrl.on('line', (line) => {\r\n  const s = line.trim()\r\n  if (!s) return\r\n  let msg\r\n  try {\r\n    msg = JSON.parse(s)\r\n  } catch {\r\n    return // a non-JSON line is not a protocol message; ignore rather than crash\r\n  }\r\n  try {\r\n    handle(msg)\r\n  } catch (err) {\r\n    if (msg && msg.id !== undefined) replyError(msg.id, -32603, String((err && err.message) || err))\r\n  }\r\n})\r\nrl.on('close', () => process.exit(0))\r\n";
 const WORKSPACE_MCP_ID = "dsh-workspace";
 function workspaceServerFile() {
   return join(bridgeDir(), "workspace-server.mjs");
@@ -13182,6 +13336,16 @@ const entries = /* @__PURE__ */ new Map();
 const connecting = /* @__PURE__ */ new Map();
 let shuttingDown = false;
 const hubEvents = new EventEmitter();
+const CALL_BUFFER_CAP = 200;
+const callEvents = [];
+function recordCall(evt) {
+  callEvents.push(evt);
+  if (callEvents.length > CALL_BUFFER_CAP) callEvents.shift();
+  hubEvents.emit("calls", getCalls());
+}
+function getCalls() {
+  return [...callEvents];
+}
 function snapshot() {
   return [...entries.values()].map((e) => ({
     spec: e.spec,
@@ -13208,6 +13372,9 @@ function scheduleBridgeExport() {
     }
   }, BRIDGE_DEBOUNCE_MS);
 }
+function refreshBridge() {
+  scheduleBridgeExport();
+}
 function loadSpecs() {
   const raw = mcpStore().get("servers");
   return Array.isArray(raw) ? raw : [];
@@ -13227,7 +13394,7 @@ const SEED_MCP_DEFS = [
 ];
 const LOCKED_MCP_IDS = new Set(LOCKED_MCP_DEFS.map((d) => d.id));
 const SEED_MCP_IDS = new Set(SEED_MCP_DEFS.map((d) => d.id));
-/* @__PURE__ */ new Set([...LOCKED_MCP_IDS, ...SEED_MCP_IDS]);
+const CURATED_MCP_IDS = /* @__PURE__ */ new Set([...LOCKED_MCP_IDS, ...SEED_MCP_IDS]);
 const hasDirArg = (id2) => id2 === "filesystem";
 function curatedSpec(def) {
   const pkg = BUILTIN_MCP_PKG[def.id];
@@ -13440,10 +13607,22 @@ function listTools(serverId) {
 }
 async function callTool(args) {
   const startedAt = Date.now();
+  const finish = (r) => {
+    recordCall({
+      serverId: args.serverId,
+      tool: args.tool,
+      ms: r.durationMs,
+      ok: r.ok,
+      ...r.error ? { err: r.error } : {},
+      at: Date.now()
+    });
+    return r;
+  };
   const e = entries.get(args.serverId);
-  if (!e) return { ok: false, text: "", isError: true, error: m("mcp.errUnknown", { id: args.serverId }), durationMs: 0 };
+  if (!e)
+    return finish({ ok: false, text: "", isError: true, error: m("mcp.errUnknown", { id: args.serverId }), durationMs: 0 });
   if (!e.client || e.status !== "connected") {
-    return { ok: false, text: "", isError: true, error: m("mcp.errNotConnected", { id: e.spec.id }), durationMs: 0 };
+    return finish({ ok: false, text: "", isError: true, error: m("mcp.errNotConnected", { id: e.spec.id }), durationMs: 0 });
   }
   try {
     const res = await withTimeout(
@@ -13458,9 +13637,9 @@ async function callTool(args) {
     );
     const text = flattenToolContent(res.content);
     const isError = Boolean(res.isError);
-    return { ok: !isError, text, isError, durationMs: Date.now() - startedAt };
+    return finish({ ok: !isError, text, isError, durationMs: Date.now() - startedAt });
   } catch (err) {
-    return { ok: false, text: "", isError: true, error: err.message, durationMs: Date.now() - startedAt };
+    return finish({ ok: false, text: "", isError: true, error: err.message, durationMs: Date.now() - startedAt });
   }
 }
 async function autoStartAll() {
@@ -13503,70 +13682,31 @@ function withTimeout(p, ms, message) {
     );
   });
 }
-const LOG_LIMIT = 1e3;
-const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 3e4);
-const OPENCLAW_READY_TIMEOUT_MS = Number(process.env.DSH_OPENCLAW_READY_TIMEOUT_MS || 12e4);
-const DSH_READY_TIMEOUT_MS = Number(process.env.DSH_DSH_READY_TIMEOUT_MS || 12e4);
-const ANNOUNCE_GRACE_MS = 1500;
-const CRASH_RETRY_DELAYS_MS = [2e3, 5e3, 15e3];
-const STABLE_RESET_MS = 5 * 6e4;
-const MAX_RECLAIM_RETRIES = 3;
-const HEALTH_READY_TIMEOUT_MS = 2e4;
-const HEALTH_POLL_MS = 3e4;
-const HEALTH_FAIL_LIMIT = 3;
-function healthTarget(meta, port) {
-  const raw = (meta.healthUrl || "").trim();
-  if (!raw) return null;
-  const filled = raw.replace(/\{port\}/g, String(port));
-  if (/^https?:\/\//i.test(filled)) return filled;
-  try {
-    return new URL(filled.startsWith("/") ? filled : `/${filled}`, `http://127.0.0.1:${port}`).toString();
-  } catch {
-    return null;
-  }
-}
-function probeHealth(url, timeoutMs = 5e3) {
-  return new Promise((resolve2) => {
-    try {
-      const lib = url.startsWith("https") ? get$1 : get$2;
-      const req = lib(url, { timeout: timeoutMs }, (res) => {
-        res.resume();
-        const status = res.statusCode ?? 0;
-        resolve2(status >= 200 && status < 400);
-      });
-      req.on("error", () => resolve2(false));
-      req.on("timeout", () => {
-        req.destroy();
-        resolve2(false);
-      });
-    } catch {
-      resolve2(false);
-    }
-  });
-}
-async function waitHealth(url, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  for (; ; ) {
-    if (await probeHealth(url)) return true;
-    if (Date.now() > deadline) return false;
-    await new Promise((r) => setTimeout(r, 700));
-  }
-}
+const mcpHub = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  CURATED_MCP_IDS,
+  LOCKED_MCP_IDS,
+  MCP_CALL_TOOL_TIMEOUT_MS,
+  SEED_MCP_IDS,
+  autoStartAll,
+  callTool,
+  connect,
+  disconnect,
+  flattenToolContent,
+  getCalls,
+  hubEvents,
+  isValidMcpId,
+  listServers,
+  listTools,
+  lockedMcpSpecs,
+  refreshBridge,
+  refreshBuiltinPackages,
+  removeServer,
+  sanitizeMcpSpec,
+  saveServer,
+  shutdownAll
+}, Symbol.toStringTag, { value: "Module" }));
 const BUILTIN_PAGE_IDS = /* @__PURE__ */ new Set(["dsh-web", "openclaw"]);
-function runCli$2(cmd, args, opts = {}) {
-  return new Promise((resolve2) => {
-    const child = spawn(cmd, args, { windowsHide: true, timeout: opts.timeoutMs });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (d) => stdout += String(d));
-    child.stderr?.on("data", (d) => stderr += String(d));
-    child.on("error", (err) => resolve2({ code: -1, stdout, stderr: stderr || err.message }));
-    child.on("close", (code2) => resolve2({ code: code2 ?? -1, stdout, stderr }));
-  });
-}
-function detectEngineMismatch(e) {
-  return e.logs.some((l) => /EBADENGINE/i.test(l));
-}
 function defaultStartCommand(dir) {
   if (existsSync(join(dir, "server.js"))) return "node server.js";
   if (existsSync(join(dir, "index.js"))) return "node index.js";
@@ -13579,6 +13719,13 @@ function defaultStartCommand(dir) {
 }
 function startCommandInferable(dir) {
   return existsSync(join(dir, "server.js")) || existsSync(join(dir, "index.js")) || existsSync(join(dir, "package.json"));
+}
+function resolvePageDeps(id2, declared) {
+  const override = getSettings().pageDeps?.[id2];
+  const source = Array.isArray(override) ? override : Array.isArray(declared) ? declared : null;
+  if (!source) return void 0;
+  const cleaned = source.filter((d) => typeof d === "string" && Boolean(d.trim()) && d.trim() !== id2).map((d) => d.trim());
+  return cleaned.length ? cleaned : void 0;
 }
 const MANIFEST_KEYS = /* @__PURE__ */ new Set([
   "$schema",
@@ -13599,7 +13746,9 @@ const MANIFEST_KEYS = /* @__PURE__ */ new Set([
   "author",
   "version",
   "icon",
-  "permissions"
+  "permissions",
+  "npmPackage",
+  "capabilityDir"
 ]);
 const MANIFEST_PERMISSIONS = /* @__PURE__ */ new Set(["notify", "downloads", "externalShell"]);
 function manifestWarnings(raw) {
@@ -13741,13 +13890,18 @@ function readPageMeta(pagesDir, id2) {
     manageAsApp: raw.manageAsApp ?? (kind === "dsh" || kind === "openclaw"),
     // Deps keep only non-empty strings that aren't the page itself — self-imports would
     // deadlock ensureDeps behind an ancestry check that legitimately allows siblings.
-    dependsOn: Array.isArray(raw.dependsOn) ? raw.dependsOn.filter((d) => typeof d === "string" && Boolean(d.trim()) && d.trim() !== id2).map((d) => d.trim()) : void 0,
+    // A container-side `pageDeps` override (editable in the Pages panel) fully shadows the
+    // project's own declaration — including an empty array, the explicit "no deps" case — so
+    // wiring never requires rewriting a third-party container.json.
+    dependsOn: resolvePageDeps(id2, raw.dependsOn),
     healthUrl: !external && typeof raw.healthUrl === "string" && raw.healthUrl.trim() ? raw.healthUrl.trim() : void 0,
     schemaVersion: Number.isFinite(Number(raw.schemaVersion)) ? Number(raw.schemaVersion) : void 0,
     author: typeof raw.author === "string" ? raw.author.trim() || void 0 : void 0,
     version: typeof raw.version === "string" ? raw.version.trim() || void 0 : void 0,
     iconUrl: resolveIconUrl(dir, raw.icon, warnings),
     permissions: Array.isArray(raw.permissions) ? raw.permissions.filter((p) => typeof p === "string") : void 0,
+    npmPackage: typeof raw.npmPackage === "string" && raw.npmPackage.trim() ? raw.npmPackage.trim() : void 0,
+    capabilityDir: typeof raw.capabilityDir === "string" && raw.capabilityDir.trim() ? raw.capabilityDir.trim() : void 0,
     manifestWarnings: warnings.length ? warnings : void 0,
     envVars
   };
@@ -13793,6 +13947,157 @@ function scanInstalledPages(pagesDir) {
     }
   }
   return out;
+}
+function runCli$2(cmd, args, opts = {}) {
+  return new Promise((resolve2) => {
+    const child = spawn(cmd, args, { windowsHide: true, timeout: opts.timeoutMs });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d) => stdout += String(d));
+    child.stderr?.on("data", (d) => stderr += String(d));
+    child.on("error", (err) => resolve2({ code: -1, stdout, stderr: stderr || err.message }));
+    child.on("close", (code2) => resolve2({ code: code2 ?? -1, stdout, stderr }));
+  });
+}
+async function reclaimOpenclawOrphans(tracked) {
+  try {
+    const victims = [];
+    if (process.platform === "win32") {
+      const ps = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CommandLine }`;
+      const res = await runCli$2("powershell.exe", ["-NoProfile", "-Command", ps], {
+        timeoutMs: 15e3
+      });
+      for (const line of res.stdout.split(/\r?\n/)) {
+        const bar = line.indexOf("|");
+        if (bar < 0) continue;
+        const pid = Number(line.slice(0, bar));
+        const cmd = line.slice(bar + 1);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+        if (/openclaw[/\\]+openclaw\.mjs/.test(cmd) && !tracked.has(pid)) victims.push(pid);
+      }
+      for (const pid of victims) {
+        spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+      }
+    } else {
+      const res = await runCli$2("pgrep", ["-f", "openclaw/openclaw.mjs"], { timeoutMs: 15e3 });
+      for (const tok of res.stdout.split(/\r?\n/)) {
+        const pid = Number(tok.trim());
+        if (Number.isFinite(pid) && pid > 0 && !tracked.has(pid)) victims.push(pid);
+      }
+      for (const pid of victims) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+        }
+      }
+    }
+    if (victims.length) {
+      console.warn(
+        `[pages] reclaimed ${victims.length} orphan openclaw gateway(s): ${victims.join(", ")}`
+      );
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  } catch (err) {
+    console.warn("[pages] openclaw orphan reclaim failed (ignored):", err.message);
+  }
+}
+async function reclaimDshHarnesses(profile, tracked) {
+  try {
+    const victims = [];
+    const esc = profile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const harnessRe = new RegExp(`bin\\.js (?:--profile ${esc}(?:\\s|$)|${esc}(?:\\s|$))`, "i");
+    if (process.platform === "win32") {
+      const ps = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CommandLine }`;
+      const res = await runCli$2("powershell.exe", ["-NoProfile", "-Command", ps], {
+        timeoutMs: 15e3
+      });
+      for (const line of res.stdout.split(/\r?\n/)) {
+        const bar = line.indexOf("|");
+        if (bar < 0) continue;
+        const pid = Number(line.slice(0, bar));
+        const cmd = line.slice(bar + 1);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+        if (harnessRe.test(cmd) && !tracked.has(pid)) victims.push(pid);
+      }
+      for (const pid of victims) {
+        spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+      }
+    } else {
+      const res = await runCli$2("pgrep", ["-f", `bin.js --profile ${profile}`], {
+        timeoutMs: 15e3
+      });
+      for (const tok of res.stdout.split(/\r?\n/)) {
+        const pid = Number(tok.trim());
+        if (Number.isFinite(pid) && pid > 0 && !tracked.has(pid)) victims.push(pid);
+      }
+      for (const pid of victims) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+        }
+      }
+    }
+    if (victims.length) {
+      console.warn(
+        `[pages] reclaimed ${victims.length} orphan dsh harness(es) on profile "${profile}": ${victims.join(", ")}`
+      );
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  } catch (err) {
+    console.warn("[pages] dsh orphan reclaim failed (ignored):", err.message);
+  }
+}
+const LOG_LIMIT = 1e3;
+const START_TIMEOUT_MS = Number(process.env.DSH_PAGE_START_TIMEOUT_MS || 3e4);
+const OPENCLAW_READY_TIMEOUT_MS = Number(process.env.DSH_OPENCLAW_READY_TIMEOUT_MS || 12e4);
+const DSH_READY_TIMEOUT_MS = Number(process.env.DSH_DSH_READY_TIMEOUT_MS || 12e4);
+const ANNOUNCE_GRACE_MS = 1500;
+const CRASH_RETRY_DELAYS_MS = [2e3, 5e3, 15e3];
+const STABLE_RESET_MS = 5 * 6e4;
+const MAX_RECLAIM_RETRIES = 3;
+const HEALTH_READY_TIMEOUT_MS = 2e4;
+const HEALTH_POLL_MS = 3e4;
+const HEALTH_FAIL_LIMIT = 3;
+function healthTarget(meta, port) {
+  const raw = (meta.healthUrl || "").trim();
+  if (!raw) return null;
+  const filled = raw.replace(/\{port\}/g, String(port));
+  if (/^https?:\/\//i.test(filled)) return filled;
+  try {
+    return new URL(filled.startsWith("/") ? filled : `/${filled}`, `http://127.0.0.1:${port}`).toString();
+  } catch {
+    return null;
+  }
+}
+function probeHealth(url, timeoutMs = 5e3) {
+  return new Promise((resolve2) => {
+    try {
+      const lib = url.startsWith("https") ? get$1 : get$2;
+      const req = lib(url, { timeout: timeoutMs }, (res) => {
+        res.resume();
+        const status = res.statusCode ?? 0;
+        resolve2(status >= 200 && status < 400);
+      });
+      req.on("error", () => resolve2(false));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve2(false);
+      });
+    } catch {
+      resolve2(false);
+    }
+  });
+}
+async function waitHealth(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (; ; ) {
+    if (await probeHealth(url)) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 700));
+  }
+}
+function detectEngineMismatch(e) {
+  return e.logs.some((l) => /EBADENGINE/i.test(l));
 }
 class PortNotReadyError extends Error {
   constructor(port, timeoutMs) {
@@ -14367,57 +14672,16 @@ class PageRegistry extends EventEmitter {
       proc.once("close", done);
     });
   }
-  /** Kill leftover bundled-node openclaw gateways this registry no longer tracks (dev hot-reload
-      orphans holding the state-dir ownership lock → exit 78). Best-effort; never throws. */
+  /** Kill leftover bundled-node openclaw gateways this registry no longer tracks — the
+      enumeration/kill mechanics live in pages-reclaim.ts. Best-effort; never throws. */
   async reclaimOrphanOpenclaw(selfId) {
     const tracked = /* @__PURE__ */ new Set();
     for (const [id2, e] of this.entries) {
       if (id2 !== selfId && e.meta.kind === "openclaw" && e.proc?.pid) tracked.add(e.proc.pid);
     }
-    try {
-      const victims = [];
-      if (process.platform === "win32") {
-        const ps = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CommandLine }`;
-        const res = await runCli$2("powershell.exe", ["-NoProfile", "-Command", ps], {
-          timeoutMs: 15e3
-        });
-        for (const line of res.stdout.split(/\r?\n/)) {
-          const bar = line.indexOf("|");
-          if (bar < 0) continue;
-          const pid = Number(line.slice(0, bar));
-          const cmd = line.slice(bar + 1);
-          if (!Number.isFinite(pid) || pid <= 0) continue;
-          if (/openclaw[/\\]+openclaw\.mjs/.test(cmd) && !tracked.has(pid)) victims.push(pid);
-        }
-        for (const pid of victims) {
-          spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-        }
-      } else {
-        const res = await runCli$2("pgrep", ["-f", "openclaw/openclaw.mjs"], { timeoutMs: 15e3 });
-        for (const tok of res.stdout.split(/\r?\n/)) {
-          const pid = Number(tok.trim());
-          if (Number.isFinite(pid) && pid > 0 && !tracked.has(pid)) victims.push(pid);
-        }
-        for (const pid of victims) {
-          try {
-            process.kill(pid, "SIGTERM");
-          } catch {
-          }
-        }
-      }
-      if (victims.length) {
-        console.warn(
-          `[pages] reclaimed ${victims.length} orphan openclaw gateway(s): ${victims.join(", ")}`
-        );
-        await new Promise((r) => setTimeout(r, 700));
-      }
-    } catch (err) {
-      console.warn("[pages] openclaw orphan reclaim failed (ignored):", err.message);
-    }
+    await reclaimOpenclawOrphans(tracked);
   }
-  /** Kill dsh harnesses this registry no longer tracks (dev-reload orphans or a manually
-      launched `dsh --profile <p>`) before spawning our own — two harnesses on one profile
-      break terminal session ownership. Best-effort; never throws. */
+  /** Kill dsh harnesses on `profile` this registry no longer tracks (see pages-reclaim.ts). */
   async reclaimOrphanDsh(profile, selfId) {
     const tracked = /* @__PURE__ */ new Set();
     for (const [id2, e] of this.entries) {
@@ -14425,50 +14689,7 @@ class PageRegistry extends EventEmitter {
         tracked.add(e.proc.pid);
       }
     }
-    try {
-      const victims = [];
-      const esc = profile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const harnessRe = new RegExp(`bin\\.js (?:--profile ${esc}(?:\\s|$)|${esc}(?:\\s|$))`, "i");
-      if (process.platform === "win32") {
-        const ps = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CommandLine }`;
-        const res = await runCli$2("powershell.exe", ["-NoProfile", "-Command", ps], {
-          timeoutMs: 15e3
-        });
-        for (const line of res.stdout.split(/\r?\n/)) {
-          const bar = line.indexOf("|");
-          if (bar < 0) continue;
-          const pid = Number(line.slice(0, bar));
-          const cmd = line.slice(bar + 1);
-          if (!Number.isFinite(pid) || pid <= 0) continue;
-          if (harnessRe.test(cmd) && !tracked.has(pid)) victims.push(pid);
-        }
-        for (const pid of victims) {
-          spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-        }
-      } else {
-        const res = await runCli$2("pgrep", ["-f", `bin.js --profile ${profile}`], {
-          timeoutMs: 15e3
-        });
-        for (const tok of res.stdout.split(/\r?\n/)) {
-          const pid = Number(tok.trim());
-          if (Number.isFinite(pid) && pid > 0 && !tracked.has(pid)) victims.push(pid);
-        }
-        for (const pid of victims) {
-          try {
-            process.kill(pid, "SIGTERM");
-          } catch {
-          }
-        }
-      }
-      if (victims.length) {
-        console.warn(
-          `[pages] reclaimed ${victims.length} orphan dsh harness(es) on profile "${profile}": ${victims.join(", ")}`
-        );
-        await new Promise((r) => setTimeout(r, 700));
-      }
-    } catch (err) {
-      console.warn("[pages] dsh orphan reclaim failed (ignored):", err.message);
-    }
+    await reclaimDshHarnesses(profile, tracked);
   }
   async restart(id2) {
     await this.stopAndWait(id2);
@@ -14800,1527 +15021,346 @@ class PageRegistry extends EventEmitter {
     this.emit("changed");
   }
 }
-const MODIFIERS = {
-  ctrl: "ctrl",
-  control: "ctrl",
-  cmd: "meta",
-  command: "meta",
-  meta: "meta",
-  super: "meta",
-  win: "meta",
-  winkeys: "meta",
-  alt: "alt",
-  option: "alt",
-  shift: "shift"
-};
-const KEY_ALIASES = {
-  escape: "esc",
-  " ": "space",
-  spacebar: "space",
-  delete: "del",
-  insert: "ins",
-  pageup: "pgup",
-  pagedown: "pgdn",
-  arrowup: "up",
-  arrowdown: "down",
-  arrowleft: "left",
-  arrowright: "right",
-  backquote: "`",
-  graveaccent: "`",
-  plus: "+",
-  numpadadd: "+"
-};
-function normalizeKey(raw) {
-  const lowered = (raw || "").toLowerCase();
-  return KEY_ALIASES[lowered] ?? lowered.trim();
+function textResult(text) {
+  const t = typeof text === "string" ? text : JSON.stringify(text, null, 2);
+  return { content: [{ type: "text", text: t }], isError: false };
 }
-function normalizeCode(code2) {
-  const c = (code2 || "").trim();
-  if (!c) return "";
-  const mm = c.match(/^Key([A-Z])$/);
-  if (mm) return mm[1].toLowerCase();
-  const num = c.match(/^Digit(\d)$/);
-  if (num) return num[1];
-  return normalizeKey(c);
+function errorResult(text) {
+  return { content: [{ type: "text", text }], isError: true };
 }
-function parseAccelerator(accel) {
-  const text = (accel || "").trim();
-  if (!text) return null;
-  const parts = text.split(/\+(?=\S)/);
-  const key = normalizeKey(parts.pop());
-  if (!key) return null;
-  const out = { key, ctrl: false, shift: false, alt: false, meta: false };
-  for (const raw of parts) {
-    const name = raw.trim().toLowerCase();
-    if (name === "cmdorctrl" || name === "commandorcontrol" || name === "ctrlorcommand") {
-      out.ctrl = true;
-      continue;
+const TOOLS = [
+  {
+    name: "container_list_pages",
+    description: "List every page the container hosts: id, name, kind, lifecycle status and port.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "container_get_logs",
+    description: "Read the tail of one hosted page’s captured output (logs/pages/<pageId>.log).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pageId: { type: "string", description: "The page id (see container_list_pages)." },
+        tail: { type: "number", description: "How many trailing lines to return (default 200, max 5000)." }
+      },
+      required: ["pageId"],
+      additionalProperties: false
     }
-    const slot = MODIFIERS[name];
-    if (slot === "ctrl" || slot === "shift" || slot === "alt" || slot === "meta") out[slot] = true;
-    else return null;
+  },
+  {
+    name: "container_workspace_read",
+    description: "Read the container-owned shared context: current task, shared-memory notes, and the task queue.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "container_workspace_submit",
+    description: "Submit a new task into the shared task queue (todo column), optionally listing dependency ids.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "One-line task title (non-empty)." },
+        deps: { type: "array", items: { type: "string" }, description: "Ids of tasks this one waits on (optional)." }
+      },
+      required: ["title"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "container_workspace_complete",
+    description: "Mark a task done and optionally record its outcome (mirrored into the shared-memory notes).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "The task id to close." },
+        result: { type: "string", description: "Outcome summary (optional)." }
+      },
+      required: ["taskId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "container_list_mcp_tools",
+    description: "List the tools of every MCP server connected in the container hub (optionally one server).",
+    inputSchema: {
+      type: "object",
+      properties: { serverId: { type: "string", description: "Restrict to one hub server id (optional)." } },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "container_call_mcp_tool",
+    description: "Call one tool on an MCP server the container hub already connects to.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string", description: "The hub server id (see container_list_mcp_tools)." },
+        tool: { type: "string", description: "The tool name on that server." },
+        arguments: { type: "object", description: "Arguments object the tool expects." }
+      },
+      required: ["serverId", "tool"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "container_start_page",
+    description: "Start a hosted page by id. Dependencies (per the container manifest) are started first.",
+    inputSchema: {
+      type: "object",
+      properties: { pageId: { type: "string", description: "The page id to start." } },
+      required: ["pageId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "container_stop_page",
+    description: "Stop a running hosted page by id.",
+    inputSchema: {
+      type: "object",
+      properties: { pageId: { type: "string", description: "The page id to stop." } },
+      required: ["pageId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "container_restart_page",
+    description: "Restart a hosted page by id (its dependencies are started first if needed).",
+    inputSchema: {
+      type: "object",
+      properties: { pageId: { type: "string", description: "The page id to restart." } },
+      required: ["pageId"],
+      additionalProperties: false
+    }
   }
-  const dedicated = /^f\d{1,2}$/.test(key) || ["esc", "space", "tab", "enter", "up", "down", "left", "right"].includes(key);
-  if (!out.ctrl && !out.alt && !out.meta && !dedicated) return null;
-  return out;
-}
-function matchesAccelerator(accel, e) {
-  const parts = parseAccelerator(accel);
-  if (!parts) return false;
-  const key = normalizeKey(e.key) || normalizeCode(e.code);
-  if (!key || key !== parts.key) return false;
-  return Boolean(e.ctrl) === parts.ctrl && Boolean(e.shift) === parts.shift && Boolean(e.alt) === parts.alt && Boolean(e.meta) === parts.meta;
-}
-const INDEX_URLS = [
-  "https://npmmirror.com/mirrors/node/index.json",
-  "https://nodejs.org/dist/index.json"
 ];
-const DIST_BASES = [
-  "https://npmmirror.com/mirrors/node/%V%/node-%V%-win-x64.zip",
-  "https://cdn.npmmirror.com/binaries/node/%V%/node-%V%-win-x64.zip",
-  "https://nodejs.org/dist/%V%/node-%V%-win-x64.zip"
-];
-function preferUpstream() {
-  return (getSettings().npmRegistry || "").trim().replace(/\/+$/, "") === "https://registry.npmjs.org";
+function pageSummary(registry2, id2) {
+  const p = registry2.get(id2);
+  if (!p) return null;
+  return {
+    id: p.id,
+    name: p.name,
+    kind: p.kind,
+    status: p.status,
+    port: p.containerPort || p.port || void 0,
+    external: p.external || void 0
+  };
 }
-const indexUrls = () => preferUpstream() ? [...INDEX_URLS].reverse() : INDEX_URLS;
-const distBases = () => preferUpstream() ? [...DIST_BASES].reverse() : DIST_BASES;
-const MAX_VERSIONS = 200;
-function isValidTag(v) {
-  return /^v\d+\.\d+\.\d+$/.test(v);
+async function dispatch(getRegistry, name, args) {
+  const a = args && typeof args === "object" ? args : {};
+  switch (name) {
+    case "container_list_pages": {
+      const registry2 = getRegistry();
+      if (!registry2) return errorResult("container registry not ready");
+      return textResult(registry2.list().map((p) => pageSummary(registry2, p.id)));
+    }
+    case "container_get_logs": {
+      const pageId = typeof a.pageId === "string" ? a.pageId.trim() : "";
+      if (!pageId) return errorResult("container_get_logs needs a pageId");
+      const tail = typeof a.tail === "number" ? Math.max(1, Math.min(5e3, a.tail)) : 200;
+      const safe = pageId.replace(/[^\w.-]/g, "_");
+      const res = readLogTail(`pages/${safe}.log`, tail);
+      return textResult(res.lines.join("\n") || "(no log output captured yet)");
+    }
+    case "container_workspace_read":
+      return textResult(readWorkspace());
+    case "container_workspace_submit": {
+      const title2 = typeof a.title === "string" ? a.title.trim() : "";
+      if (!title2) return errorResult("container_workspace_submit needs a title");
+      const cur = readWorkspace();
+      const tasks = normalizeTasks(cur.tasks);
+      const deps = (Array.isArray(a.deps) ? a.deps : []).filter((d) => typeof d === "string" && !!d.trim()).map((d) => d.trim());
+      const id2 = `t${Date.now().toString(36)}${randomBytes(3).toString("hex")}`;
+      tasks.push({ id: id2, title: title2, status: "todo", ...deps.length ? { deps } : {}, at: Date.now() });
+      const next2 = writeWorkspace({ tasks });
+      return textResult({ ok: true, taskId: id2, tasks: next2.tasks });
+    }
+    case "container_workspace_complete": {
+      const taskId = typeof a.taskId === "string" ? a.taskId.trim() : "";
+      if (!taskId) return errorResult("container_workspace_complete needs a taskId");
+      const cur = readWorkspace();
+      const tasks = normalizeTasks(cur.tasks);
+      const t = tasks.find((x) => x.id === taskId);
+      if (!t) return errorResult(`no such task: ${taskId}`);
+      if (t.status === "done") return errorResult(`task ${taskId} already done`);
+      t.status = "done";
+      const result = typeof a.result === "string" ? a.result.trim() : "";
+      if (result) t.result = result;
+      t.at = Date.now();
+      const next2 = writeWorkspace({ tasks });
+      return textResult({ ok: true, revision: next2.revision, tasks: next2.tasks });
+    }
+    case "container_list_mcp_tools": {
+      const serverId = typeof a.serverId === "string" ? a.serverId : void 0;
+      return textResult(listTools(serverId));
+    }
+    case "container_call_mcp_tool": {
+      const serverId = typeof a.serverId === "string" ? a.serverId : "";
+      const tool = typeof a.tool === "string" ? a.tool : "";
+      if (!serverId || !tool) return errorResult("container_call_mcp_tool needs serverId and tool");
+      const callArgs = {
+        serverId,
+        tool,
+        ...a.arguments && typeof a.arguments === "object" ? { arguments: a.arguments } : {}
+      };
+      const r = await callTool(callArgs);
+      return r.isError ? errorResult(r.error || r.text || "tool call failed") : textResult(r.text);
+    }
+    case "container_start_page": {
+      const registry2 = getRegistry();
+      const pageId = typeof a.pageId === "string" ? a.pageId.trim() : "";
+      if (!registry2 || !pageId) return errorResult("container_start_page needs a pageId");
+      const state = await registry2.startWithDeps(pageId);
+      logEvent({ level: "info", kind: "container-mcp", pageId, detail: "start" });
+      return textResult(pageSummary(registry2, pageId) ?? { id: pageId, status: state.status });
+    }
+    case "container_stop_page": {
+      const registry2 = getRegistry();
+      const pageId = typeof a.pageId === "string" ? a.pageId.trim() : "";
+      if (!registry2 || !pageId) return errorResult("container_stop_page needs a pageId");
+      registry2.stop(pageId);
+      registry2.emitChanged();
+      logEvent({ level: "info", kind: "container-mcp", pageId, detail: "stop" });
+      return textResult(pageSummary(registry2, pageId) ?? { id: pageId, status: "stopped" });
+    }
+    case "container_restart_page": {
+      const registry2 = getRegistry();
+      const pageId = typeof a.pageId === "string" ? a.pageId.trim() : "";
+      if (!registry2 || !pageId) return errorResult("container_restart_page needs a pageId");
+      const state = await registry2.restartWithDeps(pageId);
+      logEvent({ level: "info", kind: "container-mcp", pageId, detail: "restart" });
+      return textResult(pageSummary(registry2, pageId) ?? { id: pageId, status: state.status });
+    }
+    default:
+      return errorResult(`unknown tool: ${name}`);
+  }
 }
-function get(url, timeoutMs = 2e4) {
+function buildMcpServer(getRegistry) {
+  const server = new Server(
+    { name: "dsh-container", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const p = request?.params ?? {};
+    try {
+      return await dispatch(getRegistry, String(p.name ?? ""), p.arguments ?? {});
+    } catch (err) {
+      return errorResult(`tool failed: ${err?.message ?? String(err)}`);
+    }
+  });
+  return server;
+}
+function readJsonBody(req) {
   return new Promise((resolve2, reject) => {
-    let settled = false;
-    let timer;
-    const done = (fn) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      fn();
-    };
-    const req = net.request({ url, method: "GET" });
-    req.setHeader("user-agent", "DesktopContainer");
-    timer = setTimeout(() => {
-      done(() => {
-        try {
-          req.abort();
-        } catch {
-        }
-        reject(new Error(`timeout fetching ${url}`));
-      });
-    }, timeoutMs);
-    req.on("response", (res) => {
-      if (res.statusCode !== 200) {
-        res.on("error", () => void 0);
-        done(() => reject(new Error(`HTTP ${res.statusCode}`)));
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > 4 * 1024 * 1024) {
+        reject(new Error("request body too large"));
+        req.destroy();
         return;
       }
-      const chunks = [];
-      res.on("data", (d) => chunks.push(Buffer.from(d)));
-      res.on(
-        "end",
-        () => done(() => resolve2({ status: res.statusCode || 0, body: Buffer.concat(chunks).toString("utf-8") }))
-      );
-      res.on("error", (e) => done(() => reject(e)));
+      chunks.push(c);
     });
-    req.on("error", (e) => done(() => reject(e)));
-    req.end();
-  });
-}
-async function listNodeVersions(includeIncompatible = false) {
-  if (process.platform !== "win32") throw new Error(m("node.notWin"));
-  let lastErr = "";
-  for (const url of indexUrls()) {
-    try {
-      const { body } = await get(url, 25e3);
-      const entries2 = JSON.parse(body);
-      const out = [];
-      for (const e of entries2) {
-        if (!isValidTag(e.version)) continue;
-        if (e.files && !e.files.includes("win-x64-zip") && !e.files.includes("win-x64")) continue;
-        const usable = nodeVersionUsable(e.version);
-        if (!usable && !includeIncompatible) continue;
-        out.push({ version: e.version, date: e.date, lts: e.lts, usable });
-        if (out.length >= MAX_VERSIONS) break;
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      if (!raw) return resolve2(null);
+      try {
+        resolve2(JSON.parse(raw));
+      } catch (err) {
+        reject(err);
       }
-      if (!out.length) throw new Error("no usable versions in index");
-      return out;
-    } catch (err) {
-      lastErr = err.message;
-    }
-  }
-  throw new Error(m("node.indexFail", { err: lastErr }));
-}
-const PROGRESS_INTERVAL_MS$1 = 150;
-function download(url, target, version, onProgress) {
-  return new Promise((resolve2, reject) => {
-    const req = get$1(
-      url,
-      { headers: { "user-agent": "DesktopContainer" }, timeout: 6e4 },
-      (res) => {
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          download(new URL(res.headers.location, url).toString(), target, version, onProgress).then(
-            resolve2,
-            reject
-          );
-          return;
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          reject(new Error(`HTTP ${res.statusCode}`));
-          return;
-        }
-        const total = Number(res.headers["content-length"] || 0);
-        let received = 0;
-        let lastEmit = 0;
-        const emit = (force) => {
-          const now = Date.now();
-          if (!force && now - lastEmit < PROGRESS_INTERVAL_MS$1) return;
-          lastEmit = now;
-          const percent = total ? Math.min(100, Math.floor(received / total * 100)) : void 0;
-          const mb = (received / 1024 / 1024).toFixed(1);
-          onProgress({
-            name: "Node",
-            phase: "fetch",
-            received,
-            total: total || void 0,
-            percent,
-            message: m("node.downloadingPct", { v: version, p: percent ?? "--", mb })
-          });
-        };
-        res.on("data", (chunk) => {
-          received += chunk.length;
-          emit(received >= total);
-        });
-        pipeline(res, createWriteStream(target)).then(
-          () => {
-            emit(true);
-            resolve2();
-          },
-          (err) => reject(err)
-        );
-      }
-    );
+    });
     req.on("error", reject);
-    req.on("timeout", () => req.destroy(new Error(`timeout fetching ${url}`)));
   });
 }
-async function downloadZip(urls, target, version, onProgress) {
-  let lastErr = "";
-  for (const url of urls) {
-    try {
-      await download(url, target, version, onProgress);
-      const size = existsSync(target) ? statSync(target).size : 0;
-      if (size < 10 * 1024 * 1024) throw new Error(m("node.tooSmall", { n: size }));
-      return;
-    } catch (err) {
-      lastErr = err.message;
-      rmSync(target, { force: true });
+let httpServer = null;
+let currentInfo = null;
+let currentToken = "";
+function writeToken(token) {
+  const file = join(bridgeDir(), "container-server.token");
+  mkdirSync(bridgeDir(), { recursive: true });
+  writeFileSync$1(file, token, { encoding: "utf8", mode: 384 });
+  return file;
+}
+function authorized(req) {
+  const header = req.headers["authorization"] || "";
+  const value = Array.isArray(header) ? header[0] : header;
+  return value === `Bearer ${currentToken}`;
+}
+function sendJson(res, status, body) {
+  if (res.headersSent) return;
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+async function startContainerMcpServer(getRegistry) {
+  if (httpServer && currentInfo) return currentInfo;
+  const token = randomBytes(24).toString("hex");
+  const tokenFile = writeToken(token);
+  currentToken = token;
+  const server = createServer$1(async (req, res) => {
+    if (!req.url) return sendJson(res, 400, { error: "bad request" });
+    if (!authorized(req)) return sendJson(res, 401, { error: "unauthorized" });
+    const [path2] = req.url.split("?");
+    if (path2 !== "/mcp") return sendJson(res, 404, { error: "not found" });
+    if (req.method !== "POST") {
+      res.writeHead(405, { allow: "POST", "content-type": "application/json" });
+      return res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32e3, message: "Method not allowed." }, id: null }));
     }
-  }
-  throw new Error(m("node.downloadFail", { err: lastErr }));
-}
-function extractZip(zip, dest) {
-  return new Promise((resolve2, reject) => {
-    const q = (p) => `'${p.replace(/'/g, "''")}'`;
-    const script = `Expand-Archive -LiteralPath ${q(zip)} -DestinationPath ${q(dest)} -Force`;
-    const encoded = Buffer.from(script, "utf16le").toString("base64");
-    execFile(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-      // Backstop so a wedged PowerShell can never hang the update forever (5 min is generous
-      // for a ~30 MB Node zip on a slow disk).
-      { windowsHide: true, timeout: 3e5 },
-      (err) => err ? reject(new Error(m("node.extractFail", { err: err.message }))) : resolve2()
-    );
-  });
-}
-function verifyRuntime(nodeExe, want) {
-  let out = "";
-  try {
-    out = execFileSync(nodeExe, ["--version"], { windowsHide: true }).toString().trim();
-  } catch {
-  }
-  if (out !== want) throw new Error(m("node.verifyFail"));
-}
-async function updateNodeRuntime(version, onProgress) {
-  if (process.platform !== "win32") throw new Error(m("node.notWin"));
-  const want = version.startsWith("v") ? version : `v${version}`;
-  if (!isValidTag(want)) throw new Error(m("node.badVersion", { v: version }));
-  const work = join(app$1.getPath("userData"), "node-update");
-  const staging = join(work, `runtime-${want}`);
-  const zip = join(work, `node-${want}-win-x64.zip`);
-  const extracted = join(work, `extract-${want}`);
-  rmSync(zip, { force: true });
-  rmSync(staging, { recursive: true, force: true });
-  rmSync(extracted, { recursive: true, force: true });
-  mkdirSync(work, { recursive: true });
-  onProgress({ name: "Node", phase: "fetch", percent: 0, message: m("node.downloading", { v: want }) });
-  await downloadZip(
-    distBases().map((b) => b.split("%V%").join(want)),
-    zip,
-    want,
-    onProgress
-  );
-  onProgress({ name: "Node", phase: "extract", message: m("node.extracting") });
-  await extractZip(zip, extracted);
-  const nested = readdirSync(extracted).find((d) => d.startsWith(`node-${want}-win-x64`));
-  const srcRoot = nested ? join(extracted, nested) : extracted;
-  mkdirSync(staging, { recursive: true });
-  for (const entry of readdirSync(srcRoot)) {
-    renameSync(join(srcRoot, entry), join(staging, entry));
-  }
-  verifyRuntime(join(staging, "node.exe"), want);
-  const dir = overrideNodeDir();
-  const old = `${dir}.old`;
-  if (existsSync(dir)) {
-    rmSync(old, { recursive: true, force: true });
+    let body;
     try {
-      renameSync(dir, old);
-    } catch (err) {
-      throw new Error(m("node.locked", { err: err.message }));
-    }
-  }
-  renameSync(staging, dir);
-  invalidateNodeRuntimeCache();
-  rmSync(zip, { force: true });
-  rmSync(extracted, { recursive: true, force: true });
-  rmSync(old, { recursive: true, force: true });
-  onProgress({ name: "Node", phase: "done", message: m("node.done", { v: want }) });
-  return getNodeRuntimeInfo(true);
-}
-async function restoreBundledNode() {
-  const dir = overrideNodeDir();
-  if (existsSync(dir)) {
-    const old = `${dir}.old`;
-    rmSync(old, { recursive: true, force: true });
-    try {
-      renameSync(dir, old);
-      rmSync(old, { recursive: true, force: true });
-    } catch (err) {
-      throw new Error(m("node.locked", { err: err.message }));
-    }
-  }
-  invalidateNodeRuntimeCache();
-  return getNodeRuntimeInfo(true);
-}
-const SERVER_DEP_MARKERS = [
-  "express",
-  "koa",
-  "fastify",
-  "@nestjs",
-  "hapi",
-  "restify",
-  "egg",
-  "midway",
-  "next",
-  "nuxt",
-  "astro",
-  "remix",
-  "hono",
-  "polka",
-  "socket.io",
-  "strapi",
-  "adonis",
-  "feathers",
-  "micro",
-  "http-server",
-  "graphql-yoga",
-  "body-parser"
-];
-const NON_NODE_MARKERS = [
-  { file: "Cargo.toml", label: "Rust" },
-  { file: "go.mod", label: "Go" },
-  { file: "pom.xml", label: "Java (Maven)" },
-  { file: "build.gradle", label: "Java (Gradle)" },
-  { file: "build.gradle.kts", label: "Java (Gradle)" },
-  { file: "Gemfile", label: "Ruby" },
-  { file: "requirements.txt", label: "Python" },
-  { file: "pyproject.toml", label: "Python" },
-  { file: "composer.json", label: "PHP" }
-];
-const KNOWN_NPM_BY_REPO = {
-  "openai/codex": "@openai/codex",
-  codex: "@openai/codex",
-  "anthropics/claude-code": "@anthropic-ai/claude-code",
-  "claude-code": "@anthropic-ai/claude-code",
-  "google-gemini/gemini-cli": "@google/gemini-cli",
-  "gemini-cli": "@google/gemini-cli",
-  "sst/opencode": "opencode-ai"
-};
-function npmSuggestionFor(source) {
-  const s = (source || "").trim().replace(/\.git$/i, "").replace(/[/\\]+$/, "");
-  if (!s) return null;
-  const segs = s.split(/[\\/:@]+/).filter((x) => x && x !== "github.com" && !x.includes("."));
-  const tail = segs.slice(-2);
-  if (tail.length === 2) {
-    const ownerRepo = `${tail[0]}/${tail[1]}`.toLowerCase();
-    if (KNOWN_NPM_BY_REPO[ownerRepo]) return KNOWN_NPM_BY_REPO[ownerRepo];
-  }
-  const repo = tail[tail.length - 1]?.toLowerCase();
-  return repo ? KNOWN_NPM_BY_REPO[repo] ?? null : null;
-}
-function readPkgSafe(dir) {
-  try {
-    return JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
-  } catch {
-    return null;
-  }
-}
-function hasServerDependency(pkg) {
-  if (!pkg) return false;
-  const all = { ...pkg.dependencies || {}, ...pkg.devDependencies || {} };
-  return Object.keys(all).some((n) => {
-    const k = n.toLowerCase();
-    return SERVER_DEP_MARKERS.some((mk) => k === mk || k.startsWith(`${mk}/`) || k.includes(mk));
-  });
-}
-function runtimeDepCount(pkg) {
-  if (!pkg) return 0;
-  return Object.keys(pkg.dependencies || {}).length + Object.keys(pkg.optionalDependencies || {}).length;
-}
-function cliStartCommand(dir, pkg) {
-  if (pkg?.scripts?.start) return "npm run start";
-  const bin = pkg?.bin;
-  let rel = null;
-  if (typeof bin === "string") rel = bin;
-  else if (bin && typeof bin === "object") rel = Object.values(bin)[0] ?? null;
-  if (rel) {
-    const clean = rel.replace(/^\.\//, "");
-    if (existsSync(join(dir, clean))) return `node ${clean}`;
-  }
-  return null;
-}
-function detectNonNodeStack(dir) {
-  for (const mk of NON_NODE_MARKERS) if (existsSync(join(dir, mk.file))) return mk.label;
-  try {
-    for (const e of readdirSync(dir)) {
-      if (/\.(csproj|fsproj|vbproj|sln|vcxproj)$/i.test(e)) return ".NET / C++";
-    }
-  } catch {
-  }
-  return null;
-}
-function classifyProject(dir) {
-  const pkg = readPkgSafe(dir);
-  const hasPkg = pkg !== null;
-  const nonNode = detectNonNodeStack(dir);
-  const pageViable = existsSync(join(dir, "server.js")) || existsSync(join(dir, "index.js")) || Boolean(pkg?.scripts?.start);
-  const binOnlyCli = Boolean(pkg?.bin) && !hasServerDependency(pkg);
-  const terminalStart = binOnlyCli ? cliStartCommand(dir, pkg) : null;
-  const terminalViable = Boolean(terminalStart);
-  const deps = runtimeDepCount(pkg);
-  const needsInstall = hasPkg && deps > 0;
-  if (terminalViable) {
-    return {
-      tier: needsInstall ? "yellow" : "green",
-      kind: "terminal",
-      needsInstall,
-      startCommand: terminalStart
-    };
-  }
-  if (pageViable) {
-    return { tier: needsInstall ? "yellow" : "green", kind: "page", needsInstall };
-  }
-  if (nonNode) {
-    return {
-      tier: "red",
-      needsInstall: false,
-      reason: "install.rejectNonNode",
-      reasonParams: { stack: nonNode }
-    };
-  }
-  if (hasPkg && (pkg?.private || pkg?.workspaces)) {
-    return { tier: "red", needsInstall: false, reason: "install.rejectMonorepoRoot" };
-  }
-  return { tier: "red", needsInstall: false, reason: "install.rejectNoEntry" };
-}
-function githubRawBase(url) {
-  const https = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-  if (https) return `https://raw.githubusercontent.com/${https[1]}/${https[2]}/HEAD`;
-  const ssh = url.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i);
-  if (ssh) return `https://raw.githubusercontent.com/${ssh[1]}/${ssh[2]}/HEAD`;
-  return null;
-}
-function fetchRaw(url, timeoutMs = 5e3) {
-  return new Promise((resolve2) => {
-    let settled = false;
-    const done = (v) => {
-      if (settled) return;
-      settled = true;
-      resolve2(v);
-    };
-    try {
-      const lib = url.startsWith("https") ? get$1 : get$2;
-      const req = lib(url, { timeout: timeoutMs }, (res) => {
-        if ((res.statusCode ?? 0) !== 200) {
-          res.resume();
-          return done({ ok: false, body: "" });
-        }
-        let body = "";
-        res.setEncoding("utf-8");
-        res.on("data", (d) => body += d);
-        res.on("end", () => done({ ok: true, body }));
-        res.on("error", () => done({ ok: false, body: "" }));
-      });
-      req.on("error", () => done({ ok: false, body: "" }));
-      req.on("timeout", () => {
-        req.destroy();
-        done({ ok: false, body: "" });
-      });
+      body = await readJsonBody(req);
     } catch {
-      done({ ok: false, body: "" });
+      return sendJson(res, 400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
     }
-  });
-}
-async function probeRemoteTier(repoUrl) {
-  const base = githubRawBase(repoUrl);
-  if (!base) return null;
-  const [pkgRes, serverRes, indexRes, cargoRes, gomodRes] = await Promise.all([
-    fetchRaw(`${base}/package.json`),
-    fetchRaw(`${base}/server.js`),
-    fetchRaw(`${base}/index.js`),
-    fetchRaw(`${base}/Cargo.toml`),
-    fetchRaw(`${base}/go.mod`)
-  ]);
-  const nonNodeLabel = () => {
-    if (cargoRes.ok) return "Rust";
-    if (gomodRes.ok) return "Go";
-    return null;
-  };
-  let pkg = null;
-  if (pkgRes.ok) {
+    const mcp = buildMcpServer(getRegistry);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: void 0 });
+    res.on("close", () => {
+      void transport.close();
+      void mcp.close();
+    });
     try {
-      pkg = JSON.parse(pkgRes.body);
-    } catch {
-      return null;
-    }
-  } else {
-    const stack2 = nonNodeLabel();
-    if (stack2 && !serverRes.ok && !indexRes.ok) {
-      return {
-        tier: "red",
-        needsInstall: false,
-        reason: "install.rejectNonNode",
-        reasonParams: { stack: stack2 }
-      };
-    }
-    return null;
-  }
-  const pageViable = serverRes.ok || indexRes.ok || Boolean(pkg?.scripts?.start);
-  if (pageViable || Boolean(pkg?.bin)) return null;
-  const stack = nonNodeLabel();
-  if (stack) {
-    return {
-      tier: "red",
-      needsInstall: false,
-      reason: "install.rejectNonNode",
-      reasonParams: { stack }
-    };
-  }
-  if (pkg?.private || pkg?.workspaces) {
-    return { tier: "red", needsInstall: false, reason: "install.rejectMonorepoRoot" };
-  }
-  return null;
-}
-function makeGit(dir) {
-  const options = { baseDir: dir, maxConcurrentProcesses: 4 };
-  return simpleGit(options);
-}
-function normalizeRepoUrl$1(url) {
-  return url.trim().replace(/\/+$/, "").replace(/^(https?:\/\/)[^@/\s]+@/i, "$1");
-}
-function isSshRemote(url) {
-  return /^ssh:\/\//i.test(url) || /^[^@\s/]+@[^:\s]+:/.test(url.trim());
-}
-function recloneUrl(url) {
-  return isSshRemote(url) ? url : normalizeRepoUrl$1(url).replace(/^(https?:\/\/)[^@/\s]+@/i, "$1");
-}
-async function cloneWithAuthFallback(dir, url, onProgress) {
-  const makeGit2 = () => onProgress ? simpleGit({
-    baseDir: process.cwd(),
-    progress: (ev) => {
-      onProgress({
-        stage: String(ev.stage),
-        percent: Number(ev.progress) || 0,
-        processed: ev.processed,
-        total: ev.total
-      });
-    }
-  }) : simpleGit({ baseDir: process.cwd() });
-  try {
-    await makeGit2().clone(url, dir);
-  } catch (err) {
-    const fallback = recloneUrl(url);
-    if (fallback === normalizeRepoUrl$1(url)) throw err;
-    await makeGit2().clone(fallback, dir);
-  }
-}
-async function checkOne(name, dir, isContainer) {
-  const base = { name, dir, isContainer, ok: false };
-  try {
-    if (!existsSync(join(dir, ".git"))) {
-      return { ...base, error: m("git.notRepo") };
-    }
-    const git = makeGit(dir);
-    const branch = (await git.revparse(["--abbrev-ref", "HEAD"])).trim();
-    const localHead = (await git.revparse(["HEAD"])).trim();
-    const remotes = await git.getRemotes(true);
-    const origin = remotes.find((r) => r.name === "origin");
-    if (!origin?.refs.fetch) return { ...base, branch, localHead, error: m("git.noOrigin") };
-    const ls = await git.listRemote([origin.refs.fetch]);
-    const headLine = ls.split("\n").find((l) => l.includes(`refs/heads/${branch}`)) || ls.split("\n").find((l) => l.includes("HEAD"));
-    if (!headLine) return { ...base, branch, localHead, error: m("git.branchMissing", { branch }) };
-    const remoteHead = headLine.split(/\s+/)[0];
-    return {
-      ...base,
-      ok: true,
-      branch,
-      localHead,
-      remoteHead,
-      hasUpdate: remoteHead !== localHead
-    };
-  } catch (err) {
-    return { ...base, error: err.message };
-  }
-}
-async function performUpdate$1(target) {
-  try {
-    const git = makeGit(target.dir);
-    const status = await git.status();
-    if (!status.isClean()) {
-      return {
-        name: target.name,
-        ok: false,
-        updated: false,
-        error: m("git.dirtySkipped")
-      };
-    }
-    const before = (await git.revparse(["HEAD"])).trim();
-    await git.pull(["--ff-only"]);
-    const after = (await git.revparse(["HEAD"])).trim();
-    return { name: target.name, ok: true, updated: before !== after };
-  } catch (err) {
-    return { name: target.name, ok: false, updated: false, error: err.message };
-  }
-}
-async function adoptOrigin(dir, originUrl) {
-  const pageGit = simpleGit({ baseDir: dir });
-  await pageGit.init(["-b", "main"]);
-  await pageGit.add(".");
-  await pageGit.commit("Imported into DSH container (origin tracked for updates)", [
-    "--allow-empty",
-    "--author",
-    "DSH Container <container@local>",
-    "--date",
-    "now"
-  ]);
-  await pageGit.remote(["add", "origin", originUrl]);
-}
-function applyPortOverride(dirName, port) {
-  if (!isValidPort(port)) return;
-  updateSettings({ pagePorts: { ...getSettings().pagePorts, [dirName]: Number(port) } });
-}
-function seedContainerManifest(pagesDir, dirName, port, cls) {
-  const dir = join(pagesDir, dirName);
-  const metaFile = join(dir, "container.json");
-  if (!existsSync(metaFile)) {
-    const manifest = {
-      name: dirName,
-      description: {
-        zh: msgIn("zh", "install.importedDesc"),
-        en: msgIn("en", "install.importedDesc")
-      }
-    };
-    if (cls.kind === "terminal") {
-      manifest.kind = "terminal";
-      if (cls.startCommand) manifest.startCommand = cls.startCommand;
-    } else {
-      manifest.kind = "page";
-      if (isValidPort(port)) manifest.port = Number(port);
-    }
-    writeFileSync$1(metaFile, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
-  }
-  return cls;
-}
-function bundledNpmCli$1() {
-  return join(dirname(getNodeExePath()), "node_modules", "npm", "bin", "npm-cli.js");
-}
-async function installDeps(dir, onMessage) {
-  const pkg = readPkgSafe(dir);
-  const deps = runtimeDepCount(pkg);
-  if (!deps) return;
-  const cli = bundledNpmCli$1();
-  if (!existsSync(cli)) throw new Error(m("install.npmMissing"));
-  applyNpmRegistryEnv();
-  const args = existsSync(join(dir, "package-lock.json")) ? ["ci"] : ["install"];
-  await runStream(
-    getNodeExePath(),
-    [cli, ...args, "--no-audit", "--no-fund"],
-    dir,
-    `npm ${args.join(" ")}`,
-    onMessage,
-    // the import target folder *is* the page id — mirror npm's output into its log file
-    basename(dir)
-  );
-}
-function runStream(cmd, args, cwd, caption, onMessage, logTo, timeoutMs = 15 * 6e4) {
-  return new Promise((resolve2, reject) => {
-    const child = spawn(cmd, args, { cwd, env: bundledEnv(), windowsHide: true, shell: false });
-    console.log(`[install] ${caption} started in ${cwd}`);
-    let tail = "";
-    const onData = (d) => {
-      const text = String(d);
-      if (logTo) logPageLine(logTo, text);
-      tail += text;
-      if (tail.length > 8e3) tail = tail.slice(-8e3);
-      const lines = text.split(/\r?\n/).filter((l) => l.trim());
-      if (lines.length) onMessage?.(lines[lines.length - 1].trim());
-    };
-    child.stdout?.on("data", onData);
-    child.stderr?.on("data", onData);
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      console.error(`[install] ${caption} timed out after ${Math.round(timeoutMs / 6e4)}min`);
-      reject(new Error(m("install.timeout", { cmd: caption })));
-    }, timeoutMs);
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      console.error(`[install] ${caption} spawn failed:`, err);
-      reject(err);
-    });
-    child.on("close", (code2) => {
-      clearTimeout(timer);
-      if (code2 === 0) {
-        console.log(`[install] ${caption} finished`);
-        resolve2();
-      } else {
-        console.error(`[install] ${caption} failed (exit ${code2}): ${tail.slice(-500)}`);
-        reject(new Error(m("install.depsFail", { cmd: caption, tail: tail.slice(-500) })));
-      }
-    });
-  });
-}
-function validateRepoUrl(url) {
-  const trimmed = url.trim();
-  if (!/^(https?:\/\/|git@)[^\s]+\.git$/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
-    throw new Error(m("install.repoUrlInvalid"));
-  }
-  if (/[\s;`$&|]/.test(trimmed)) throw new Error(m("dsh.illegalRepoChars"));
-  return trimmed;
-}
-async function installFromGit(pagesDir, repoUrl, name, port, originUrl, onProgress, opts) {
-  const url = validateRepoUrl(repoUrl);
-  let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
-  if (!dirName) {
-    const base = url.split("/").pop() || "page";
-    dirName = base.replace(/\.git$/i, "");
-  }
-  if (!dirName || dirName === "." || dirName === "..") throw new Error(m("install.dirNameNeeded"));
-  const target = join(pagesDir, dirName);
-  if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
-  mkdirSync(pagesDir, { recursive: true });
-  const emit = (p) => onProgress?.({ op: "git", phase: "preparing", source: repoUrl, target: dirName, ...p });
-  emit({ phase: "preparing" });
-  const pre = await probeRemoteTier(url).catch(() => null);
-  if (pre?.tier === "red") {
-    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: pre.reason });
-    throw new Error(m(pre.reason, pre.reasonParams));
-  }
-  await cloneWithAuthFallback(
-    target,
-    url,
-    (g) => emit({ phase: "receiving", percent: g.percent, message: gitCaption(g) })
-  );
-  emit({ phase: "validating" });
-  const cls = classifyProject(target);
-  if (cls.tier === "red") {
-    rmSync(target, { recursive: true, force: true });
-    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: cls.reason });
-    throw new Error(m(cls.reason, cls.reasonParams));
-  }
-  applyPortOverride(dirName, port);
-  seedContainerManifest(pagesDir, dirName, port, cls);
-  try {
-    readPageMeta(pagesDir, dirName);
-  } catch (err) {
-    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err);
-    logEvent({
-      level: "warn",
-      kind: "install.needsConfig",
-      pageId: dirName,
-      detail: err.message
-    });
-  }
-  await runInstallStep(target, cls, opts, emit);
-  emit({ phase: "done", percent: 100 });
-  return dirName;
-}
-async function runInstallStep(target, cls, opts, emit) {
-  if (!opts?.autoInstall || !cls.needsInstall) return;
-  emit({ phase: "installing", message: "npm install" });
-  try {
-    await installDeps(target, (line) => emit({ phase: "installing", message: line }));
-  } catch (err) {
-    console.warn("[installer] dependency install failed (import kept):", err.message);
-    logEvent({
-      level: "warn",
-      kind: "install.depsFailed",
-      detail: err.message
-    });
-  }
-}
-function gitCaption(g) {
-  const cnt = g.total ? ` (${g.processed ?? 0}/${g.total})` : "";
-  return `${g.stage}${cnt} ${g.percent}%`;
-}
-function parseNpmSpec(spec) {
-  const s = (spec || "").trim();
-  if (!s) throw new Error(m("install.npmSpecNeeded"));
-  const at = s.startsWith("@") ? s.indexOf("@", 1) : s.indexOf("@");
-  const pkg = at === -1 ? s : s.slice(0, at);
-  const version = at === -1 ? void 0 : s.slice(at + 1);
-  const validName = /^(?:@[a-z0-9-*~][a-z0-9-*._~]*\/[a-z0-9-._~]+|[a-z0-9-._~]+)$/i.test(pkg);
-  const validVersion = version === void 0 || /^[\w.+-]+$/.test(version);
-  if (!pkg || !validName || !validVersion) {
-    throw new Error(m("install.npmSpecInvalid", { spec: s }));
-  }
-  return { pkg, version };
-}
-async function installFromNpm(pagesDir, spec, name, onProgress) {
-  const { pkg, version } = parseNpmSpec(spec);
-  let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
-  if (!dirName) dirName = pkg.replace(/^@/, "").replace(/\//g, "-");
-  if (!dirName || dirName === "." || dirName === "..") throw new Error(m("install.dirNameNeeded"));
-  const target = join(pagesDir, dirName);
-  if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
-  const specLabel = `${pkg}@${version || "latest"}`;
-  const emit = (p) => onProgress?.({ op: "npm", phase: "preparing", source: specLabel, target: dirName, ...p });
-  emit({ phase: "preparing" });
-  mkdirSync(target, { recursive: true });
-  writeFileSync$1(
-    join(target, "package.json"),
-    JSON.stringify({ name: dirName.toLowerCase(), version: "0.0.0", private: true }, null, 2) + "\n",
-    "utf-8"
-  );
-  applyNpmRegistryEnv();
-  const cli = bundledNpmCli$1();
-  if (!existsSync(cli)) {
-    rmSync(target, { recursive: true, force: true });
-    throw new Error(m("install.npmMissing"));
-  }
-  emit({ phase: "installing", message: `npm install ${specLabel}` });
-  try {
-    await runStream(
-      getNodeExePath(),
-      [cli, "install", specLabel, "--no-audit", "--no-fund"],
-      target,
-      `npm install ${specLabel}`,
-      (line) => emit({ phase: "installing", message: line }),
-      // mirror the npm install into the new page's own log file, like a hosted page's output
-      dirName
-    );
-  } catch (err) {
-    rmSync(target, { recursive: true, force: true });
-    throw err;
-  }
-  emit({ phase: "validating" });
-  const pkgDir = join(target, "node_modules", ...pkg.split("/"));
-  const meta = readPkgSafe(pkgDir);
-  let binRel = null;
-  const bin = meta?.bin;
-  if (typeof bin === "string") binRel = bin;
-  else if (bin && typeof bin === "object") {
-    const short = pkg.split("/").pop();
-    binRel = bin[short] ?? Object.values(bin)[0] ?? null;
-  }
-  const entry = binRel ? binRel.replace(/^\.\//, "") : null;
-  if (!entry || !existsSync(join(pkgDir, entry))) {
-    rmSync(target, { recursive: true, force: true });
-    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: "install.npmNoBin" });
-    throw new Error(m("install.npmNoBin", { pkg }));
-  }
-  const manifest = {
-    name: dirName,
-    description: {
-      zh: msgIn("zh", "install.importedNpmDesc"),
-      en: msgIn("en", "install.importedNpmDesc")
-    },
-    kind: "terminal",
-    startCommand: `node node_modules/${pkg}/${entry}`
-  };
-  writeFileSync$1(join(target, "container.json"), JSON.stringify(manifest, null, 2) + "\n", "utf-8");
-  try {
-    readPageMeta(pagesDir, dirName);
-  } catch (err) {
-    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err);
-    logEvent({
-      level: "warn",
-      kind: "install.needsConfig",
-      pageId: dirName,
-      detail: err.message
-    });
-  }
-  emit({ phase: "done", percent: 100 });
-  return dirName;
-}
-async function planCopy(root2) {
-  const entries2 = [];
-  let totalBytes = 0;
-  const walk = async (dir, relBase) => {
-    const items2 = await readdir(dir, { withFileTypes: true });
-    items2.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-    for (const it of items2) {
-      if (it.name === "node_modules" || it.name === ".git") continue;
-      const abs = join(dir, it.name);
-      const rel = relBase ? `${relBase}/${it.name}` : it.name;
-      if (it.isDirectory()) {
-        entries2.push({ abs, rel, dir: true, size: 0 });
-        await walk(abs, rel);
-      } else if (it.isFile()) {
-        const s = await stat(abs);
-        entries2.push({ abs, rel, dir: false, size: s.size });
-        totalBytes += s.size;
-      }
-    }
-  };
-  await walk(root2, "");
-  return { entries: entries2, totalBytes };
-}
-async function copyDirWithProgress(srcDir, target, emit) {
-  const { entries: entries2, totalBytes } = await planCopy(srcDir);
-  mkdirSync(target, { recursive: true });
-  let received = 0;
-  let last = 0;
-  const report = (force = false) => {
-    const now = Date.now();
-    if (!force && now - last < 100) return;
-    last = now;
-    emit({
-      phase: "receiving",
-      percent: totalBytes ? Math.min(100, Math.floor(received / totalBytes * 100)) : 100,
-      received,
-      total: totalBytes
-    });
-  };
-  report(true);
-  for (const e of entries2) {
-    const dest = join(target, e.rel);
-    if (e.dir) {
-      if (!existsSync(dest)) mkdirSync(dest, { recursive: true });
-      continue;
-    }
-    await copyFile(e.abs, dest);
-    received += e.size;
-    report();
-  }
-  report(true);
-}
-async function installFromLocalDir(pagesDir, srcDir, name, port, originUrl, onProgress, opts) {
-  if (!existsSync(srcDir) || !existsSync(join(srcDir, ".")))
-    throw new Error(m("install.srcMissing", { dir: srcDir }));
-  let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
-  if (!dirName) dirName = srcDir.split(/[\\/]/).filter(Boolean).pop() || "";
-  if (!dirName) throw new Error(m("install.dirNameFail"));
-  const target = join(pagesDir, dirName);
-  if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
-  const emit = (p) => onProgress?.({ op: "dir", phase: "preparing", source: srcDir, target: dirName, ...p });
-  emit({ phase: "preparing" });
-  const cls = classifyProject(srcDir);
-  if (cls.tier === "red") {
-    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: cls.reason });
-    throw new Error(m(cls.reason, cls.reasonParams));
-  }
-  await copyDirWithProgress(srcDir, target, emit);
-  emit({ phase: "validating" });
-  applyPortOverride(dirName, port);
-  seedContainerManifest(pagesDir, dirName, port, cls);
-  try {
-    readPageMeta(pagesDir, dirName);
-  } catch (err) {
-    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err);
-    logEvent({
-      level: "warn",
-      kind: "install.needsConfig",
-      pageId: dirName,
-      detail: err.message
-    });
-  }
-  emit({ phase: "finalizing" });
-  await runInstallStep(target, cls, opts, emit);
-  const origin = (originUrl || "").trim();
-  if (origin) {
-    try {
-      await adoptOrigin(target, origin);
+      await mcp.connect(transport);
+      await transport.handleRequest(req, res, body);
     } catch (err) {
-      console.warn("[installer] adoptOrigin failed (ignored):", err.message);
-    }
-  }
-  emit({ phase: "done", percent: 100 });
-  return dirName;
-}
-function removePage(pagesDir, id2) {
-  if (id2 === "__container__") throw new Error(m("install.cannotRemoveContainer"));
-  if (BUILTIN_PAGE_IDS.has(id2)) throw new Error(m("install.builtinUndeletable", { id: id2 }));
-  const target = join(pagesDir, id2);
-  if (!target.startsWith(pagesDir + sep)) throw new Error(m("install.illegalPageId"));
-  rmSync(target, { recursive: true, force: true });
-  const { [id2]: _dropped, ...pagePorts } = getSettings().pagePorts ?? {};
-  updateSettings({ pagePorts });
-}
-const ofs = (() => {
-  try {
-    if (typeof require2 === "function") return require2("original-fs");
-  } catch {
-  }
-  return fs;
-})();
-const RELEASE_BRANCH = "release";
-const RELEASE_BRANCH_BETA = "release-beta";
-let betaBranchMissing = false;
-function effectiveReleaseBranch() {
-  const wantsBeta = getSettings().containerChannel === "beta";
-  return wantsBeta && !betaBranchMissing ? RELEASE_BRANCH_BETA : RELEASE_BRANCH;
-}
-function resetBranchProbe() {
-  betaBranchMissing = false;
-}
-const PROGRESS_INTERVAL_MS = 150;
-const MIN_ASAR_BYTES = 1024 * 1024;
-function readStagedUpdate() {
-  const metaFile = join(updatesRoot(), "update-meta.json");
-  let meta = null;
-  try {
-    meta = JSON.parse(readFileSync(metaFile, "utf-8"));
-  } catch {
-    return null;
-  }
-  if (!meta?.pendingAsar || meta.broken) return null;
-  const pending = join(updatesRoot(), meta.pendingAsar);
-  let size = 0;
-  try {
-    size = ofs.statSync(pending).size;
-  } catch {
-    size = 0;
-  }
-  if (size >= MIN_ASAR_BYTES) return { version: meta.version || "", commit: meta.commit || "" };
-  try {
-    writeFileSync$1(metaFile, JSON.stringify({ ...meta, pendingAsar: null }));
-  } catch {
-  }
-  return null;
-}
-function clearStagedUpdate() {
-  const metaFile = join(updatesRoot(), "update-meta.json");
-  try {
-    const meta = JSON.parse(readFileSync(metaFile, "utf-8"));
-    writeFileSync$1(metaFile, JSON.stringify({ ...meta, pendingAsar: null }));
-  } catch {
-  }
-}
-function updatesRoot() {
-  return join(dirname(app$1.getPath("exe")), "resources", "updates");
-}
-function gitDir() {
-  return join(updatesRoot(), "release.git");
-}
-function runGit(args) {
-  const res = spawnSync("git", args, { encoding: "utf-8", windowsHide: true });
-  if (res.status !== 0)
-    throw new Error((res.stderr || res.stdout || `git ${args[0]} failed`).trim());
-  return res.stdout;
-}
-function runGitAsync(args, onStderr) {
-  return new Promise((resolve2, reject) => {
-    const child = spawn("git", args, { windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => stdout += String(d));
-    child.stderr.on("data", (d) => {
-      const s = String(d);
-      stderr += s;
-      onStderr?.(s);
-    });
-    child.on("error", reject);
-    child.on(
-      "close",
-      (code2) => code2 === 0 ? resolve2(stdout) : reject(new Error((stderr || stdout || `git ${args[0]} failed`).trim()))
-    );
-  });
-}
-function ensureRepo() {
-  if (!existsSync(join(gitDir(), "HEAD"))) {
-    mkdirSync(dirname(gitDir()), { recursive: true });
-    runGit(["init", "--bare", gitDir()]);
-    runGit(["--git-dir", gitDir(), "remote", "add", "origin", CONTAINER_REPO_URL]);
-  }
-}
-function parseGitPercent(chunk) {
-  let last = null;
-  for (const hit of chunk.matchAll(/(\d+)%/g)) last = Number(hit[1]);
-  return last;
-}
-async function fetchTip(name, onProgress) {
-  ensureRepo();
-  const branch = effectiveReleaseBranch();
-  try {
-    await fetchBranch(branch, name, onProgress);
-  } catch (err) {
-    if (branch !== RELEASE_BRANCH) {
-      betaBranchMissing = true;
-      logEvent({
-        level: "warn",
-        kind: "ota.channelFallback",
-        detail: `${branch}: ${err.message}`,
-        meta: { from: branch, to: RELEASE_BRANCH }
-      });
-      await fetchBranch(RELEASE_BRANCH, name, onProgress);
-    } else {
-      throw err;
-    }
-  }
-  const commit = runGit(["--git-dir", gitDir(), "rev-parse", "FETCH_HEAD"]).trim();
-  const version = runGit(["--git-dir", gitDir(), "show", `${commit}:version.txt`]).split(/\r?\n/)[0].trim();
-  return { version, commit };
-}
-function fetchBranch(branch, name, onProgress) {
-  return runGitAsync(
-    ["--git-dir", gitDir(), "fetch", "--progress", "--depth", "1", "origin", branch],
-    (chunk) => {
-      if (!onProgress) return;
-      const percent = parseGitPercent(chunk) ?? void 0;
-      onProgress({
-        name,
-        phase: "fetch",
-        percent,
-        message: m("git.asarFetching", { percent: percent === void 0 ? "" : ` ${percent}%` })
-      });
-    }
-  );
-}
-async function streamBlob(rev, partPath, resumeFrom, total, name, resumed, onProgress) {
-  const child = spawn("git", ["--git-dir", gitDir(), "cat-file", "blob", rev], {
-    windowsHide: true
-  });
-  let stderr = "";
-  child.stderr.on("data", (d) => stderr += String(d));
-  let toSkip = resumeFrom;
-  let written = resumeFrom;
-  let lastEmit = 0;
-  const emit = (force = false) => {
-    const now = Date.now();
-    if (!onProgress || !force && now - lastEmit < PROGRESS_INTERVAL_MS) return;
-    lastEmit = now;
-    const received = Math.min(written, total);
-    const percent = total > 0 ? Math.floor(received / total * 100) : 0;
-    onProgress({
-      name,
-      phase: "extract",
-      received,
-      total,
-      percent,
-      resumed,
-      message: m(resumed ? "git.asarResuming" : "git.asarExtracting", {
-        percent: `${percent}%`
-      })
-    });
-  };
-  const gate = new Transform({
-    transform(chunk, _enc, cb) {
-      let data = chunk;
-      if (toSkip > 0) {
-        if (data.length <= toSkip) {
-          toSkip -= data.length;
-          return cb();
-        }
-        data = data.subarray(toSkip);
-        toSkip = 0;
-      }
-      written += data.length;
-      emit();
-      cb(null, data);
+      console.warn("[container-mcp] request failed:", err?.message ?? err);
+      sendJson(res, 500, { jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null });
     }
   });
-  const out = createWriteStream(partPath, { flags: resumeFrom > 0 ? "a" : "w" });
-  const closed = new Promise((resolve2) => {
-    let settled = false;
-    const settle = (code2) => {
-      if (settled) return;
-      settled = true;
-      resolve2(code2);
-    };
-    child.on("close", (code2) => settle(code2 ?? -1));
-    child.on("exit", (code2) => settle(code2 ?? -1));
-    child.on("error", (err) => {
-      stderr = err.message;
-      settle(-1);
-    });
-  });
-  try {
-    await pipeline(child.stdout, gate, out);
-    const code2 = await closed;
-    if (code2 !== 0) throw new Error((stderr || `git cat-file failed (code ${code2})`).trim());
-    emit(true);
-  } catch (err) {
-    child.kill();
-    out.destroy();
-    throw err;
-  }
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const url = `http://127.0.0.1:${port}/mcp`;
+  httpServer = server;
+  currentInfo = { url, port, tokenFile };
+  const endpoint = { url, port, tokenFile, bearerToken: token };
+  setContainerEndpoint(endpoint);
+  logEvent({ level: "info", kind: "container-mcp", detail: "server started", meta: { url } });
+  refreshBridge();
+  return currentInfo;
 }
-function pruneOldReleases(root2, keep) {
+async function stopContainerMcpServer() {
+  setContainerEndpoint(null);
+  const server = httpServer;
+  httpServer = null;
+  currentInfo = null;
+  currentToken = "";
+  if (server) {
+    await new Promise((resolve2) => server.close(() => resolve2()));
+  }
   try {
-    for (const f of readdirSync(root2)) {
-      if (f === "release.git" || keep.has(f)) continue;
-      const p = join(root2, f);
-      try {
-        if (!statSync(p).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      try {
-        rmSync(p, { recursive: true, force: true });
-      } catch {
-      }
-    }
+    rmSync(join(bridgeDir(), "container-server.token"), { force: true });
   } catch {
   }
+  logEvent({ level: "info", kind: "container-mcp", detail: "server stopped" });
+  refreshBridge();
 }
-async function downloadAsar(tip, name, onProgress) {
-  const root2 = updatesRoot();
-  mkdirSync(root2, { recursive: true });
-  const rev = `${tip.commit}:app.zip`;
-  const total = Number(runGit(["--git-dir", gitDir(), "cat-file", "-s", rev]).trim());
-  if (!Number.isFinite(total) || total <= 0) throw new Error(m("git.asarSizeUnknown"));
-  const dir = join(root2, tip.commit);
-  mkdirSync(dir, { recursive: true });
-  const part = join(dir, "app.zip.part");
-  let resumeFrom = 0;
-  if (existsSync(part)) {
-    const size = statSync(part).size;
-    if (size > 0 && size < total) resumeFrom = size;
-    else rmSync(part, { force: true });
-  }
-  await streamBlob(rev, part, resumeFrom, total, name, resumeFrom > 0, onProgress);
-  if (statSync(part).size !== total)
-    throw new Error(m("git.asarSizeMismatch", { want: total, got: statSync(part).size }));
-  const zipPath = join(dir, "app.zip");
-  rmSync(zipPath, { force: true });
-  renameSync(part, zipPath);
-  onProgress?.({ name, phase: "extract", percent: 100, message: m("git.zipUnpacking") });
-  console.log(`[update] extracting ${zipPath} -> ${dir}`);
-  await extractZip(zipPath, dir);
-  console.log(`[update] extract finished: ${dir}`);
-  const stagedAsar = join(dir, "app.asar");
-  if (!ofs.existsSync(stagedAsar) || ofs.statSync(stagedAsar).size < MIN_ASAR_BYTES)
-    throw new Error(m("git.asarExtractFailed"));
-  const metaFile = join(root2, "update-meta.json");
-  let prev = {};
-  try {
-    prev = JSON.parse(readFileSync(metaFile, "utf-8"));
-  } catch {
-  }
-  writeFileSync$1(
-    metaFile,
-    JSON.stringify({
-      ...prev,
-      broken: false,
-      pendingAsar: join(tip.commit, "app.asar"),
-      version: tip.version,
-      commit: tip.commit
-    })
-  );
-  const keep = /* @__PURE__ */ new Set([tip.commit]);
-  if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0]);
-  pruneOldReleases(root2, keep);
-  notifyEvent("notify.updateReadyTitle", "notify.updateReadyBody", { version: tip.version });
-  logEvent({
-    level: "info",
-    kind: "ota.staged",
-    meta: { version: tip.version, commit: tip.commit.slice(0, 8), branch: effectiveReleaseBranch() }
-  });
-  onProgress?.({ name, phase: "done", received: total, total, percent: 100 });
+function isContainerMcpServerRunning() {
+  return !!httpServer;
 }
-async function checkAsarUpdate(name, dir) {
-  const base = {
-    name,
-    dir,
-    isContainer: true,
-    ok: false,
-    source: "git",
-    action: "apply-asar",
-    canAutoUpdate: true
-  };
-  try {
-    const current = app$1.getVersion();
-    let staged = readStagedUpdate();
-    if (staged && !isNewer(current, staged.version)) {
-      clearStagedUpdate();
-      staged = null;
-    }
-    if (staged) {
-      const rb2 = canRollbackAsar();
-      return {
-        ...base,
-        ok: true,
-        branch: effectiveReleaseBranch(),
-        localHead: current,
-        remoteHead: staged.commit.slice(0, 8),
-        currentVersion: current,
-        latestVersion: staged.version,
-        hasUpdate: false,
-        pendingRestart: true,
-        canRollback: rb2.available,
-        rollbackVersion: rb2.fromVersion
-      };
-    }
-    const tip = await fetchTip(name);
-    const rb = canRollbackAsar();
-    return {
-      ...base,
-      ok: true,
-      branch: effectiveReleaseBranch(),
-      localHead: current,
-      remoteHead: tip.commit.slice(0, 8),
-      currentVersion: current,
-      latestVersion: tip.version,
-      // local ahead of the release branch (e.g. a locally-built 0.1.5 vs server 0.1.4) is
-      // simply up-to-date: hasUpdate stays false and no action is offered.
-      hasUpdate: isNewer(current, tip.version),
-      pendingRestart: false,
-      canRollback: rb.available,
-      rollbackVersion: rb.fromVersion
-    };
-  } catch (err) {
-    return { ...base, error: err.message };
-  }
-}
-async function applyAsarUpdate(name, onProgress) {
-  try {
-    const tip = await fetchTip(name, onProgress);
-    console.log(`[update] ${name}: release tip ${tip.version} (${tip.commit.slice(0, 8)})`);
-    await downloadAsar(tip, name, onProgress);
-    console.log(`[update] ${name}: staged ${tip.version}, restart to apply`);
-    return {
-      name,
-      ok: true,
-      updated: true,
-      message: m("git.asarDownloaded", { version: tip.version })
-    };
-  } catch (err) {
-    console.error(`[update] ${name}: apply failed:`, err);
-    return { name, ok: false, updated: false, error: err.message };
-  }
-}
-function psStr(s) {
-  return `'${s.replace(/'/g, "''")}'`;
-}
-function relaunchToApplyStaged() {
-  if (!app$1.isPackaged) return false;
-  const metaFile = join(updatesRoot(), "update-meta.json");
-  let meta = null;
-  try {
-    meta = JSON.parse(readFileSync(metaFile, "utf-8"));
-  } catch {
-    meta = null;
-  }
-  const pending = meta?.pendingAsar;
-  if (!pending) return false;
-  const stagedAsar = join(updatesRoot(), pending);
-  let size = 0;
-  try {
-    size = ofs.statSync(stagedAsar).size;
-  } catch {
-    size = 0;
-  }
-  if (size < MIN_ASAR_BYTES) return false;
-  const stagedDir = dirname(stagedAsar);
-  const resourcesDir = dirname(updatesRoot());
-  const targetAsar = join(resourcesDir, "app.asar");
-  const stagedUnpacked = join(stagedDir, "app.asar.unpacked");
-  const targetUnpacked = join(resourcesDir, "app.asar.unpacked");
-  const exe = app$1.getPath("exe");
-  try {
-    const withOrigin = { ...meta, rollbackFromVersion: app$1.getVersion() };
-    writeFileSync$1(metaFile, JSON.stringify(withOrigin));
-    meta = withOrigin;
-  } catch {
-  }
-  logEvent({
-    level: "info",
-    kind: "ota.applying",
-    meta: { from: app$1.getVersion(), to: meta?.version || "unknown" }
-  });
-  const noise = /* @__PURE__ */ new Set([
-    "--autostart",
-    "--dsh-relaunched",
-    "--dsh-boot-retry",
-    "--dsh-asar-launched"
-  ]);
-  const relaunchArgs = process.argv.slice(1).filter((a) => !noise.has(a) && !a.startsWith("--app-path=")).concat("--dsh-relaunched");
-  const ps1 = join(updatesRoot(), "apply-update.ps1");
-  const script = [
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    `$appPid = ${process.pid}`,
-    `$exe = ${psStr(exe)}`,
-    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(", ")})`,
-    `$srcAsar = ${psStr(stagedAsar)}`,
-    `$dstAsar = ${psStr(targetAsar)}`,
-    `$srcUnpacked = ${psStr(stagedUnpacked)}`,
-    `$dstUnpacked = ${psStr(targetUnpacked)}`,
-    `$metaFile = ${psStr(metaFile)}`,
-    // Wait for the app to actually exit (this PID gone), then a short grace for the OS to free
-    // the asar / native handles.
-    "while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }",
-    "Start-Sleep -Milliseconds 800",
-    // Keep a single rollback copy of the version we are replacing — asar AND natives, so a
-    // rollback can restore a consistent pair (a mismatched unpacked tree breaks node-pty).
-    'if (Test-Path $dstAsar) { Copy-Item $dstAsar "$dstAsar.bak" -Force }',
-    'if (Test-Path $dstUnpacked) { robocopy $dstUnpacked "$dstUnpacked.bak" /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }',
-    // Retry the copy while a lingering AV/defender handle releases (up to ~10s).
-    "for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $srcAsar $dstAsar -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }",
-    // node-pty's natives live beside the asar; mirror them too (robocopy /MIR returns 0-7 on ok).
-    "if (Test-Path $srcUnpacked) { robocopy $srcUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }",
-    // Clear pending so a later plain launch does not re-apply; record what is now current.
-    // WriteAllText (not Set-Content -Encoding UTF8) so PowerShell 5.1 emits no BOM — the main
-    // process JSON.parses this file and a leading \uFEFF would make it throw and mis-report "none".
-    "try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.currentAsar = $m.pendingAsar; $m.pendingAsar = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}",
-    "Start-Process -FilePath $exe -ArgumentList $relaunchArgs"
-  ].join("\r\n");
-  try {
-    mkdirSync(updatesRoot(), { recursive: true });
-    writeFileSync$1(ps1, script, "utf-8");
-    const helper = spawn(
-      "cmd.exe",
-      [
-        "/c",
-        "start",
-        "",
-        "/min",
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-WindowStyle",
-        "Hidden",
-        "-File",
-        ps1
-      ],
-      { detached: true, stdio: "ignore", windowsHide: true }
-    );
-    helper.on("error", (err) => console.error("[update] swap helper spawn failed:", err));
-    helper.unref();
-    console.log(`[update] scheduled in-place swap of ${pending} into ${targetAsar}`);
-    return true;
-  } catch (err) {
-    console.error("[update] failed to schedule staged asar swap:", err);
-    return false;
-  }
-}
-function readMeta() {
-  try {
-    return JSON.parse(readFileSync(join(updatesRoot(), "update-meta.json"), "utf-8"));
-  } catch {
-    return null;
-  }
-}
-function getUpdateHistory() {
-  const meta = readMeta();
-  const staged = readStagedUpdate();
-  const rb = canRollbackAsar();
-  return {
-    running: app$1.getVersion(),
-    current: staged?.version || null,
-    backup: rb.available ? rb.fromVersion || null : null,
-    rollbackFrom: meta?.rollbackFromVersion || null,
-    pendingRestart: !!staged
-  };
-}
-function canRollbackAsar() {
-  if (!app$1.isPackaged) return { available: false };
-  const resourcesDir = dirname(updatesRoot());
-  const bakAsar = join(resourcesDir, "app.asar.bak");
-  let size = 0;
-  try {
-    size = ofs.statSync(bakAsar).size;
-  } catch {
-    size = 0;
-  }
-  if (size < MIN_ASAR_BYTES) return { available: false };
-  const meta = readMeta();
-  const from = meta?.rollbackFromVersion;
-  return from ? { available: true, fromVersion: from } : { available: false };
-}
-function rollbackToPreviousAsar() {
-  const rb = canRollbackAsar();
-  if (!rb.available) return false;
-  const resourcesDir = dirname(updatesRoot());
-  const targetAsar = join(resourcesDir, "app.asar");
-  const bakAsar = `${targetAsar}.bak`;
-  const targetUnpacked = join(resourcesDir, "app.asar.unpacked");
-  const bakUnpacked = `${targetUnpacked}.bak`;
-  const metaFile = join(updatesRoot(), "update-meta.json");
-  const exe = app$1.getPath("exe");
-  const noise = /* @__PURE__ */ new Set(["--autostart", "--dsh-relaunched", "--dsh-boot-retry", "--dsh-asar-launched"]);
-  const relaunchArgs = process.argv.slice(1).filter((a) => !noise.has(a) && !a.startsWith("--app-path=")).concat("--dsh-relaunched");
-  const ps1 = join(updatesRoot(), "rollback-update.ps1");
-  const script = [
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    `$appPid = ${process.pid}`,
-    `$exe = ${psStr(exe)}`,
-    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(", ")})`,
-    `$bakAsar = ${psStr(bakAsar)}`,
-    `$dstAsar = ${psStr(targetAsar)}`,
-    `$bakUnpacked = ${psStr(bakUnpacked)}`,
-    `$dstUnpacked = ${psStr(targetUnpacked)}`,
-    `$metaFile = ${psStr(metaFile)}`,
-    "while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }",
-    "Start-Sleep -Milliseconds 800",
-    // Stage a verified copy first: moving a corrupt .bak over the live asar would brick boot.
-    'for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $bakAsar "$dstAsar.rbk" -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }',
-    'if ((Get-Item "$dstAsar.rbk" -ErrorAction SilentlyContinue).Length -lt ' + MIN_ASAR_BYTES + ") { exit 1 }",
-    'Move-Item -Force "$dstAsar.rbk" $dstAsar',
-    // Restore the matching natives tree, then drop both backups (rollback is one-way).
-    "if (Test-Path $bakUnpacked) { robocopy $bakUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }",
-    'Remove-Item "$bakAsar","$bakUnpacked" -Recurse -Force -ErrorAction SilentlyContinue',
-    // Consume the rollback record + any pending marker so boot/OTA read the restored state.
-    "try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.pendingAsar = $null; $m.rollbackFromVersion = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}",
-    "Start-Process -FilePath $exe -ArgumentList $relaunchArgs"
-  ].join("\r\n");
-  try {
-    writeFileSync$1(ps1, script, "utf-8");
-    const helper = spawn(
-      "cmd.exe",
-      [
-        "/c",
-        "start",
-        "",
-        "/min",
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-WindowStyle",
-        "Hidden",
-        "-File",
-        ps1
-      ],
-      { detached: true, stdio: "ignore", windowsHide: true }
-    );
-    helper.on("error", (err) => console.error("[update] rollback helper spawn failed:", err));
-    helper.unref();
-    console.log("[update] scheduled asar rollback swap");
-    logEvent({
-      level: "warn",
-      kind: "ota.rollback",
-      meta: { from: app$1.getVersion(), to: rb.fromVersion || "unknown" }
-    });
-    return true;
-  } catch (err) {
-    console.error("[update] failed to schedule asar rollback:", err);
-    return false;
-  }
+function getContainerMcpServerInfo() {
+  return currentInfo;
 }
 const DEFAULT_PROFILE = "web";
 const STALE_EMPTY_LOCK_MS = 15e3;
@@ -16569,6 +15609,21 @@ function installedBundleVersion(name, profileDir) {
   }
   return null;
 }
+function installedPkgMeta(name, profileDir) {
+  const parts = name.split("/");
+  for (const dir of bundleSearchDirs(profileDir)) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, ...parts, "package.json"), "utf-8"));
+      const repo = pkg.repository;
+      return {
+        version: typeof pkg.version === "string" ? pkg.version : "",
+        repository: typeof repo === "string" ? repo : repo?.url || (typeof pkg.homepage === "string" ? pkg.homepage : "")
+      };
+    } catch {
+    }
+  }
+  return { version: "", repository: "" };
+}
 function bundleSearchDirs(profileDir) {
   const dirs = [join(profileDir, "node_modules")];
   for (const root2 of dshRoots()) {
@@ -16690,7 +15745,7 @@ async function applyPluginUpdate(name, channel, gitUrl, profile = DEFAULT_PROFIL
   return m("dsh.npmUpdated", { spec: s });
 }
 async function updateAllDshPlugins(profile = DEFAULT_PROFILE) {
-  const current = new Map(listDshPlugins(profile).map((p) => [p.name, p.version]));
+  const current2 = new Map(listDshPlugins(profile).map((p) => [p.name, p.version]));
   const targets = (await checkDshPluginUpdates(profile)).filter((u) => u.updateAvailable);
   if (!targets.length) return "";
   const done = [];
@@ -16701,7 +15756,7 @@ async function updateAllDshPlugins(profile = DEFAULT_PROFILE) {
     index++;
     broadcastPluginOp({ name: u.name, done: false, index, total });
     try {
-      const pinnedToGit = !!parseGitSpec(current.get(u.name) || "");
+      const pinnedToGit = !!parseGitSpec(current2.get(u.name) || "");
       if (u.channel === "npm" && pinnedToGit && u.latest) {
         const spec = `${u.name}@${u.latest}`;
         await installDshPlugin(spec, profile);
@@ -16730,9 +15785,13 @@ function parseGitSpec(version) {
   return null;
 }
 async function latestGitTag(repo) {
-  if (/[\s;`$&|]/.test(repo)) return null;
+  if (/[\s;`$&|]/.test(repo)) return { tag: null };
   const res = await runCli$1("git", ["ls-remote", "--tags", repo], { timeoutMs: 6e4 });
-  if (res.code !== 0) return null;
+  if (res.code !== 0)
+    return {
+      tag: null,
+      error: (res.stderr || res.stdout || `git ls-remote exited ${res.code}`).trim().slice(-300)
+    };
   const tagSha = /* @__PURE__ */ new Map();
   const commitSha = /* @__PURE__ */ new Map();
   for (const line of res.stdout.split(/\r?\n/)) {
@@ -16757,20 +15816,44 @@ async function latestGitTag(repo) {
       bestName = name;
     }
   }
-  if (!bestName) return null;
+  if (!bestName) return { tag: null };
   const sha = commitSha.get(bestName) || tagSha.get(bestName) || "";
-  return { version: bestName, sha };
+  return { tag: { version: bestName, sha } };
+}
+function parseSemver(s) {
+  const clean = (s || "").replace(/^[\^~>=<*v]+/i, "").trim();
+  const m2 = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(clean);
+  if (!m2) return null;
+  const pre = m2[4] ? m2[4].split(".").map((x) => /^\d+$/.test(x) ? parseInt(x, 10) : x) : [];
+  return { major: +m2[1], minor: +m2[2], patch: +m2[3], pre };
+}
+function cmpPrerelease(a, b) {
+  if (!a.length && !b.length) return 0;
+  if (!a.length) return 1;
+  if (!b.length) return -1;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const ai = a[i];
+    const bi = b[i];
+    if (ai === void 0) return -1;
+    if (bi === void 0) return 1;
+    if (ai === bi) continue;
+    const aNum = typeof ai === "number";
+    const bNum = typeof bi === "number";
+    if (aNum && bNum) return ai < bi ? -1 : 1;
+    if (aNum) return -1;
+    if (bNum) return 1;
+    return String(ai) < String(bi) ? -1 : 1;
+  }
+  return 0;
 }
 function isNewerVersion(installed2, latest) {
-  const clean = (s) => s.replace(/^[\^~>=<*v]+/i, "").trim();
-  if (!/^\d/.test(clean(installed2)) || !/^\d/.test(clean(latest))) return false;
-  const seg = (s) => clean(s).split(/[.+-]/).map((x) => parseInt(x, 10) || 0);
-  const a = seg(installed2);
-  const b = seg(latest);
-  for (let i = 0; i < 3; i++) {
-    if ((a[i] || 0) !== (b[i] || 0)) return (b[i] || 0) > (a[i] || 0);
-  }
-  return false;
+  const a = parseSemver(installed2);
+  const b = parseSemver(latest);
+  if (!a || !b) return false;
+  if (a.major !== b.major) return b.major > a.major;
+  if (a.minor !== b.minor) return b.minor > a.minor;
+  if (a.patch !== b.patch) return b.patch > a.patch;
+  return cmpPrerelease(a.pre, b.pre) < 0;
 }
 async function npmLatestVersion(name) {
   const res = await runCli$1("npm", ["view", name, "version", "--registry", npmRegistryWithSlash()], {
@@ -16785,7 +15868,7 @@ function cleanVersion(s) {
 function isSemver(s) {
   return /^\d+\.\d+\.\d+/.test(s);
 }
-function normalizeRepoUrl(raw) {
+function normalizeRepoUrl$1(raw) {
   const s = (raw || "").trim().replace(/^git\+/i, "");
   if (!s) return null;
   const gh = /^(?:github[:/]|https?:\/\/github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec(s);
@@ -16805,25 +15888,33 @@ function installedSemverOf(raw, git) {
   const v = cleanVersion(git ? git.ref || "" : raw);
   return isSemver(v) ? v : null;
 }
-async function describePluginUpdate(p) {
+async function describePluginUpdate(p, profileDir) {
   const gitDep = parseGitSpec(p.version);
-  const installedSem = installedSemverOf(p.version, gitDep);
-  const repo = gitDep?.repo || normalizeRepoUrl(await npmRepositoryUrl(p.name));
-  const [npmRaw, tag] = await Promise.all([
+  const meta = installedPkgMeta(p.name, profileDir);
+  const npmInstalled = cleanVersion(meta.version || "");
+  const installedSem = !gitDep && isSemver(npmInstalled) ? npmInstalled : installedSemverOf(p.version, gitDep);
+  const repo = gitDep?.repo || normalizeRepoUrl$1(await npmRepositoryUrl(p.name)) || normalizeRepoUrl$1(meta.repository);
+  const [npmRaw, gitLookup] = await Promise.all([
     npmLatestVersion(p.name),
-    repo ? latestGitTag(repo) : Promise.resolve(null)
+    repo ? latestGitTag(repo) : Promise.resolve({
+      tag: null,
+      error: void 0
+    })
   ]);
+  const tag = gitLookup.tag;
+  const gitErr = gitLookup.error;
+  const withErr = (u) => gitErr ? { ...u, error: gitErr } : u;
   const npmSem = isSemver(cleanVersion(npmRaw)) ? cleanVersion(npmRaw) : null;
   const gitSem = tag && isSemver(cleanVersion(tag.version)) ? cleanVersion(tag.version) : null;
   if (gitDep && !installedSem && tag && repo) {
     const moved = (gitDep.ref || "").toLowerCase() !== tag.sha.toLowerCase();
-    return moved ? {
+    return moved ? withErr({
       name: p.name,
       updateAvailable: true,
       latest: tag.version,
       channel: "git",
       gitUrl: `${repo}#${tag.version}`
-    } : { name: p.name, updateAvailable: false, channel: "git" };
+    }) : withErr({ name: p.name, updateAvailable: false, channel: "git" });
   }
   let best = null;
   if (npmSem) best = { ver: npmSem, channel: "npm" };
@@ -16833,9 +15924,10 @@ async function describePluginUpdate(p) {
       channel: "git",
       gitUrl: repo && tag ? `${repo}#${tag.version}` : void 0
     };
-  if (!best) return { name: p.name, updateAvailable: false, channel: gitDep ? "git" : "npm" };
+  if (!best) return withErr({ name: p.name, updateAvailable: false, channel: gitDep ? "git" : "npm" });
   const updateAvailable = installedSem ? isNewerVersion(installedSem, best.ver) : false;
-  if (!updateAvailable) return { name: p.name, updateAvailable: false, channel: best.channel };
+  if (!updateAvailable)
+    return withErr({ name: p.name, updateAvailable: false, channel: best.channel });
   return {
     name: p.name,
     updateAvailable: true,
@@ -16845,10 +15937,17 @@ async function describePluginUpdate(p) {
   };
 }
 async function checkDshPluginUpdates(profile = DEFAULT_PROFILE) {
+  const profileDir = resolveDshProfileDir(profile);
   const plugins = listDshPlugins(profile).filter((p) => p.source === "profile");
   return Promise.all(
     plugins.map(
-      (p) => describePluginUpdate(p).catch(() => ({ name: p.name, updateAvailable: false }))
+      (p) => describePluginUpdate(p, profileDir).catch(
+        (e) => ({
+          name: p.name,
+          updateAvailable: false,
+          error: e.message
+        })
+      )
     )
   );
 }
@@ -16940,6 +16039,7 @@ const dsh = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty(
   getDshStatus,
   installDshPlugin,
   isDshInstalled,
+  isNewerVersion,
   listDshPlugins,
   pnpmBinDirs,
   repairPnpmCmd,
@@ -16947,6 +16047,545 @@ const dsh = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty(
   updateAllDshPlugins,
   updateDshPlugin
 }, Symbol.toStringTag, { value: "Module" }));
+class PtySession {
+  constructor(id2, title2, cwd, shell2, args, env2) {
+    this.id = id2;
+    this.title = title2;
+    this.cwd = cwd;
+    this.proc = pty.spawn(shell2, args, {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: existsSync(cwd) ? cwd : os.homedir(),
+      env: env2,
+      ...WINPTY_BACKEND
+    });
+    this.proc.onData((chunk) => this.emitter.emit("data", chunk));
+    this.proc.onExit(({ exitCode }) => this.emitter.emit("exit", exitCode ?? 0));
+  }
+  id;
+  title;
+  cwd;
+  proc;
+  emitter = new EventEmitter();
+  on(event, cb) {
+    this.emitter.on(event, cb);
+    return () => this.emitter.off(event, cb);
+  }
+  write(data) {
+    try {
+      this.proc.write(data);
+    } catch {
+    }
+  }
+  resize(cols, rows) {
+    if (cols <= 0 || rows <= 0) return;
+    try {
+      this.proc.resize(cols, rows);
+    } catch {
+    }
+  }
+  kill() {
+    try {
+      this.proc.kill();
+    } catch {
+    }
+  }
+}
+function expandTilde(cmd) {
+  return cmd.replace(/(^|\s)~(?=[/\\]|$)/g, (_m, pre) => pre + os.homedir());
+}
+function whichOnPath(cmd, env2) {
+  if (cmd.includes("/") || cmd.includes("\\")) return null;
+  const pathKey = Object.keys(env2).find((k) => k.toUpperCase() === "PATH") || "PATH";
+  const exts = process.platform === "win32" ? (env2.PATHEXT || ".CMD;.EXE;.BAT;.COM").split(";").map((e) => e.toLowerCase()) : [""];
+  for (const dir of (env2[pathKey] || "").split(process.platform === "win32" ? ";" : ":")) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = join(dir, cmd + ext);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+async function terminalEnv() {
+  const env2 = { ...process.env, TERM: "xterm-256color" };
+  let nodeDir = "";
+  try {
+    nodeDir = dirname(getNodeExePath());
+  } catch {
+    nodeDir = dirname(process.execPath);
+  }
+  const dirs = [nodeDir, ...await pnpmBinDirs()].filter(Boolean);
+  if (dirs.length) {
+    const sep2 = process.platform === "win32" ? ";" : ":";
+    const key = Object.keys(env2).find((k) => k.toUpperCase() === "PATH") || "PATH";
+    env2[key] = [...dirs, env2[key] || ""].join(sep2);
+  }
+  return env2;
+}
+let shellCache = null;
+function detectShells() {
+  if (shellCache) return shellCache;
+  const out = [];
+  if (process.platform === "win32") {
+    const sysRoot = process.env.SystemRoot || "C:\\Windows";
+    out.push({ id: "powershell", label: "PowerShell", path: "powershell.exe", args: ["-NoLogo"] });
+    out.push({ id: "cmd", label: "Command Prompt", path: "cmd.exe", args: [] });
+    const pwsh = whichOnPath("pwsh.exe", process.env);
+    if (pwsh) out.push({ id: "pwsh", label: "PowerShell 7", path: pwsh, args: ["-NoLogo"] });
+    const bases = [
+      process.env["ProgramFiles"],
+      process.env["ProgramFiles(x86)"],
+      process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Programs") : ""
+    ].filter(Boolean);
+    let bash = "";
+    for (const base of bases) {
+      const c = join(base, "Git", "bin", "bash.exe");
+      if (existsSync(c)) {
+        bash = c;
+        break;
+      }
+    }
+    if (!bash) {
+      const git = whichOnPath("git.exe", process.env);
+      if (git) {
+        const c = join(dirname(dirname(dirname(git))), "bin", "bash.exe");
+        if (existsSync(c)) bash = c;
+      }
+    }
+    if (bash) out.push({ id: "gitbash", label: "Git Bash", path: bash, args: ["-l"] });
+    const wsl = join(sysRoot, "System32", "wsl.exe");
+    if (existsSync(wsl)) out.push({ id: "wsl", label: "Ubuntu (WSL)", path: wsl, args: [] });
+  } else {
+    const seen = /* @__PURE__ */ new Set();
+    const add = (id2, label, path2) => {
+      if (path2 && existsSync(path2) && !seen.has(path2)) {
+        seen.add(path2);
+        out.push({ id: id2, label, path: path2, args: ["-l"] });
+      }
+    };
+    const shell2 = process.env.SHELL;
+    add("login", shell2 ? basename(shell2) : "Shell", shell2);
+    add("bash", "bash", "/bin/bash");
+    add("zsh", "zsh", "/bin/zsh");
+  }
+  shellCache = out;
+  return out;
+}
+function defaultShellId() {
+  if (process.platform === "win32") return "powershell";
+  return detectShells().some((s) => s.id === "login") ? "login" : "bash";
+}
+function listShells() {
+  const def = defaultShellId();
+  return [...detectShells()].sort((a, b) => a.id === def ? -1 : b.id === def ? 1 : 0);
+}
+function resolveShell(id2) {
+  const list = detectShells();
+  const hit = id2 && list.find((s) => s.id === id2) || list.find((s) => s.id === defaultShellId()) || list[0];
+  return hit ? { shell: hit.path, args: hit.args } : { shell: "powershell.exe", args: ["-NoLogo"] };
+}
+let counter = 0;
+const sessions = /* @__PURE__ */ new Map();
+const WINPTY_BACKEND = process.platform === "win32" ? { useConpty: false } : {};
+class PtyManager {
+  /** Start a shell rooted at `cwd`, titled `title`; returns its session descriptor.
+      With `run`, the session executes that command line instead of an interactive shell; else it
+      launches the picker's `shell` id (or the default when unset). */
+  async start(cwd, title2, opts) {
+    const id2 = `pty-${Date.now().toString(36)}-${++counter}`;
+    let shell2;
+    let args;
+    let env2 = await terminalEnv();
+    const run = opts?.run;
+    if (run?.command.trim()) {
+      const [cmd, ...rest] = expandTilde(run.command.trim()).split(/\s+/);
+      env2 = { ...env2, ...run.env || {} };
+      shell2 = cmd === "node" ? getNodeExePath() : whichOnPath(cmd, env2) ?? cmd;
+      args = rest;
+      if (cmd !== "node" && !existsSync(shell2)) {
+        throw new Error(m("pty.commandNotFound", { cmd }));
+      }
+    } else {
+      ({ shell: shell2, args } = resolveShell(opts?.shell));
+    }
+    const session2 = new PtySession(id2, title2, cwd, shell2, args, env2);
+    session2.on("exit", () => sessions.delete(id2));
+    sessions.set(id2, session2);
+    return { id: id2, title: title2, cwd: session2.cwd };
+  }
+  get(id2) {
+    return sessions.get(id2);
+  }
+  write(id2, data) {
+    sessions.get(id2)?.write(data);
+  }
+  resize(id2, cols, rows) {
+    sessions.get(id2)?.resize(cols, rows);
+  }
+  kill(id2) {
+    const s = sessions.get(id2);
+    if (!s) return;
+    s.kill();
+    sessions.delete(id2);
+  }
+  killAll() {
+    for (const s of [...sessions.values()]) s.kill();
+    sessions.clear();
+  }
+}
+const MAX_ATTEMPTS = 2;
+const OWNER_PREFIX = "autopilot:";
+function depsSatisfied(task, done) {
+  return (task.deps ?? []).every((d) => done.has(d));
+}
+function pickNextTask(tasks, busy) {
+  const done = new Set(tasks.filter((t) => t.status === "done").map((t) => t.id));
+  let best = null;
+  for (const t of tasks) {
+    if (t.status !== "todo") continue;
+    if (t.owner) continue;
+    if (busy.has(t.id)) continue;
+    if ((t.attempts ?? 0) >= MAX_ATTEMPTS) continue;
+    if (!depsSatisfied(t, done)) continue;
+    if (!best || t.at < best.at) best = t;
+  }
+  return best;
+}
+function buildPrompt(task, template) {
+  const deps = (task.deps ?? []).join(", ") || "无";
+  if (template && template.trim()) {
+    return template.replace(/\{title\}/g, task.title).replace(/\{id\}/g, task.id).replace(/\{deps\}/g, deps);
+  }
+  return `请完成以下任务：
+标题：${task.title}
+编号：${task.id}
+依赖：${deps}
+完成后，务必调用 dsh-workspace 的 workspace_complete（taskId="${task.id}"）回填你的结果。`;
+}
+class TaskDispatcher {
+  deps;
+  inFlight = /* @__PURE__ */ new Set();
+  constructor(deps) {
+    this.deps = deps;
+  }
+  now() {
+    return this.deps.now?.() ?? Date.now();
+  }
+  /** Number of tasks currently dispatched and awaiting their executor's exit. */
+  get busyCount() {
+    return this.inFlight.size;
+  }
+  tick() {
+    const s = this.deps.settings();
+    if (!s.enabled) return;
+    const registry2 = this.deps.getRegistry();
+    if (!registry2 || !s.executorPageId) return;
+    const page = registry2.get(s.executorPageId);
+    if (!page || page.kind !== "terminal") return;
+    const concurrency = Math.max(1, s.concurrency || 1);
+    const tasks = this.deps.readTasks();
+    while (this.inFlight.size < concurrency) {
+      const next2 = pickNextTask(tasks, this.inFlight);
+      if (!next2) break;
+      this.inFlight.add(next2.id);
+      void this.dispatch(next2, page, s);
+    }
+  }
+  async dispatch(task, page, s) {
+    const at = this.now();
+    const fresh = this.deps.readTasks();
+    const t = fresh.find((x) => x.id === task.id);
+    if (!t) {
+      this.inFlight.delete(task.id);
+      return;
+    }
+    t.status = "doing";
+    t.owner = `${OWNER_PREFIX}${page.id}`;
+    t.dispatchedAt = at;
+    t.attempts = (t.attempts ?? 0) + 1;
+    t.at = at;
+    this.deps.writeTasks(fresh);
+    this.deps.log({ level: "info", detail: `派发给执行页`, taskId: task.id, pageId: page.id });
+    const prompt = buildPrompt(task, s.prompt);
+    try {
+      const exec = await this.deps.executor.run(page, task, prompt);
+      const code2 = await exec.exited;
+      this.reconcile(task.id, code2);
+    } catch (err) {
+      this.deps.log({
+        level: "error",
+        detail: `执行器启动失败：${err?.message ?? String(err)}`,
+        taskId: task.id,
+        pageId: page.id
+      });
+      this.reconcile(task.id, -1);
+    }
+  }
+  /** Reconcile one finished dispatch against the shared queue's truth, then look for more work. */
+  reconcile(taskId, code2) {
+    this.inFlight.delete(taskId);
+    const tasks = this.deps.readTasks();
+    const t = tasks.find((x) => x.id === taskId);
+    if (!t) {
+      this.deps.log({ level: "warn", detail: `任务已不存在，跳过收尾`, taskId });
+      this.tick();
+      return;
+    }
+    if (t.status === "done") {
+      this.deps.log({ level: "info", detail: `由 agent 回填完成`, taskId });
+    } else if (code2 === 0) {
+      t.status = "done";
+      t.at = this.now();
+      if (!t.result) t.result = "容器代记：执行器正常退出，但 agent 未回填结果";
+      this.deps.writeTasks(tasks);
+      this.deps.log({ level: "info", detail: `执行器退出(0)，容器代为记为完成`, taskId });
+    } else {
+      t.status = "todo";
+      delete t.owner;
+      delete t.dispatchedAt;
+      this.deps.writeTasks(tasks);
+      this.deps.log({
+        level: "warn",
+        detail: `执行器异常退出(${code2})，退回待办（已试 ${t.attempts ?? 0} 次）`,
+        taskId
+      });
+    }
+    this.tick();
+  }
+}
+const BOOT_INJECT_MS = 3500;
+const POLL_MS = 15e3;
+function ptyTextForLog(chunk) {
+  return chunk.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-Z\\-_]/g, "").replace(/\r\n?/g, "\n");
+}
+class HeadlessExecutor {
+  pty = new PtyManager();
+  async run(page, task, prompt) {
+    const env2 = { ...buildPageEnv(page), ...bridgeEnvVars(), ...workspaceEnvVars() };
+    const info = await this.pty.start(page.dir, `autopilot:${task.id}`, {
+      run: { command: expandStartCommand(page.startCommand), env: env2 }
+    });
+    const session2 = this.pty.get(info.id);
+    if (!session2) throw new Error("pty session vanished right after start");
+    session2.on("data", (chunk) => logPageLine(page.id, ptyTextForLog(String(chunk))));
+    const exited = new Promise((resolve2) => {
+      session2.on("exit", (code2) => resolve2(Number(code2)));
+    });
+    setTimeout(() => {
+      try {
+        session2.write(`
+${prompt}
+`);
+      } catch {
+      }
+    }, BOOT_INJECT_MS);
+    return { exited };
+  }
+}
+let dispatcher = null;
+let offTasksChanged = null;
+let pollTimer = null;
+function initAutopilot(getRegistry) {
+  if (dispatcher) return;
+  dispatcher = new TaskDispatcher({
+    getRegistry,
+    executor: new HeadlessExecutor(),
+    settings: () => {
+      const s = getSettings();
+      return {
+        enabled: !!s.autopilotEnabled,
+        executorPageId: s.autopilotExecutorPage,
+        concurrency: s.autopilotConcurrency ?? 1,
+        prompt: s.autopilotPrompt
+      };
+    },
+    readTasks: () => normalizeTasks(readWorkspace().tasks),
+    writeTasks: (tasks) => {
+      writeWorkspace({ tasks });
+    },
+    log: (e) => logEvent({
+      level: e.level,
+      kind: "autopilot",
+      pageId: e.pageId,
+      detail: e.detail,
+      ...e.taskId ? { meta: { taskId: e.taskId } } : {}
+    })
+  });
+  offTasksChanged = onWorkspaceTasksChanged(() => dispatcher?.tick());
+  pollTimer = setInterval(() => dispatcher?.tick(), POLL_MS);
+  dispatcher.tick();
+}
+function disposeAutopilot() {
+  offTasksChanged?.();
+  offTasksChanged = null;
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  dispatcher = null;
+}
+function kickAutopilot() {
+  dispatcher?.tick();
+}
+const ok = (data) => ({ ok: true, data });
+const fail = (err) => ({
+  ok: false,
+  error: err instanceof Error ? err.message : String(err)
+});
+const MODIFIERS = {
+  ctrl: "ctrl",
+  control: "ctrl",
+  cmd: "meta",
+  command: "meta",
+  meta: "meta",
+  super: "meta",
+  win: "meta",
+  winkeys: "meta",
+  alt: "alt",
+  option: "alt",
+  shift: "shift"
+};
+const KEY_ALIASES = {
+  escape: "esc",
+  " ": "space",
+  spacebar: "space",
+  delete: "del",
+  insert: "ins",
+  pageup: "pgup",
+  pagedown: "pgdn",
+  arrowup: "up",
+  arrowdown: "down",
+  arrowleft: "left",
+  arrowright: "right",
+  backquote: "`",
+  graveaccent: "`",
+  plus: "+",
+  numpadadd: "+"
+};
+function normalizeKey(raw) {
+  const lowered = (raw || "").toLowerCase();
+  return KEY_ALIASES[lowered] ?? lowered.trim();
+}
+function normalizeCode(code2) {
+  const c = (code2 || "").trim();
+  if (!c) return "";
+  const mm = c.match(/^Key([A-Z])$/);
+  if (mm) return mm[1].toLowerCase();
+  const num = c.match(/^Digit(\d)$/);
+  if (num) return num[1];
+  return normalizeKey(c);
+}
+function parseAccelerator(accel) {
+  const text = (accel || "").trim();
+  if (!text) return null;
+  const parts = text.split(/\+(?=\S)/);
+  const key = normalizeKey(parts.pop());
+  if (!key) return null;
+  const out = { key, ctrl: false, shift: false, alt: false, meta: false };
+  for (const raw of parts) {
+    const name = raw.trim().toLowerCase();
+    if (name === "cmdorctrl" || name === "commandorcontrol" || name === "ctrlorcommand") {
+      out.ctrl = true;
+      continue;
+    }
+    const slot = MODIFIERS[name];
+    if (slot === "ctrl" || slot === "shift" || slot === "alt" || slot === "meta") out[slot] = true;
+    else return null;
+  }
+  const dedicated = /^f\d{1,2}$/.test(key) || ["esc", "space", "tab", "enter", "up", "down", "left", "right"].includes(key);
+  if (!out.ctrl && !out.alt && !out.meta && !dedicated) return null;
+  return out;
+}
+function matchesAccelerator(accel, e) {
+  const parts = parseAccelerator(accel);
+  if (!parts) return false;
+  const key = normalizeKey(e.key) || normalizeCode(e.code);
+  if (!key || key !== parts.key) return false;
+  return Boolean(e.ctrl) === parts.ctrl && Boolean(e.shift) === parts.shift && Boolean(e.alt) === parts.alt && Boolean(e.meta) === parts.meta;
+}
+function makeGit(dir) {
+  const options = { baseDir: dir, maxConcurrentProcesses: 4 };
+  return simpleGit(options);
+}
+function normalizeRepoUrl(url) {
+  return url.trim().replace(/\/+$/, "").replace(/^(https?:\/\/)[^@/\s]+@/i, "$1");
+}
+function isSshRemote(url) {
+  return /^ssh:\/\//i.test(url) || /^[^@\s/]+@[^:\s]+:/.test(url.trim());
+}
+function recloneUrl(url) {
+  return isSshRemote(url) ? url : normalizeRepoUrl(url).replace(/^(https?:\/\/)[^@/\s]+@/i, "$1");
+}
+async function cloneWithAuthFallback(dir, url, onProgress) {
+  const makeGit2 = () => onProgress ? simpleGit({
+    baseDir: process.cwd(),
+    progress: (ev) => {
+      onProgress({
+        stage: String(ev.stage),
+        percent: Number(ev.progress) || 0,
+        processed: ev.processed,
+        total: ev.total
+      });
+    }
+  }) : simpleGit({ baseDir: process.cwd() });
+  try {
+    await makeGit2().clone(url, dir);
+  } catch (err) {
+    const fallback = recloneUrl(url);
+    if (fallback === normalizeRepoUrl(url)) throw err;
+    await makeGit2().clone(fallback, dir);
+  }
+}
+async function checkOne(name, dir, isContainer) {
+  const base = { name, dir, isContainer, ok: false };
+  try {
+    if (!existsSync(join(dir, ".git"))) {
+      return { ...base, error: m("git.notRepo") };
+    }
+    const git = makeGit(dir);
+    const branch = (await git.revparse(["--abbrev-ref", "HEAD"])).trim();
+    const localHead = (await git.revparse(["HEAD"])).trim();
+    const remotes = await git.getRemotes(true);
+    const origin = remotes.find((r) => r.name === "origin");
+    if (!origin?.refs.fetch) return { ...base, branch, localHead, error: m("git.noOrigin") };
+    const ls = await git.listRemote([origin.refs.fetch]);
+    const headLine = ls.split("\n").find((l) => l.includes(`refs/heads/${branch}`)) || ls.split("\n").find((l) => l.includes("HEAD"));
+    if (!headLine) return { ...base, branch, localHead, error: m("git.branchMissing", { branch }) };
+    const remoteHead = headLine.split(/\s+/)[0];
+    return {
+      ...base,
+      ok: true,
+      branch,
+      localHead,
+      remoteHead,
+      hasUpdate: remoteHead !== localHead
+    };
+  } catch (err) {
+    return { ...base, error: err.message };
+  }
+}
+async function performUpdate$1(target) {
+  try {
+    const git = makeGit(target.dir);
+    const status = await git.status();
+    if (!status.isClean()) {
+      return {
+        name: target.name,
+        ok: false,
+        updated: false,
+        error: m("git.dirtySkipped")
+      };
+    }
+    const before = (await git.revparse(["HEAD"])).trim();
+    await git.pull(["--ff-only"]);
+    const after = (await git.revparse(["HEAD"])).trim();
+    return { name: target.name, ok: true, updated: before !== after };
+  } catch (err) {
+    return { name: target.name, ok: false, updated: false, error: err.message };
+  }
+}
 function runCli(cmd, args, opts = {}) {
   return new Promise((resolve2) => {
     const child = spawn(cmd, args, {
@@ -17340,8 +16979,8 @@ async function fetchNpmLatest(name, tag = "latest") {
 function semverTuple(v) {
   return (v.replace(/^v/, "").split(/[-+]/)[0].match(/\d+/g) || []).map(Number);
 }
-function isNewer(current, latest) {
-  const a = semverTuple(current);
+function isNewer(current2, latest) {
+  const a = semverTuple(current2);
   const b = semverTuple(latest);
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     const d = (b[i] ?? 0) - (a[i] ?? 0);
@@ -17424,6 +17063,34 @@ async function checkBuiltin(name, dir, packageName, currentVersion, tag = "lates
     hasUpdate: isNewer(currentVersion, latest)
   };
 }
+async function checkNpmCapability(p) {
+  const base = {
+    name: p.name,
+    dir: p.capabilityDir || p.dir,
+    isContainer: false,
+    ok: false,
+    source: "npm",
+    packageName: p.npmPackage,
+    capabilityId: p.id,
+    action: "reprovision",
+    canAutoUpdate: true
+  };
+  const capDir = p.capabilityDir;
+  const pkg = p.npmPackage;
+  if (!capDir || !pkg) return { ...base, error: m("upd.versionNotDetected") };
+  const current2 = mcpPkgVersion(pkg, capDir);
+  if (!current2 || resolveMcpPkgEntry(pkg, capDir) === null)
+    return { ...base, error: m("upd.versionNotDetected") };
+  const latest = await fetchNpmLatest(pkg);
+  if (!latest) return { ...base, currentVersion: current2, error: m("upd.registryUnreachable") };
+  return {
+    ...base,
+    ok: true,
+    currentVersion: current2,
+    latestVersion: latest,
+    hasUpdate: isNewer(current2, latest)
+  };
+}
 async function computeAll(pages) {
   const name = containerName();
   return Promise.all([
@@ -17432,7 +17099,8 @@ async function computeAll(pages) {
     // On relaunch, relaunchToApplyStaged swaps a staged asar into resources/ in place
     // (packaged only — a dev checkout just stages the download, since out/ isn't the running asar).
     checkAsarUpdate(name, resolveInstallDir()),
-    ...pages.filter((p) => !p.id.startsWith("__")).map(checkPage),
+    ...pages.filter((p) => !p.id.startsWith("__") && !p.npmPackage).map(checkPage),
+    ...pages.filter((p) => p.npmPackage).map(checkNpmCapability),
     checkBuiltin(
       m("upd.dshName"),
       join(app$1.getPath("userData"), "dsh"),
@@ -17464,7 +17132,7 @@ function openclawRoots() {
 function openclawRoot() {
   return openclawRoots().find((r) => existsSync(join(r, "node_modules", "openclaw"))) || openclawRoots()[0] || null;
 }
-function bundledNpmCli() {
+function bundledNpmCli$1() {
   return join(dirname(getNodeExePath()), "node_modules", "npm", "bin", "npm-cli.js");
 }
 async function runNpm(cmd, args, env2, timeoutMs, onLine) {
@@ -17518,7 +17186,7 @@ async function updateDshSelf(pinned, onProgress, rowName) {
     writeFileSync$1(join(root2, ".npmrc"), `registry=${registryUrl()}
 `);
     const node = getNodeExePath();
-    const npmCli = bundledNpmCli();
+    const npmCli = bundledNpmCli$1();
     if (!existsSync(npmCli)) throw new Error(m("upd.npmMissing", { npm: npmCli }));
     await runNpm(
       node,
@@ -17580,7 +17248,7 @@ async function reprovisionOpenclaw(pinned, onProgress, rowName) {
     writeFileSync$1(join(root2, ".npmrc"), `registry=${registryUrl()}
 `);
     const node = getNodeExePath();
-    const npmCli = bundledNpmCli();
+    const npmCli = bundledNpmCli$1();
     if (!existsSync(npmCli)) throw new Error(m("upd.npmMissing", { npm: npmCli }));
     await runNpm(
       node,
@@ -17610,6 +17278,45 @@ async function reprovisionOpenclaw(pinned, onProgress, rowName) {
     message: after && after !== before ? m("upd.openclawUpgraded", { after }) : m("upd.openclawUpToDate", { after: after || "?" })
   };
 }
+async function updateCapability(packageName, capDir, rowName, pinned, onProgress) {
+  const name = rowName;
+  const watch2 = npmWatcher(name, void 0, onProgress);
+  const before = mcpPkgVersion(packageName, capDir);
+  try {
+    mkdirSync(capDir, { recursive: true });
+    writeFileSync$1(join(capDir, ".npmrc"), `registry=${registryUrl()}
+`);
+    const node = getNodeExePath();
+    const npmCli = bundledNpmCli$1();
+    if (!existsSync(npmCli)) throw new Error(m("upd.npmMissing", { npm: npmCli }));
+    await runNpm(
+      node,
+      [
+        npmCli,
+        "install",
+        "-g",
+        `${packageName}@${pinned || "latest"}`,
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund"
+      ],
+      { ...process.env, npm_config_prefix: capDir },
+      15 * 6e4,
+      watch2
+    );
+  } catch (err) {
+    const msg = err.message || String(err);
+    const hint = /EPERM|EACCES|EROFS|permission/i.test(msg) ? m("upd.dshDirNotWritable") : "";
+    return { name, ok: false, updated: false, error: msg + hint };
+  }
+  const after = mcpPkgVersion(packageName, capDir);
+  return {
+    name,
+    ok: true,
+    updated: Boolean(after && after !== before),
+    message: after && after !== before ? m("upd.dshUpgraded", { after }) : m("upd.dshUpToDate", { after: after || "?" })
+  };
+}
 async function checkMcpPackages() {
   const name = m("upd.mcpName");
   const base = {
@@ -17623,24 +17330,26 @@ async function checkMcpPackages() {
     canAutoUpdate: true
   };
   const statuses = mcpPackagesStatus();
-  const missing = statuses.filter((s) => !s.installed).length;
+  const total = statuses.length;
+  const installedCount = statuses.filter((s) => s.installed).length;
+  const missing = total - installedCount;
   let registryDown = false;
-  let outdated = null;
+  let outdatedCount = 0;
   for (const s of statuses) {
     if (!s.installed) continue;
     const latest = await fetchNpmLatest(s.pkg);
     if (!latest) registryDown = true;
-    else if (s.version && isNewer(s.version, latest)) outdated = outdated || s.pkg;
+    else if (s.version && isNewer(s.version, latest)) outdatedCount++;
   }
+  const currentVersion = `${installedCount}/${total}`;
   if (missing === 0 && registryDown)
-    return { ...base, currentVersion: `${statuses.length}`, error: m("upd.registryUnreachable") };
-  const currentVersion = missing ? `${statuses.length - missing}/${statuses.length}` : statuses[0]?.version;
+    return { ...base, currentVersion, error: m("upd.registryUnreachable") };
   return {
     ...base,
     ok: true,
     currentVersion,
-    hasUpdate: missing > 0 || outdated !== null,
-    latestVersion: missing ? m("upd.mcpMissingCount", { n: missing }) : outdated ? `${m("upd.mcpOutdatedPrefix")} ${outdated}` : void 0
+    hasUpdate: missing > 0 || outdatedCount > 0,
+    latestVersion: missing > 0 ? m("upd.mcpMissingCount", { n: missing }) : outdatedCount > 0 ? m("upd.mcpUpdatableCount", { n: outdatedCount }) : void 0
   };
 }
 async function installMcpPackages(pinned, onProgress, rowName) {
@@ -17654,7 +17363,7 @@ async function installMcpPackages(pinned, onProgress, rowName) {
     writeFileSync$1(join(root2, ".npmrc"), `registry=${registryUrl()}
 `);
     const node = getNodeExePath();
-    const npmCli = bundledNpmCli();
+    const npmCli = bundledNpmCli$1();
     if (!existsSync(npmCli)) throw new Error(m("upd.npmMissing", { npm: npmCli }));
     const specs = mcpPackagesStatus().map((s) => `${s.pkg}@${pinned || "latest"}`);
     await runNpm(
@@ -17715,6 +17424,8 @@ async function runUpdate(target, onProgress) {
     case "apply-asar":
       return applyAsarUpdate(target.name, onProgress);
     case "reprovision":
+      if (target.capabilityId && target.packageName && target.dir)
+        return updateCapability(target.packageName, target.dir, target.name, void 0, onProgress);
       return target.packageName === MCP_PKG_GROUP ? installMcpPackages(void 0, onProgress, target.name) : target.packageName === DSH_PKG ? updateDshSelf(void 0, onProgress, target.name) : reprovisionOpenclaw(void 0, onProgress, target.name);
     case "manual":
       return {
@@ -17727,195 +17438,996 @@ async function runUpdate(target, onProgress) {
       return { name: target.name, ok: false, updated: false, error: m("upd.unknownChannel") };
   }
 }
-function readTailText(file, cap) {
-  try {
-    const total = statSync(file).size;
-    const len = Math.min(total, cap);
-    const buf = Buffer.allocUnsafe(len);
-    const fd = openSync(file, "r");
-    try {
-      readSync(fd, buf, 0, len, total - len);
-    } finally {
-      closeSync(fd);
-    }
-    return buf.toString("utf8");
-  } catch {
-    return `(unavailable: ${file})
-`;
-  }
+const INDEX_URLS = [
+  "https://npmmirror.com/mirrors/node/index.json",
+  "https://nodejs.org/dist/index.json"
+];
+const DIST_BASES = [
+  "https://npmmirror.com/mirrors/node/%V%/node-%V%-win-x64.zip",
+  "https://cdn.npmmirror.com/binaries/node/%V%/node-%V%-win-x64.zip",
+  "https://nodejs.org/dist/%V%/node-%V%-win-x64.zip"
+];
+function preferUpstream() {
+  return (getSettings().npmRegistry || "").trim().replace(/\/+$/, "") === "https://registry.npmjs.org";
 }
-function capture(cmd, args, cwd, timeoutMs = 8e3) {
-  return new Promise((resolve2) => {
-    const child = spawn(cmd, args, { cwd, windowsHide: true, timeout: timeoutMs });
-    let out = "";
-    child.stdout?.on("data", (d) => out += String(d));
-    child.on("error", () => resolve2(""));
-    child.on("close", () => resolve2(out.trim()));
+const indexUrls = () => preferUpstream() ? [...INDEX_URLS].reverse() : INDEX_URLS;
+const distBases = () => preferUpstream() ? [...DIST_BASES].reverse() : DIST_BASES;
+const MAX_VERSIONS = 200;
+function isValidTag(v) {
+  return /^v\d+\.\d+\.\d+$/.test(v);
+}
+function get(url, timeoutMs = 2e4) {
+  return new Promise((resolve2, reject) => {
+    let settled = false;
+    let timer;
+    const done = (fn) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn();
+    };
+    const req = net.request({ url, method: "GET" });
+    req.setHeader("user-agent", "DesktopContainer");
+    timer = setTimeout(() => {
+      done(() => {
+        try {
+          req.abort();
+        } catch {
+        }
+        reject(new Error(`timeout fetching ${url}`));
+      });
+    }, timeoutMs);
+    req.on("response", (res) => {
+      if (res.statusCode !== 200) {
+        res.on("error", () => void 0);
+        done(() => reject(new Error(`HTTP ${res.statusCode}`)));
+        return;
+      }
+      const chunks = [];
+      res.on("data", (d) => chunks.push(Buffer.from(d)));
+      res.on(
+        "end",
+        () => done(() => resolve2({ status: res.statusCode || 0, body: Buffer.concat(chunks).toString("utf-8") }))
+      );
+      res.on("error", (e) => done(() => reject(e)));
+    });
+    req.on("error", (e) => done(() => reject(e)));
+    req.end();
   });
 }
-const SECRET_KEY_RE = /token|key|secret|password|pwd|auth|cookie/i;
-const ENV_MAP_KEYS = ["pageEnvs", "pageCustomEnvs"];
-function maskSettings() {
-  const s = getSettings();
-  const out = { ...s };
-  for (const mapKey of ENV_MAP_KEYS) {
-    const envs = s[mapKey];
-    if (!envs) continue;
-    out[mapKey] = Object.fromEntries(
-      Object.entries(envs).map(([page, vars]) => [
-        page,
-        Object.fromEntries(
-          Object.entries(vars ?? {}).map(([k, v]) => [k, SECRET_KEY_RE.test(k) && v ? "***" : v])
-        )
-      ])
-    );
-  }
-  return out;
-}
-async function exportDiagnostics(registry2) {
-  const ts = isoShanghai().replace(/[:.]/g, "-").slice(0, 19);
-  const stage = join(app$1.getPath("temp"), `dsh-diag-${ts}`);
-  mkdirSync(stage, { recursive: true });
-  try {
-    let nodeRuntime$1 = null;
+async function listNodeVersions(includeIncompatible = false) {
+  if (process.platform !== "win32") throw new Error(m("node.notWin"));
+  let lastErr = "";
+  for (const url of indexUrls()) {
     try {
-      nodeRuntime$1 = await Promise.resolve().then(() => nodeRuntime).then((r) => r.getNodeRuntimeInfo());
-    } catch {
-    }
-    let runtimes = {};
-    try {
-      const [{ isDshInstalled: isDshInstalled2 }, { isOpenclawInstalled: isOpenclawInstalled2 }] = await Promise.all([
-        Promise.resolve().then(() => dsh),
-        Promise.resolve().then(() => openclaw)
-      ]);
-      runtimes = { dshInstalled: isDshInstalled2(), openclawInstalled: isOpenclawInstalled2() };
-    } catch {
-    }
-    writeFileSync$1(
-      join(stage, "versions.json"),
-      JSON.stringify(
-        {
-          generatedAt: isoShanghai(),
-          appVersion: app$1.getVersion(),
-          packaged: app$1.isPackaged,
-          exePath: app$1.getPath("exe"),
-          userData: app$1.getPath("userData"),
-          electron: process.versions.electron,
-          chrome: process.versions.chrome,
-          node: process.versions.node,
-          bundledNode: nodeRuntime$1,
-          onDemandRuntimes: runtimes
-        },
-        null,
-        2
-      ),
-      "utf8"
-    );
-    writeFileSync$1(join(stage, "settings.json"), JSON.stringify(maskSettings(), null, 2), "utf8");
-    const pages = registry2.list().map((p) => {
-      let manifest = null;
-      try {
-        const f = join(p.dir, "container.json");
-        manifest = existsSync(f) ? JSON.parse(readFileSyncSafe(f)) : null;
-      } catch {
-        manifest = "(unreadable)";
+      const { body } = await get(url, 25e3);
+      const entries2 = JSON.parse(body);
+      const out = [];
+      for (const e of entries2) {
+        if (!isValidTag(e.version)) continue;
+        if (e.files && !e.files.includes("win-x64-zip") && !e.files.includes("win-x64")) continue;
+        const usable = nodeVersionUsable(e.version);
+        if (!usable && !includeIncompatible) continue;
+        out.push({ version: e.version, date: e.date, lts: e.lts, usable });
+        if (out.length >= MAX_VERSIONS) break;
       }
-      return {
-        id: p.id,
-        name: p.name,
-        kind: p.kind,
-        status: p.status,
-        pid: p.pid,
-        port: p.containerPort ?? p.port,
-        external: p.external,
-        lastError: p.lastError,
-        crashes: p.crashes,
-        dependsOn: p.dependsOn,
-        healthUrl: p.healthUrl,
-        containerJson: manifest
-      };
-    });
-    writeFileSync$1(join(stage, "pages.json"), JSON.stringify(pages, null, 2), "utf8");
-    writeFileSync$1(
-      join(stage, "system.txt"),
-      [
-        `os: ${os.type()} ${os.release()} (${os.arch()})`,
-        `hostname: ${os.hostname()}`,
-        `cpus: ${os.cpus().length} x ${os.cpus()[0]?.model ?? "?"}`,
-        `totalMemory: ${(os.totalmem() / 1024 / 1024 / 1024).toFixed(1)} GB`,
-        `freeMemory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(1)} GB`,
-        `home: ${os.homedir()}`,
-        `locale: ${Intl.DateTimeFormat().resolvedOptions().locale} / TZ ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
-        `env.proxy: ${process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? "(none)"}`
-      ].join("\n"),
-      "utf8"
-    );
-    mkdirSync(join(stage, "logs"), { recursive: true });
-    writeFileSync$1(join(stage, "logs", "main.log"), readTailText(join(logsDir(), "main.log"), 1024 * 1024), "utf8");
-    writeFileSync$1(
-      join(stage, "logs", "events.jsonl"),
-      readTailText(join(logsDir(), "events.jsonl"), 512 * 1024),
-      "utf8"
-    );
-    for (const f of safePageLogFiles()) {
-      writeFileSync$1(
-        join(stage, "logs", f.name),
-        readTailText(join(logsDir(), "pages", f.name), 256 * 1024),
-        "utf8"
-      );
+      if (!out.length) throw new Error("no usable versions in index");
+      return out;
+    } catch (err) {
+      lastErr = err.message;
     }
-    const gitLines = [];
-    for (const p of [{ id: "__container__", dir: registry2.containerEntry().dir }, ...pages.map((p2) => ({ id: p2.id, dir: registry2.get(p2.id)?.dir ?? "" }))]) {
-      if (!p.dir || !existsSync(join(p.dir, ".git"))) {
-        gitLines.push(`${p.id}: (no .git)`);
+  }
+  throw new Error(m("node.indexFail", { err: lastErr }));
+}
+const PROGRESS_INTERVAL_MS$1 = 150;
+function download(url, target, version, onProgress) {
+  return new Promise((resolve2, reject) => {
+    const req = get$1(
+      url,
+      { headers: { "user-agent": "DesktopContainer" }, timeout: 6e4 },
+      (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          download(new URL(res.headers.location, url).toString(), target, version, onProgress).then(
+            resolve2,
+            reject
+          );
+          return;
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        const total = Number(res.headers["content-length"] || 0);
+        let received = 0;
+        let lastEmit = 0;
+        const emit = (force) => {
+          const now = Date.now();
+          if (!force && now - lastEmit < PROGRESS_INTERVAL_MS$1) return;
+          lastEmit = now;
+          const percent = total ? Math.min(100, Math.floor(received / total * 100)) : void 0;
+          const mb = (received / 1024 / 1024).toFixed(1);
+          onProgress({
+            name: "Node",
+            phase: "fetch",
+            received,
+            total: total || void 0,
+            percent,
+            message: m("node.downloadingPct", { v: version, p: percent ?? "--", mb })
+          });
+        };
+        res.on("data", (chunk) => {
+          received += chunk.length;
+          emit(received >= total);
+        });
+        pipeline(res, createWriteStream(target)).then(
+          () => {
+            emit(true);
+            resolve2();
+          },
+          (err) => reject(err)
+        );
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error(`timeout fetching ${url}`)));
+  });
+}
+async function downloadZip(urls, target, version, onProgress) {
+  let lastErr = "";
+  for (const url of urls) {
+    try {
+      await download(url, target, version, onProgress);
+      const size = existsSync(target) ? statSync(target).size : 0;
+      if (size < 10 * 1024 * 1024) throw new Error(m("node.tooSmall", { n: size }));
+      return;
+    } catch (err) {
+      lastErr = err.message;
+      rmSync(target, { force: true });
+    }
+  }
+  throw new Error(m("node.downloadFail", { err: lastErr }));
+}
+function extractZip(zip, dest) {
+  return new Promise((resolve2, reject) => {
+    const q = (p) => `'${p.replace(/'/g, "''")}'`;
+    const script = `Expand-Archive -LiteralPath ${q(zip)} -DestinationPath ${q(dest)} -Force`;
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+      // Backstop so a wedged PowerShell can never hang the update forever (5 min is generous
+      // for a ~30 MB Node zip on a slow disk).
+      { windowsHide: true, timeout: 3e5 },
+      (err) => err ? reject(new Error(m("node.extractFail", { err: err.message }))) : resolve2()
+    );
+  });
+}
+function verifyRuntime(nodeExe, want) {
+  let out = "";
+  try {
+    out = execFileSync(nodeExe, ["--version"], { windowsHide: true }).toString().trim();
+  } catch {
+  }
+  if (out !== want) throw new Error(m("node.verifyFail"));
+}
+function sweepStaleOverrides(dir) {
+  const parent = join(dir, "..");
+  const base = `${dir.split(/[\\/]/).pop()}.old`;
+  let names2;
+  try {
+    names2 = readdirSync(parent);
+  } catch {
+    return;
+  }
+  for (const n of names2) {
+    if (n !== base && !n.startsWith(`${base}-`)) continue;
+    try {
+      rmSync(join(parent, n), { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function parkOverride(dir) {
+  let lastErr;
+  for (const target of [`${dir}.old`, `${dir}.old-${Date.now()}`]) {
+    try {
+      rmSync(target, { recursive: true, force: true });
+    } catch {
+    }
+    try {
+      renameSync(dir, target);
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(m("node.locked", { err: lastErr?.message ?? "override dir is in use" }));
+}
+async function updateNodeRuntime(version, onProgress) {
+  if (process.platform !== "win32") throw new Error(m("node.notWin"));
+  const want = version.startsWith("v") ? version : `v${version}`;
+  if (!isValidTag(want)) throw new Error(m("node.badVersion", { v: version }));
+  const work = join(app$1.getPath("userData"), "node-update");
+  const staging = join(work, `runtime-${want}`);
+  const zip = join(work, `node-${want}-win-x64.zip`);
+  const extracted = join(work, `extract-${want}`);
+  rmSync(zip, { force: true });
+  rmSync(staging, { recursive: true, force: true });
+  rmSync(extracted, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true });
+  onProgress({ name: "Node", phase: "fetch", percent: 0, message: m("node.downloading", { v: want }) });
+  await downloadZip(
+    distBases().map((b) => b.split("%V%").join(want)),
+    zip,
+    want,
+    onProgress
+  );
+  onProgress({ name: "Node", phase: "extract", message: m("node.extracting") });
+  await extractZip(zip, extracted);
+  const nested = readdirSync(extracted).find((d) => d.startsWith(`node-${want}-win-x64`));
+  const srcRoot = nested ? join(extracted, nested) : extracted;
+  mkdirSync(staging, { recursive: true });
+  for (const entry of readdirSync(srcRoot)) {
+    renameSync(join(srcRoot, entry), join(staging, entry));
+  }
+  verifyRuntime(join(staging, "node.exe"), want);
+  const dir = overrideNodeDir();
+  sweepStaleOverrides(dir);
+  if (existsSync(dir)) parkOverride(dir);
+  renameSync(staging, dir);
+  invalidateNodeRuntimeCache();
+  onProgress({ name: "Node", phase: "done", message: m("node.done", { v: want }) });
+  try {
+    rmSync(zip, { force: true });
+    rmSync(extracted, { recursive: true, force: true });
+  } catch {
+  }
+  sweepStaleOverrides(dir);
+  return getNodeRuntimeInfo(true);
+}
+async function restoreBundledNode() {
+  const dir = overrideNodeDir();
+  sweepStaleOverrides(dir);
+  if (existsSync(dir)) parkOverride(dir);
+  invalidateNodeRuntimeCache();
+  const info = await getNodeRuntimeInfo(true);
+  sweepStaleOverrides(dir);
+  return info;
+}
+const ofs = (() => {
+  try {
+    if (typeof require2 === "function") return require2("original-fs");
+  } catch {
+  }
+  return fs;
+})();
+const RELEASE_BRANCH = "release";
+const RELEASE_BRANCH_BETA = "release-beta";
+let betaBranchMissing = false;
+function effectiveReleaseBranch() {
+  const wantsBeta = getSettings().containerChannel === "beta";
+  return wantsBeta && !betaBranchMissing ? RELEASE_BRANCH_BETA : RELEASE_BRANCH;
+}
+function resetBranchProbe() {
+  betaBranchMissing = false;
+}
+const PROGRESS_INTERVAL_MS = 150;
+const MIN_ASAR_BYTES = 1024 * 1024;
+async function sha512OfFile(path2) {
+  const hash = createHash("sha512");
+  await pipeline(
+    createReadStream(path2),
+    new Transform({
+      transform(chunk, _enc, cb) {
+        hash.update(chunk);
+        cb();
+      }
+    })
+  );
+  return hash.digest("hex");
+}
+async function verifyStagedIntegrity() {
+  const meta = readMeta();
+  if (!meta?.pendingAsar || !meta.sha512) return true;
+  const zip = join(updatesRoot(), dirname(meta.pendingAsar), "app.zip");
+  try {
+    return await sha512OfFile(zip) === meta.sha512;
+  } catch {
+    return false;
+  }
+}
+function readStagedUpdate() {
+  const metaFile = join(updatesRoot(), "update-meta.json");
+  let meta = null;
+  try {
+    meta = JSON.parse(readFileSync(metaFile, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (!meta?.pendingAsar || meta.broken) return null;
+  const pending = join(updatesRoot(), meta.pendingAsar);
+  let size = 0;
+  try {
+    size = ofs.statSync(pending).size;
+  } catch {
+    size = 0;
+  }
+  if (size >= MIN_ASAR_BYTES) return { version: meta.version || "", commit: meta.commit || "" };
+  try {
+    writeFileSync$1(metaFile, JSON.stringify({ ...meta, pendingAsar: null }));
+  } catch {
+  }
+  return null;
+}
+function clearStagedUpdate() {
+  const metaFile = join(updatesRoot(), "update-meta.json");
+  try {
+    const meta = JSON.parse(readFileSync(metaFile, "utf-8"));
+    writeFileSync$1(metaFile, JSON.stringify({ ...meta, pendingAsar: null }));
+  } catch {
+  }
+}
+function updatesRoot() {
+  return join(dirname(app$1.getPath("exe")), "resources", "updates");
+}
+function gitDir() {
+  return join(updatesRoot(), "release.git");
+}
+function runGit(args) {
+  const res = spawnSync("git", args, { encoding: "utf-8", windowsHide: true });
+  if (res.status !== 0)
+    throw new Error((res.stderr || res.stdout || `git ${args[0]} failed`).trim());
+  return res.stdout;
+}
+function runGitAsync(args, onStderr) {
+  return new Promise((resolve2, reject) => {
+    const child = spawn("git", args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => stdout += String(d));
+    child.stderr.on("data", (d) => {
+      const s = String(d);
+      stderr += s;
+      onStderr?.(s);
+    });
+    child.on("error", reject);
+    child.on(
+      "close",
+      (code2) => code2 === 0 ? resolve2(stdout) : reject(new Error((stderr || stdout || `git ${args[0]} failed`).trim()))
+    );
+  });
+}
+function ensureRepo() {
+  if (!existsSync(join(gitDir(), "HEAD"))) {
+    mkdirSync(dirname(gitDir()), { recursive: true });
+    runGit(["init", "--bare", gitDir()]);
+    runGit(["--git-dir", gitDir(), "remote", "add", "origin", CONTAINER_REPO_URL]);
+  }
+}
+function parseGitPercent(chunk) {
+  let last = null;
+  for (const hit of chunk.matchAll(/(\d+)%/g)) last = Number(hit[1]);
+  return last;
+}
+async function fetchTip(name, onProgress) {
+  ensureRepo();
+  const branch = effectiveReleaseBranch();
+  try {
+    await fetchBranch(branch, name, onProgress);
+  } catch (err) {
+    if (branch !== RELEASE_BRANCH) {
+      betaBranchMissing = true;
+      logEvent({
+        level: "warn",
+        kind: "ota.channelFallback",
+        detail: `${branch}: ${err.message}`,
+        meta: { from: branch, to: RELEASE_BRANCH }
+      });
+      await fetchBranch(RELEASE_BRANCH, name, onProgress);
+    } else {
+      throw err;
+    }
+  }
+  const commit = runGit(["--git-dir", gitDir(), "rev-parse", "FETCH_HEAD"]).trim();
+  const version = runGit(["--git-dir", gitDir(), "show", `${commit}:version.txt`]).split(/\r?\n/)[0].trim();
+  return { version, commit };
+}
+function fetchBranch(branch, name, onProgress) {
+  return runGitAsync(
+    ["--git-dir", gitDir(), "fetch", "--progress", "--depth", "1", "origin", branch],
+    (chunk) => {
+      if (!onProgress) return;
+      const percent = parseGitPercent(chunk) ?? void 0;
+      onProgress({
+        name,
+        phase: "fetch",
+        percent,
+        message: m("git.asarFetching", { percent: percent === void 0 ? "" : ` ${percent}%` })
+      });
+    }
+  );
+}
+async function streamBlob(rev, partPath, resumeFrom, total, name, resumed, onProgress) {
+  const child = spawn("git", ["--git-dir", gitDir(), "cat-file", "blob", rev], {
+    windowsHide: true
+  });
+  let stderr = "";
+  child.stderr.on("data", (d) => stderr += String(d));
+  let toSkip = resumeFrom;
+  let written = resumeFrom;
+  let lastEmit = 0;
+  const emit = (force = false) => {
+    const now = Date.now();
+    if (!onProgress || !force && now - lastEmit < PROGRESS_INTERVAL_MS) return;
+    lastEmit = now;
+    const received = Math.min(written, total);
+    const percent = total > 0 ? Math.floor(received / total * 100) : 0;
+    onProgress({
+      name,
+      phase: "extract",
+      received,
+      total,
+      percent,
+      resumed,
+      message: m(resumed ? "git.asarResuming" : "git.asarExtracting", {
+        percent: `${percent}%`
+      })
+    });
+  };
+  const gate = new Transform({
+    transform(chunk, _enc, cb) {
+      let data = chunk;
+      if (toSkip > 0) {
+        if (data.length <= toSkip) {
+          toSkip -= data.length;
+          return cb();
+        }
+        data = data.subarray(toSkip);
+        toSkip = 0;
+      }
+      written += data.length;
+      emit();
+      cb(null, data);
+    }
+  });
+  const out = createWriteStream(partPath, { flags: resumeFrom > 0 ? "a" : "w" });
+  const closed = new Promise((resolve2) => {
+    let settled = false;
+    const settle = (code2) => {
+      if (settled) return;
+      settled = true;
+      resolve2(code2);
+    };
+    child.on("close", (code2) => settle(code2 ?? -1));
+    child.on("exit", (code2) => settle(code2 ?? -1));
+    child.on("error", (err) => {
+      stderr = err.message;
+      settle(-1);
+    });
+  });
+  try {
+    await pipeline(child.stdout, gate, out);
+    const code2 = await closed;
+    if (code2 !== 0) throw new Error((stderr || `git cat-file failed (code ${code2})`).trim());
+    emit(true);
+  } catch (err) {
+    child.kill();
+    out.destroy();
+    throw err;
+  }
+}
+function pruneOldReleases(root2, keep) {
+  try {
+    for (const f of readdirSync(root2)) {
+      if (f === "release.git" || keep.has(f)) continue;
+      const p = join(root2, f);
+      try {
+        if (!statSync(p).isDirectory()) continue;
+      } catch {
         continue;
       }
-      const head = await capture("git", ["rev-parse", "--short", "HEAD"], p.dir);
-      const branch = await capture("git", ["branch", "--show-current"], p.dir);
-      gitLines.push(`${p.id}: ${branch || "?"} @ ${head || "?"}`);
+      try {
+        rmSync(p, { recursive: true, force: true });
+      } catch {
+      }
     }
-    writeFileSync$1(join(stage, "git.txt"), gitLines.join("\n"), "utf8");
-    const zipPath = join(app$1.getPath("temp"), `dsh-diag-${ts}.zip`);
-    await zipFolder$1(stage, zipPath);
-    const dest = resolveExportPath(`dsh-diag-${ts}.zip`);
-    await promises.copyFile(zipPath, dest);
-    logEvent({ level: "info", kind: "diagnostics.export", detail: dest });
-    return dest;
-  } finally {
-    rmSync(stage, { recursive: true, force: true });
-  }
-}
-function readFileSyncSafe(file) {
-  return JSON.stringify(JSON.parse(readFileSync(file, "utf-8")));
-}
-function safePageLogFiles() {
-  try {
-    const dir = join(logsDir(), "pages");
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir).filter((f) => f.endsWith(".log")).map((name) => ({ name }));
   } catch {
-    return [];
   }
 }
-function zipFolder$1(src, dest) {
-  const srcLit = src.replace(/'/g, "''");
-  const destLit = dest.replace(/'/g, "''");
-  const ps = `$items = Get-ChildItem -LiteralPath '${srcLit}' | ForEach-Object { $_.FullName }; Compress-Archive -LiteralPath $items -DestinationPath '${destLit}' -Force -ErrorAction Stop`;
-  const encoded = Buffer.from(ps, "utf16le").toString("base64");
-  return new Promise((resolve2, reject) => {
-    const child = spawn("powershell.exe", ["-NoProfile", "-EncodedCommand", encoded], {
-      windowsHide: true,
-      timeout: 6e4
+async function downloadAsar(tip, name, onProgress) {
+  const root2 = updatesRoot();
+  mkdirSync(root2, { recursive: true });
+  const rev = `${tip.commit}:app.zip`;
+  const total = Number(runGit(["--git-dir", gitDir(), "cat-file", "-s", rev]).trim());
+  if (!Number.isFinite(total) || total <= 0) throw new Error(m("git.asarSizeUnknown"));
+  const dir = join(root2, tip.commit);
+  mkdirSync(dir, { recursive: true });
+  const part = join(dir, "app.zip.part");
+  let expectedHash = null;
+  try {
+    expectedHash = runGit(["--git-dir", gitDir(), "show", `${tip.commit}:sha512.txt`]).trim().split(/\r?\n/)[0] || null;
+  } catch {
+    logEvent({
+      level: "warn",
+      kind: "ota.hashMissing",
+      detail: `release ${tip.commit.slice(0, 8)} carries no sha512.txt — size-only check`,
+      meta: { commit: tip.commit.slice(0, 8) }
     });
-    let err = "";
-    child.stderr?.on("data", (d) => err += String(d));
-    child.on("error", reject);
-    child.on("close", (code2) => {
-      if (code2 !== 0) return reject(new Error(`Compress-Archive failed (${code2}): ${err.trim()}`));
-      if (!existsSync(dest)) return reject(new Error("Compress-Archive produced no archive"));
-      resolve2();
+  }
+  let resumeFrom = 0;
+  if (existsSync(part)) {
+    const size = statSync(part).size;
+    if (size > 0 && size < total) resumeFrom = size;
+    else rmSync(part, { force: true });
+  }
+  await streamBlob(rev, part, resumeFrom, total, name, resumeFrom > 0, onProgress);
+  if (statSync(part).size !== total)
+    throw new Error(m("git.asarSizeMismatch", { want: total, got: statSync(part).size }));
+  const actualHash = await sha512OfFile(part);
+  if (expectedHash && actualHash !== expectedHash) {
+    rmSync(part, { force: true });
+    logEvent({
+      level: "error",
+      kind: "ota.hashMismatch",
+      meta: { commit: tip.commit.slice(0, 8), want: expectedHash.slice(0, 16), got: actualHash.slice(0, 16) }
     });
+    throw new Error(m("update.hashMismatch"));
+  }
+  const zipPath = join(dir, "app.zip");
+  rmSync(zipPath, { force: true });
+  renameSync(part, zipPath);
+  onProgress?.({ name, phase: "extract", percent: 100, message: m("git.zipUnpacking") });
+  console.log(`[update] extracting ${zipPath} -> ${dir}`);
+  await extractZip(zipPath, dir);
+  console.log(`[update] extract finished: ${dir}`);
+  const stagedAsar = join(dir, "app.asar");
+  if (!ofs.existsSync(stagedAsar) || ofs.statSync(stagedAsar).size < MIN_ASAR_BYTES)
+    throw new Error(m("git.asarExtractFailed"));
+  const metaFile = join(root2, "update-meta.json");
+  let prev = {};
+  try {
+    prev = JSON.parse(readFileSync(metaFile, "utf-8"));
+  } catch {
+  }
+  writeFileSync$1(
+    metaFile,
+    JSON.stringify({
+      ...prev,
+      broken: false,
+      pendingAsar: join(tip.commit, "app.asar"),
+      version: tip.version,
+      commit: tip.commit,
+      sha512: actualHash
+    })
+  );
+  const keep = /* @__PURE__ */ new Set([tip.commit]);
+  if (prev.currentAsar) keep.add(String(prev.currentAsar).split(/[\\/]/)[0]);
+  pruneOldReleases(root2, keep);
+  notifyEvent("notify.updateReadyTitle", "notify.updateReadyBody", { version: tip.version });
+  logEvent({
+    level: "info",
+    kind: "ota.staged",
+    meta: { version: tip.version, commit: tip.commit.slice(0, 8), branch: effectiveReleaseBranch() }
   });
+  onProgress?.({ name, phase: "done", received: total, total, percent: 100 });
+}
+async function checkAsarUpdate(name, dir) {
+  const base = {
+    name,
+    dir,
+    isContainer: true,
+    ok: false,
+    source: "git",
+    action: "apply-asar",
+    canAutoUpdate: true
+  };
+  try {
+    const current2 = app$1.getVersion();
+    let staged = readStagedUpdate();
+    if (staged && !isNewer(current2, staged.version)) {
+      clearStagedUpdate();
+      staged = null;
+    }
+    if (staged && !await verifyStagedIntegrity()) {
+      logEvent({ level: "warn", kind: "ota.stagedCorrupt", meta: { version: staged.version } });
+      clearStagedUpdate();
+      staged = null;
+    }
+    if (staged) {
+      const rb2 = canRollbackAsar();
+      return {
+        ...base,
+        ok: true,
+        branch: effectiveReleaseBranch(),
+        localHead: current2,
+        remoteHead: staged.commit.slice(0, 8),
+        currentVersion: current2,
+        latestVersion: staged.version,
+        hasUpdate: false,
+        pendingRestart: true,
+        canRollback: rb2.available,
+        rollbackVersion: rb2.fromVersion
+      };
+    }
+    const tip = await fetchTip(name);
+    const rb = canRollbackAsar();
+    return {
+      ...base,
+      ok: true,
+      branch: effectiveReleaseBranch(),
+      localHead: current2,
+      remoteHead: tip.commit.slice(0, 8),
+      currentVersion: current2,
+      latestVersion: tip.version,
+      // local ahead of the release branch (e.g. a locally-built 0.1.5 vs server 0.1.4) is
+      // simply up-to-date: hasUpdate stays false and no action is offered.
+      hasUpdate: isNewer(current2, tip.version),
+      pendingRestart: false,
+      canRollback: rb.available,
+      rollbackVersion: rb.fromVersion
+    };
+  } catch (err) {
+    return { ...base, error: err.message };
+  }
+}
+async function applyAsarUpdate(name, onProgress) {
+  try {
+    const tip = await fetchTip(name, onProgress);
+    console.log(`[update] ${name}: release tip ${tip.version} (${tip.commit.slice(0, 8)})`);
+    await downloadAsar(tip, name, onProgress);
+    console.log(`[update] ${name}: staged ${tip.version}, restart to apply`);
+    return {
+      name,
+      ok: true,
+      updated: true,
+      message: m("git.asarDownloaded", { version: tip.version })
+    };
+  } catch (err) {
+    console.error(`[update] ${name}: apply failed:`, err);
+    return { name, ok: false, updated: false, error: err.message };
+  }
+}
+function psStr(s) {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+function relaunchToApplyStaged() {
+  if (!app$1.isPackaged) return false;
+  const metaFile = join(updatesRoot(), "update-meta.json");
+  let meta = null;
+  try {
+    meta = JSON.parse(readFileSync(metaFile, "utf-8"));
+  } catch {
+    meta = null;
+  }
+  const pending = meta?.pendingAsar;
+  if (!pending) return false;
+  const stagedAsar = join(updatesRoot(), pending);
+  let size = 0;
+  try {
+    size = ofs.statSync(stagedAsar).size;
+  } catch {
+    size = 0;
+  }
+  if (size < MIN_ASAR_BYTES) return false;
+  const stagedDir = dirname(stagedAsar);
+  const resourcesDir = dirname(updatesRoot());
+  const targetAsar = join(resourcesDir, "app.asar");
+  const stagedUnpacked = join(stagedDir, "app.asar.unpacked");
+  const targetUnpacked = join(resourcesDir, "app.asar.unpacked");
+  const exe = app$1.getPath("exe");
+  try {
+    const withOrigin = { ...meta, rollbackFromVersion: app$1.getVersion() };
+    writeFileSync$1(metaFile, JSON.stringify(withOrigin));
+    meta = withOrigin;
+  } catch {
+  }
+  logEvent({
+    level: "info",
+    kind: "ota.applying",
+    meta: { from: app$1.getVersion(), to: meta?.version || "unknown" }
+  });
+  const noise = /* @__PURE__ */ new Set([
+    "--autostart",
+    "--dsh-relaunched",
+    "--dsh-boot-retry",
+    "--dsh-asar-launched"
+  ]);
+  const relaunchArgs = process.argv.slice(1).filter((a) => !noise.has(a) && !a.startsWith("--app-path=")).concat("--dsh-relaunched");
+  const ps1 = join(updatesRoot(), "apply-update.ps1");
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$appPid = ${process.pid}`,
+    `$exe = ${psStr(exe)}`,
+    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(", ")})`,
+    `$srcAsar = ${psStr(stagedAsar)}`,
+    `$dstAsar = ${psStr(targetAsar)}`,
+    `$srcUnpacked = ${psStr(stagedUnpacked)}`,
+    `$dstUnpacked = ${psStr(targetUnpacked)}`,
+    `$metaFile = ${psStr(metaFile)}`,
+    // Wait for the app to actually exit (this PID gone), then a short grace for the OS to free
+    // the asar / native handles.
+    "while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }",
+    "Start-Sleep -Milliseconds 800",
+    // Keep a single rollback copy of the version we are replacing — asar AND natives, so a
+    // rollback can restore a consistent pair (a mismatched unpacked tree breaks node-pty).
+    'if (Test-Path $dstAsar) { Copy-Item $dstAsar "$dstAsar.bak" -Force }',
+    'if (Test-Path $dstUnpacked) { robocopy $dstUnpacked "$dstUnpacked.bak" /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }',
+    // Retry the copy while a lingering AV/defender handle releases (up to ~10s).
+    "for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $srcAsar $dstAsar -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }",
+    // node-pty's natives live beside the asar; mirror them too (robocopy /MIR returns 0-7 on ok).
+    "if (Test-Path $srcUnpacked) { robocopy $srcUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }",
+    // Clear pending so a later plain launch does not re-apply; record what is now current.
+    // WriteAllText (not Set-Content -Encoding UTF8) so PowerShell 5.1 emits no BOM — the main
+    // process JSON.parses this file and a leading \uFEFF would make it throw and mis-report "none".
+    "try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.currentAsar = $m.pendingAsar; $m.pendingAsar = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}",
+    "Start-Process -FilePath $exe -ArgumentList $relaunchArgs"
+  ].join("\r\n");
+  try {
+    mkdirSync(updatesRoot(), { recursive: true });
+    writeFileSync$1(ps1, script, "utf-8");
+    const helper = spawn(
+      "cmd.exe",
+      [
+        "/c",
+        "start",
+        "",
+        "/min",
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+        ps1
+      ],
+      { detached: true, stdio: "ignore", windowsHide: true }
+    );
+    helper.on("error", (err) => console.error("[update] swap helper spawn failed:", err));
+    helper.unref();
+    console.log(`[update] scheduled in-place swap of ${pending} into ${targetAsar}`);
+    return true;
+  } catch (err) {
+    console.error("[update] failed to schedule staged asar swap:", err);
+    return false;
+  }
+}
+function readMeta() {
+  try {
+    return JSON.parse(readFileSync(join(updatesRoot(), "update-meta.json"), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function getUpdateHistory() {
+  const meta = readMeta();
+  const staged = readStagedUpdate();
+  const rb = canRollbackAsar();
+  return {
+    running: app$1.getVersion(),
+    current: staged?.version || null,
+    backup: rb.available ? rb.fromVersion || null : null,
+    rollbackFrom: meta?.rollbackFromVersion || null,
+    pendingRestart: !!staged
+  };
+}
+function canRollbackAsar() {
+  if (!app$1.isPackaged) return { available: false };
+  const resourcesDir = dirname(updatesRoot());
+  const bakAsar = join(resourcesDir, "app.asar.bak");
+  let size = 0;
+  try {
+    size = ofs.statSync(bakAsar).size;
+  } catch {
+    size = 0;
+  }
+  if (size < MIN_ASAR_BYTES) return { available: false };
+  const meta = readMeta();
+  const from = meta?.rollbackFromVersion;
+  return from ? { available: true, fromVersion: from } : { available: false };
+}
+function rollbackToPreviousAsar() {
+  const rb = canRollbackAsar();
+  if (!rb.available) return false;
+  const resourcesDir = dirname(updatesRoot());
+  const targetAsar = join(resourcesDir, "app.asar");
+  const bakAsar = `${targetAsar}.bak`;
+  const targetUnpacked = join(resourcesDir, "app.asar.unpacked");
+  const bakUnpacked = `${targetUnpacked}.bak`;
+  const metaFile = join(updatesRoot(), "update-meta.json");
+  const exe = app$1.getPath("exe");
+  const noise = /* @__PURE__ */ new Set(["--autostart", "--dsh-relaunched", "--dsh-boot-retry", "--dsh-asar-launched"]);
+  const relaunchArgs = process.argv.slice(1).filter((a) => !noise.has(a) && !a.startsWith("--app-path=")).concat("--dsh-relaunched");
+  const ps1 = join(updatesRoot(), "rollback-update.ps1");
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `$appPid = ${process.pid}`,
+    `$exe = ${psStr(exe)}`,
+    `$relaunchArgs = @(${relaunchArgs.map(psStr).join(", ")})`,
+    `$bakAsar = ${psStr(bakAsar)}`,
+    `$dstAsar = ${psStr(targetAsar)}`,
+    `$bakUnpacked = ${psStr(bakUnpacked)}`,
+    `$dstUnpacked = ${psStr(targetUnpacked)}`,
+    `$metaFile = ${psStr(metaFile)}`,
+    "while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }",
+    "Start-Sleep -Milliseconds 800",
+    // Stage a verified copy first: moving a corrupt .bak over the live asar would brick boot.
+    'for ($i = 0; $i -lt 20; $i++) { try { Copy-Item $bakAsar "$dstAsar.rbk" -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }',
+    'if ((Get-Item "$dstAsar.rbk" -ErrorAction SilentlyContinue).Length -lt ' + MIN_ASAR_BYTES + ") { exit 1 }",
+    'Move-Item -Force "$dstAsar.rbk" $dstAsar',
+    // Restore the matching natives tree, then drop both backups (rollback is one-way).
+    "if (Test-Path $bakUnpacked) { robocopy $bakUnpacked $dstUnpacked /MIR /NFL /NDL /NJH /NJS /NP /R:5 /W:1 | Out-Null }",
+    'Remove-Item "$bakAsar","$bakUnpacked" -Recurse -Force -ErrorAction SilentlyContinue',
+    // Consume the rollback record + any pending marker so boot/OTA read the restored state.
+    "try { $m = Get-Content $metaFile -Raw | ConvertFrom-Json; $m.pendingAsar = $null; $m.rollbackFromVersion = $null; [IO.File]::WriteAllText($metaFile, ($m | ConvertTo-Json -Compress)) } catch {}",
+    "Start-Process -FilePath $exe -ArgumentList $relaunchArgs"
+  ].join("\r\n");
+  try {
+    writeFileSync$1(ps1, script, "utf-8");
+    const helper = spawn(
+      "cmd.exe",
+      [
+        "/c",
+        "start",
+        "",
+        "/min",
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+        ps1
+      ],
+      { detached: true, stdio: "ignore", windowsHide: true }
+    );
+    helper.on("error", (err) => console.error("[update] rollback helper spawn failed:", err));
+    helper.unref();
+    console.log("[update] scheduled asar rollback swap");
+    logEvent({
+      level: "warn",
+      kind: "ota.rollback",
+      meta: { from: app$1.getVersion(), to: rb.fromVersion || "unknown" }
+    });
+    return true;
+  } catch (err) {
+    console.error("[update] failed to schedule asar rollback:", err);
+    return false;
+  }
+}
+const SAVE_DEBOUNCE_MS = 400;
+const MIN_VISIBLE_PX = 60;
+let saveTimer = null;
+let watched = null;
+function boundsEnabled() {
+  return getSettings().rememberWindowBounds !== false;
+}
+function isValid(b) {
+  if (!b) return false;
+  return [b.x, b.y, b.width, b.height].every((n) => Number.isFinite(n));
+}
+function isOnSomeDisplay(rect) {
+  const probe = {
+    x: rect.x,
+    y: rect.y,
+    width: Math.max(1, Math.min(rect.width, MIN_VISIBLE_PX)),
+    height: Math.max(1, Math.min(rect.height, MIN_VISIBLE_PX))
+  };
+  return screen.getAllDisplays().some((d) => {
+    const a = d.bounds;
+    const ix = Math.max(probe.x, a.x);
+    const iy = Math.max(probe.y, a.y);
+    const ix2 = Math.min(probe.x + probe.width, a.x + a.width);
+    const iy2 = Math.min(probe.y + probe.height, a.y + a.height);
+    return ix2 - ix > 0 && iy2 - iy > 0;
+  });
+}
+function resolveBounds(minWidth, minHeight) {
+  if (!boundsEnabled()) return null;
+  const stored = getSettings().windowBounds;
+  if (!isValid(stored)) return null;
+  const rect = {
+    x: stored.x,
+    y: stored.y,
+    width: Math.max(stored.width, minWidth),
+    height: Math.max(stored.height, minHeight)
+  };
+  if (!isOnSomeDisplay(rect)) return null;
+  const display = screen.getDisplayMatching(rect);
+  const wa = display.workAreaSize;
+  return {
+    x: stored.x,
+    y: stored.y,
+    width: Math.min(rect.width, wa.width),
+    height: Math.min(rect.height, wa.height),
+    maximized: Boolean(stored.maximized)
+  };
+}
+function scheduleSave() {
+  if (!boundsEnabled()) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveWindowBounds();
+  }, SAVE_DEBOUNCE_MS);
+}
+function saveWindowBounds() {
+  if (!boundsEnabled()) return;
+  const win = watched;
+  if (!win || win.isDestroyed() || win.isMinimized()) return;
+  const n = win.getNormalBounds();
+  const next2 = {
+    x: n.x,
+    y: n.y,
+    width: n.width,
+    height: n.height,
+    maximized: win.isMaximized()
+  };
+  const prev = getSettings().windowBounds;
+  if (prev && prev.x === next2.x && prev.y === next2.y && prev.width === next2.width && prev.height === next2.height && prev.maximized === next2.maximized)
+    return;
+  updateSettings({ windowBounds: next2 });
+}
+function flushWindowBounds() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  saveWindowBounds();
+}
+function forgetWindowBounds() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  clearWindowBounds();
+}
+function watchWindowBounds(win) {
+  if (watched === win) return;
+  if (watched && !watched.isDestroyed()) {
+    watched.off("resize", scheduleSave);
+    watched.off("move", scheduleSave);
+    watched.off("maximize", scheduleSave);
+    watched.off("unmaximize", scheduleSave);
+  }
+  watched = win;
+  win.on("resize", scheduleSave);
+  win.on("move", scheduleSave);
+  win.on("maximize", scheduleSave);
+  win.on("unmaximize", scheduleSave);
+}
+function unwatchWindowBounds() {
+  flushWindowBounds();
+  watched = null;
+}
+function popoutSlot(pageId) {
+  const b = getSettings().popoutBounds?.[pageId];
+  return isValid(b) ? b : null;
+}
+function resolvePopoutBounds(pageId, minWidth, minHeight) {
+  if (!boundsEnabled()) return null;
+  const stored = popoutSlot(pageId);
+  if (!stored) return null;
+  const rect = {
+    x: stored.x,
+    y: stored.y,
+    width: Math.max(stored.width, minWidth),
+    height: Math.max(stored.height, minHeight)
+  };
+  if (!isOnSomeDisplay(rect)) return null;
+  return { ...rect, maximized: Boolean(stored.maximized) };
+}
+function rememberPopoutBounds(win, pageId) {
+  if (!boundsEnabled()) return;
+  if (win.isMinimized()) return;
+  const n = win.getNormalBounds();
+  const prev = popoutSlot(pageId);
+  if (prev && prev.x === n.x && prev.y === n.y && prev.width === n.width && prev.height === n.height && prev.maximized === win.isMaximized())
+    return;
+  updateSettings({ popoutBounds: { ...getSettings().popoutBounds, [pageId]: { ...n, maximized: win.isMaximized() } } });
 }
 const icon = join$1(import.meta.dirname, "../../resources/icon.png");
 function appIconPath() {
@@ -17925,6 +18437,1555 @@ function appIconPath() {
     join(app$1.getAppPath(), "resources", "icon.png")
   ].filter(Boolean);
   return candidates.find((p) => existsSync(p)) || icon;
+}
+function savedSite(pageId) {
+  return getSettings().externalSites?.find((s) => s.id === pageId) || null;
+}
+const popoutWindows = /* @__PURE__ */ new Map();
+let popoutSaveTimer = null;
+let guestKeysWired = false;
+let guestSchemeWired = false;
+const guestSchemeCss = /* @__PURE__ */ new WeakMap();
+function shellPreload() {
+  const dir = join(__dirname, "../preload");
+  for (const name of ["index.mjs", "index.js"]) {
+    if (existsSync(join(dir, name))) return join(dir, name);
+  }
+  return join(dir, "index.mjs");
+}
+function schedulePopoutSave() {
+  if (popoutSaveTimer) clearTimeout(popoutSaveTimer);
+  popoutSaveTimer = setTimeout(() => {
+    popoutSaveTimer = null;
+    flushPopoutBounds();
+  }, 800);
+  popoutSaveTimer.unref?.();
+}
+function flushPopoutBounds() {
+  if (popoutSaveTimer) {
+    clearTimeout(popoutSaveTimer);
+    popoutSaveTimer = null;
+  }
+  for (const [id2, win] of popoutWindows) {
+    if (!win.isDestroyed()) rememberPopoutBounds(win, id2);
+  }
+}
+function openPageWindow(registry2, pageId) {
+  const existing = popoutWindows.get(pageId);
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+    return existing;
+  }
+  const state = registry2.get(pageId);
+  const restored = resolvePopoutBounds(pageId, 720, 480);
+  const win = new BrowserWindow({
+    width: restored?.width ?? 1e3,
+    height: restored?.height ?? 700,
+    x: restored?.x,
+    y: restored?.y,
+    minWidth: 720,
+    minHeight: 480,
+    show: false,
+    autoHideMenuBar: true,
+    title: state?.name || savedSite(pageId)?.name || pageId,
+    backgroundColor: "#000000",
+    // same frameless contract as the main shell: the renderer draws its own title strip
+    frame: false,
+    icon: appIconPath(),
+    webPreferences: {
+      preload: shellPreload(),
+      // mirrors the main window: the popout hosts the page in a <webview> of its own
+      sandbox: false,
+      webviewTag: true
+    }
+  });
+  popoutWindows.set(pageId, win);
+  win.on("ready-to-show", () => {
+    if (!win.isDestroyed()) win.show();
+  });
+  win.on("page-title-updated", (e) => {
+    e.preventDefault();
+  });
+  win.on("resize", schedulePopoutSave);
+  win.on("move", schedulePopoutSave);
+  const pushMaximized = () => {
+    if (!win.isDestroyed()) win.webContents.send(IPC.OnMaximizedChanged, win.isMaximized());
+  };
+  win.on("maximize", () => {
+    schedulePopoutSave();
+    pushMaximized();
+  });
+  win.on("unmaximize", () => {
+    schedulePopoutSave();
+    pushMaximized();
+  });
+  win.on("closed", () => {
+    popoutWindows.delete(pageId);
+  });
+  const devUrl = process.env["ELECTRON_RENDERER_URL"];
+  if (devUrl) win.loadURL(`${devUrl}?popout=${encodeURIComponent(pageId)}`);
+  else win.loadFile(join(__dirname, "../renderer/index.html"), { query: { popout: pageId } });
+  return win;
+}
+function activeKeybindings() {
+  const stored = getSettings().keybindings || {};
+  const out = { ...DEFAULT_KEYBINDINGS };
+  for (const action of Object.keys(out)) {
+    const v = stored[action];
+    if (typeof v === "string") out[action] = v;
+  }
+  return out;
+}
+const GUEST_ACTIONS = ["palette", "terminal", "popoutCurrent"];
+function wireGuestShortcuts(registry2) {
+  if (guestKeysWired) return;
+  guestKeysWired = true;
+  app$1.on("web-contents-created", (_e, contents) => {
+    if (contents.getType() !== "webview") return;
+    contents.on("before-input-event", (event, input) => {
+      if (input.type !== "keyDown") return;
+      const bindings = activeKeybindings();
+      let fired = null;
+      for (const action of GUEST_ACTIONS) {
+        if (matchesAccelerator(bindings[action], {
+          key: input.key,
+          code: input.code,
+          ctrl: input.control,
+          shift: input.shift,
+          alt: input.alt,
+          meta: input.meta
+        })) {
+          fired = action;
+          break;
+        }
+      }
+      if (!fired) return;
+      event.preventDefault();
+      const url = contents.getURL();
+      const pageId = url ? registry2.running().find((p) => p.url && url.startsWith(p.url))?.id : void 0;
+      const signal = { action: fired, ...pageId ? { pageId } : {} };
+      const hostId = contents.hostWebContents?.id;
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed() && win.webContents.id === hostId) {
+          win.webContents.send(IPC.OnHotkey, signal);
+          break;
+        }
+      }
+    });
+  });
+}
+const GUEST_DARK_PROBE = `(() => {
+  const de = document.documentElement
+  if (!de) return false
+  const root = getComputedStyle(de)
+  if ((root.colorScheme || 'normal').indexOf('dark') >= 0) return false
+  const rgba = (c) => {
+    const m = String(c).match(/rgba?\\(([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)(?:[,\\s/]+([\\d.]+))?\\)/)
+    return m ? { r: +m[1], g: +m[2], b: +m[3], a: m[4] === undefined ? 1 : +m[4] } : null
+  }
+  const body = document.body ? rgba(getComputedStyle(document.body).backgroundColor) : null
+  const bg = (body && body.a ? body : rgba(root.backgroundColor)) || null
+  if (!bg || bg.a === 0) return false
+  return 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b < 110
+})()`;
+const GUEST_DARK_CSS = ":root{color-scheme:dark}";
+async function backfillGuestScheme(contents) {
+  if (contents.isDestroyed()) return;
+  const prev = guestSchemeCss.get(contents);
+  if (prev) {
+    guestSchemeCss.delete(contents);
+    await contents.removeInsertedCSS(prev).catch(() => void 0);
+  }
+  if (!nativeTheme.shouldUseDarkColors) return;
+  try {
+    if (await contents.executeJavaScript(GUEST_DARK_PROBE, false) !== true) return;
+    guestSchemeCss.set(contents, await contents.insertCSS(GUEST_DARK_CSS, { cssOrigin: "user" }));
+  } catch {
+  }
+}
+function wireGuestScheme() {
+  if (guestSchemeWired) return;
+  guestSchemeWired = true;
+  app$1.on("web-contents-created", (_e, contents) => {
+    if (contents.getType() !== "webview") return;
+    contents.on("dom-ready", () => void backfillGuestScheme(contents));
+    contents.once("destroyed", () => guestSchemeCss.delete(contents));
+  });
+  nativeTheme.on("updated", () => {
+    for (const c of webContents.getAllWebContents()) {
+      if (!c.isDestroyed() && c.getType() === "webview") void backfillGuestScheme(c);
+    }
+  });
+}
+function registerWindowIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  nativeTheme.on("updated", () => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC.OnNativeTheme, nativeTheme.shouldUseDarkColors);
+    }
+  });
+  ipcMain$1.handle(IPC.GetNativeTheme, () => ok2(nativeTheme.shouldUseDarkColors));
+  ipcMain$1.handle(
+    IPC.SetNativeTheme,
+    (_e, source) => {
+      if (source === "auto" || source === void 0 || source === null)
+        nativeTheme.themeSource = "system";
+      else if (typeof source === "boolean") nativeTheme.themeSource = source ? "dark" : "light";
+      else nativeTheme.themeSource = source;
+      return ok2(true);
+    }
+  );
+  ipcMain$1.handle(IPC.MinimizeWindow, (e) => {
+    BrowserWindow.fromWebContents(e.sender)?.minimize();
+    return ok2(true);
+  });
+  ipcMain$1.handle(IPC.ToggleMaximize, (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win) return ok2(false);
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return ok2(win.isMaximized());
+  });
+  ipcMain$1.handle(IPC.CloseWindow, (e) => {
+    BrowserWindow.fromWebContents(e.sender)?.close();
+    return ok2(true);
+  });
+  ipcMain$1.handle(
+    IPC.GetIsMaximized,
+    (e) => ok2(Boolean(BrowserWindow.fromWebContents(e.sender)?.isMaximized()))
+  );
+  wireGuestShortcuts(registry2);
+  wireGuestScheme();
+  ipcMain$1.handle(IPC.OpenPageWindow, (_e, pageId) => {
+    try {
+      if (!registry2.get(pageId) && !savedSite(pageId)) {
+        return fail2(new Error(m("page.unknown", { id: pageId })));
+      }
+      openPageWindow(registry2, pageId);
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.RelaunchApp, () => {
+    if (!app$1.isPackaged) {
+      dialog.showMessageBox({ type: "info", title: m("dialog.title"), message: m("update.relaunchDev") }).catch(() => void 0);
+      return ok2(false);
+    }
+    if (relaunchToApplyStaged()) {
+      setTimeout(() => app$1.exit(0), 700);
+      return ok2(true);
+    }
+    const args = process.argv.slice(1).filter((a) => a !== "--autostart");
+    app$1.relaunch({ args: [...args, "--dsh-relaunched"] });
+    app$1.exit(0);
+    return ok2(true);
+  });
+  ipcMain$1.handle(IPC.QuitApp, () => {
+    app$1.quit();
+    return ok2(true);
+  });
+  ipcMain$1.handle(IPC.ToggleDevTools, (e, guestId) => {
+    try {
+      const guest = typeof guestId === "number" ? webContents.fromId(guestId) : void 0;
+      if (typeof guestId === "number" && !guest) return fail2(new Error(m("ipc.guestGone")));
+      const target = guest ?? BrowserWindow.fromWebContents(e.sender)?.webContents ?? e.sender;
+      if (target.isDevToolsOpened()) target.closeDevTools();
+      else target.openDevTools({ mode: "detach" });
+      return ok2({ opened: target.isDevToolsOpened(), scope: guest ? "webview" : "window" });
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+}
+function registerRuntimeIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  ipcMain$1.handle(IPC.GetNodeInfo, async () => {
+    try {
+      return ok2(await getNodeRuntimeInfo());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ListNodeVersions, async (_e, includeIncompatible) => {
+    try {
+      return ok2(await listNodeVersions(!!includeIncompatible));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.UpdateNodeRuntime, async (e, version) => {
+    const sender = e.sender;
+    const onProgress = (p) => {
+      if (!sender.isDestroyed()) sender.send(IPC.OnNodeUpdateProgress, p);
+    };
+    try {
+      return ok2(await updateNodeRuntime(version, onProgress));
+    } catch (err) {
+      return fail2(err);
+    } finally {
+      onProgress({ name: "Node", phase: "done" });
+    }
+  });
+  ipcMain$1.handle(IPC.RestoreBundledNode, async () => {
+    try {
+      return ok2(await restoreBundledNode());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.ProvisionBuiltin,
+    async (_e, kind, version) => {
+      try {
+        const res = await provisionBuiltin(kind, version);
+        clearUpdateCache();
+        if (kind === "mcp") refreshBuiltinPackages();
+        registry2.emitChanged();
+        return ok2(res);
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+}
+const SERVER_DEP_MARKERS = [
+  "express",
+  "koa",
+  "fastify",
+  "@nestjs",
+  "hapi",
+  "restify",
+  "egg",
+  "midway",
+  "next",
+  "nuxt",
+  "astro",
+  "remix",
+  "hono",
+  "polka",
+  "socket.io",
+  "strapi",
+  "adonis",
+  "feathers",
+  "micro",
+  "http-server",
+  "graphql-yoga",
+  "body-parser"
+];
+const NON_NODE_MARKERS = [
+  { file: "Cargo.toml", label: "Rust" },
+  { file: "go.mod", label: "Go" },
+  { file: "pom.xml", label: "Java (Maven)" },
+  { file: "build.gradle", label: "Java (Gradle)" },
+  { file: "build.gradle.kts", label: "Java (Gradle)" },
+  { file: "Gemfile", label: "Ruby" },
+  { file: "requirements.txt", label: "Python" },
+  { file: "pyproject.toml", label: "Python" },
+  { file: "composer.json", label: "PHP" }
+];
+const KNOWN_NPM_BY_REPO = {
+  "openai/codex": "@openai/codex",
+  codex: "@openai/codex",
+  "anthropics/claude-code": "@anthropic-ai/claude-code",
+  "claude-code": "@anthropic-ai/claude-code",
+  "google-gemini/gemini-cli": "@google/gemini-cli",
+  "gemini-cli": "@google/gemini-cli",
+  "sst/opencode": "opencode-ai"
+};
+function npmSuggestionFor(source) {
+  const s = (source || "").trim().replace(/\.git$/i, "").replace(/[/\\]+$/, "");
+  if (!s) return null;
+  const segs = s.split(/[\\/:@]+/).filter((x) => x && x !== "github.com" && !x.includes("."));
+  const tail = segs.slice(-2);
+  if (tail.length === 2) {
+    const ownerRepo = `${tail[0]}/${tail[1]}`.toLowerCase();
+    if (KNOWN_NPM_BY_REPO[ownerRepo]) return KNOWN_NPM_BY_REPO[ownerRepo];
+  }
+  const repo = tail[tail.length - 1]?.toLowerCase();
+  return repo ? KNOWN_NPM_BY_REPO[repo] ?? null : null;
+}
+function readPkgSafe(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function hasServerDependency(pkg) {
+  if (!pkg) return false;
+  const all = { ...pkg.dependencies || {}, ...pkg.devDependencies || {} };
+  return Object.keys(all).some((n) => {
+    const k = n.toLowerCase();
+    return SERVER_DEP_MARKERS.some((mk) => k === mk || k.startsWith(`${mk}/`) || k.includes(mk));
+  });
+}
+function runtimeDepCount(pkg) {
+  if (!pkg) return 0;
+  return Object.keys(pkg.dependencies || {}).length + Object.keys(pkg.optionalDependencies || {}).length;
+}
+function cliStartCommand(dir, pkg) {
+  if (pkg?.scripts?.start) return "npm run start";
+  const bin = pkg?.bin;
+  let rel = null;
+  if (typeof bin === "string") rel = bin;
+  else if (bin && typeof bin === "object") rel = Object.values(bin)[0] ?? null;
+  if (rel) {
+    const clean = rel.replace(/^\.\//, "");
+    if (existsSync(join(dir, clean))) return `node ${clean}`;
+  }
+  return null;
+}
+function detectNonNodeStack(dir) {
+  for (const mk of NON_NODE_MARKERS) if (existsSync(join(dir, mk.file))) return mk.label;
+  try {
+    for (const e of readdirSync(dir)) {
+      if (/\.(csproj|fsproj|vbproj|sln|vcxproj)$/i.test(e)) return ".NET / C++";
+    }
+  } catch {
+  }
+  return null;
+}
+function classifyProject(dir) {
+  const pkg = readPkgSafe(dir);
+  const hasPkg = pkg !== null;
+  const nonNode = detectNonNodeStack(dir);
+  const pageViable = existsSync(join(dir, "server.js")) || existsSync(join(dir, "index.js")) || Boolean(pkg?.scripts?.start);
+  const binOnlyCli = Boolean(pkg?.bin) && !hasServerDependency(pkg);
+  const terminalStart = binOnlyCli ? cliStartCommand(dir, pkg) : null;
+  const terminalViable = Boolean(terminalStart);
+  const deps = runtimeDepCount(pkg);
+  const needsInstall = hasPkg && deps > 0;
+  if (terminalViable) {
+    return {
+      tier: needsInstall ? "yellow" : "green",
+      kind: "terminal",
+      needsInstall,
+      startCommand: terminalStart
+    };
+  }
+  if (pageViable) {
+    return { tier: needsInstall ? "yellow" : "green", kind: "page", needsInstall };
+  }
+  if (nonNode) {
+    return {
+      tier: "red",
+      needsInstall: false,
+      reason: "install.rejectNonNode",
+      reasonParams: { stack: nonNode }
+    };
+  }
+  if (hasPkg && (pkg?.private || pkg?.workspaces)) {
+    return { tier: "red", needsInstall: false, reason: "install.rejectMonorepoRoot" };
+  }
+  return { tier: "red", needsInstall: false, reason: "install.rejectNoEntry" };
+}
+function githubRawBase(url) {
+  const https = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  if (https) return `https://raw.githubusercontent.com/${https[1]}/${https[2]}/HEAD`;
+  const ssh = url.match(/^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (ssh) return `https://raw.githubusercontent.com/${ssh[1]}/${ssh[2]}/HEAD`;
+  return null;
+}
+function fetchRaw(url, timeoutMs = 5e3) {
+  return new Promise((resolve2) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve2(v);
+    };
+    try {
+      const lib = url.startsWith("https") ? get$1 : get$2;
+      const req = lib(url, { timeout: timeoutMs }, (res) => {
+        if ((res.statusCode ?? 0) !== 200) {
+          res.resume();
+          return done({ ok: false, body: "" });
+        }
+        let body = "";
+        res.setEncoding("utf-8");
+        res.on("data", (d) => body += d);
+        res.on("end", () => done({ ok: true, body }));
+        res.on("error", () => done({ ok: false, body: "" }));
+      });
+      req.on("error", () => done({ ok: false, body: "" }));
+      req.on("timeout", () => {
+        req.destroy();
+        done({ ok: false, body: "" });
+      });
+    } catch {
+      done({ ok: false, body: "" });
+    }
+  });
+}
+async function probeRemoteTier(repoUrl) {
+  const base = githubRawBase(repoUrl);
+  if (!base) return null;
+  const [pkgRes, serverRes, indexRes, cargoRes, gomodRes] = await Promise.all([
+    fetchRaw(`${base}/package.json`),
+    fetchRaw(`${base}/server.js`),
+    fetchRaw(`${base}/index.js`),
+    fetchRaw(`${base}/Cargo.toml`),
+    fetchRaw(`${base}/go.mod`)
+  ]);
+  const nonNodeLabel = () => {
+    if (cargoRes.ok) return "Rust";
+    if (gomodRes.ok) return "Go";
+    return null;
+  };
+  let pkg = null;
+  if (pkgRes.ok) {
+    try {
+      pkg = JSON.parse(pkgRes.body);
+    } catch {
+      return null;
+    }
+  } else {
+    const stack2 = nonNodeLabel();
+    if (stack2 && !serverRes.ok && !indexRes.ok) {
+      return {
+        tier: "red",
+        needsInstall: false,
+        reason: "install.rejectNonNode",
+        reasonParams: { stack: stack2 }
+      };
+    }
+    return null;
+  }
+  const pageViable = serverRes.ok || indexRes.ok || Boolean(pkg?.scripts?.start);
+  if (pageViable || Boolean(pkg?.bin)) return null;
+  const stack = nonNodeLabel();
+  if (stack) {
+    return {
+      tier: "red",
+      needsInstall: false,
+      reason: "install.rejectNonNode",
+      reasonParams: { stack }
+    };
+  }
+  if (pkg?.private || pkg?.workspaces) {
+    return { tier: "red", needsInstall: false, reason: "install.rejectMonorepoRoot" };
+  }
+  return null;
+}
+async function adoptOrigin(dir, originUrl) {
+  const pageGit = simpleGit({ baseDir: dir });
+  await pageGit.init(["-b", "main"]);
+  await pageGit.add(".");
+  await pageGit.commit("Imported into DSH container (origin tracked for updates)", [
+    "--allow-empty",
+    "--author",
+    "DSH Container <container@local>",
+    "--date",
+    "now"
+  ]);
+  await pageGit.remote(["add", "origin", originUrl]);
+}
+function applyPortOverride(dirName, port) {
+  if (!isValidPort(port)) return;
+  updateSettings({ pagePorts: { ...getSettings().pagePorts, [dirName]: Number(port) } });
+}
+function seedContainerManifest(pagesDir, dirName, port, cls) {
+  const dir = join(pagesDir, dirName);
+  const metaFile = join(dir, "container.json");
+  if (!existsSync(metaFile)) {
+    const manifest = {
+      name: dirName,
+      description: {
+        zh: msgIn("zh", "install.importedDesc"),
+        en: msgIn("en", "install.importedDesc")
+      }
+    };
+    if (cls.kind === "terminal") {
+      manifest.kind = "terminal";
+      if (cls.startCommand) manifest.startCommand = cls.startCommand;
+    } else {
+      manifest.kind = "page";
+      if (isValidPort(port)) manifest.port = Number(port);
+    }
+    writeFileSync$1(metaFile, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  }
+  return cls;
+}
+function bundledNpmCli() {
+  return join(dirname(getNodeExePath()), "node_modules", "npm", "bin", "npm-cli.js");
+}
+async function installDeps(dir, onMessage) {
+  const pkg = readPkgSafe(dir);
+  const deps = runtimeDepCount(pkg);
+  if (!deps) return;
+  const cli = bundledNpmCli();
+  if (!existsSync(cli)) throw new Error(m("install.npmMissing"));
+  applyNpmRegistryEnv();
+  const args = existsSync(join(dir, "package-lock.json")) ? ["ci"] : ["install"];
+  await runStream(
+    getNodeExePath(),
+    [cli, ...args, "--no-audit", "--no-fund"],
+    dir,
+    `npm ${args.join(" ")}`,
+    onMessage,
+    // the import target folder *is* the page id — mirror npm's output into its log file
+    basename(dir)
+  );
+}
+function runStream(cmd, args, cwd, caption, onMessage, logTo, timeoutMs = 15 * 6e4) {
+  return new Promise((resolve2, reject) => {
+    const child = spawn(cmd, args, { cwd, env: bundledEnv(), windowsHide: true, shell: false });
+    console.log(`[install] ${caption} started in ${cwd}`);
+    let tail = "";
+    const onData = (d) => {
+      const text = String(d);
+      if (logTo) logPageLine(logTo, text);
+      tail += text;
+      if (tail.length > 8e3) tail = tail.slice(-8e3);
+      const lines = text.split(/\r?\n/).filter((l) => l.trim());
+      if (lines.length) onMessage?.(lines[lines.length - 1].trim());
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      console.error(`[install] ${caption} timed out after ${Math.round(timeoutMs / 6e4)}min`);
+      reject(new Error(m("install.timeout", { cmd: caption })));
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      console.error(`[install] ${caption} spawn failed:`, err);
+      reject(err);
+    });
+    child.on("close", (code2) => {
+      clearTimeout(timer);
+      if (code2 === 0) {
+        console.log(`[install] ${caption} finished`);
+        resolve2();
+      } else {
+        console.error(`[install] ${caption} failed (exit ${code2}): ${tail.slice(-500)}`);
+        reject(new Error(m("install.depsFail", { cmd: caption, tail: tail.slice(-500) })));
+      }
+    });
+  });
+}
+function validateRepoUrl(url) {
+  const trimmed = url.trim();
+  if (!/^(https?:\/\/|git@)[^\s]+\.git$/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
+    throw new Error(m("install.repoUrlInvalid"));
+  }
+  if (/[\s;`$&|]/.test(trimmed)) throw new Error(m("dsh.illegalRepoChars"));
+  return trimmed;
+}
+async function installFromGit(pagesDir, repoUrl, name, port, originUrl, onProgress, opts) {
+  const url = validateRepoUrl(repoUrl);
+  let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
+  if (!dirName) {
+    const base = url.split("/").pop() || "page";
+    dirName = base.replace(/\.git$/i, "");
+  }
+  if (!dirName || dirName === "." || dirName === "..") throw new Error(m("install.dirNameNeeded"));
+  const target = join(pagesDir, dirName);
+  if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
+  mkdirSync(pagesDir, { recursive: true });
+  const emit = (p) => onProgress?.({ op: "git", phase: "preparing", source: repoUrl, target: dirName, ...p });
+  emit({ phase: "preparing" });
+  const pre = await probeRemoteTier(url).catch(() => null);
+  if (pre?.tier === "red") {
+    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: pre.reason });
+    throw new Error(m(pre.reason, pre.reasonParams));
+  }
+  await cloneWithAuthFallback(
+    target,
+    url,
+    (g) => emit({ phase: "receiving", percent: g.percent, message: gitCaption(g) })
+  );
+  emit({ phase: "validating" });
+  const cls = classifyProject(target);
+  if (cls.tier === "red") {
+    rmSync(target, { recursive: true, force: true });
+    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: cls.reason });
+    throw new Error(m(cls.reason, cls.reasonParams));
+  }
+  applyPortOverride(dirName, port);
+  seedContainerManifest(pagesDir, dirName, port, cls);
+  try {
+    readPageMeta(pagesDir, dirName);
+  } catch (err) {
+    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err);
+    logEvent({
+      level: "warn",
+      kind: "install.needsConfig",
+      pageId: dirName,
+      detail: err.message
+    });
+  }
+  await runInstallStep(target, cls, opts, emit);
+  emit({ phase: "done", percent: 100 });
+  return dirName;
+}
+async function runInstallStep(target, cls, opts, emit) {
+  if (!opts?.autoInstall || !cls.needsInstall) return;
+  emit({ phase: "installing", message: "npm install" });
+  try {
+    await installDeps(target, (line) => emit({ phase: "installing", message: line }));
+  } catch (err) {
+    console.warn("[installer] dependency install failed (import kept):", err.message);
+    logEvent({
+      level: "warn",
+      kind: "install.depsFailed",
+      detail: err.message
+    });
+  }
+}
+function gitCaption(g) {
+  const cnt = g.total ? ` (${g.processed ?? 0}/${g.total})` : "";
+  return `${g.stage}${cnt} ${g.percent}%`;
+}
+function parseNpmSpec(spec) {
+  const s = (spec || "").trim();
+  if (!s) throw new Error(m("install.npmSpecNeeded"));
+  const at = s.startsWith("@") ? s.indexOf("@", 1) : s.indexOf("@");
+  const pkg = at === -1 ? s : s.slice(0, at);
+  const version = at === -1 ? void 0 : s.slice(at + 1);
+  const validName = /^(?:@[a-z0-9-*~][a-z0-9-*._~]*\/[a-z0-9-._~]+|[a-z0-9-._~]+)$/i.test(pkg);
+  const validVersion = version === void 0 || /^[\w.+-]+$/.test(version);
+  if (!pkg || !validName || !validVersion) {
+    throw new Error(m("install.npmSpecInvalid", { spec: s }));
+  }
+  return { pkg, version };
+}
+async function installFromNpm(pagesDir, spec, name, onProgress, capabilitiesDir = join(pagesDir, "..", "capabilities")) {
+  const { pkg, version } = parseNpmSpec(spec);
+  let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
+  if (!dirName) dirName = pkg.replace(/^@/, "").replace(/\//g, "-");
+  if (!dirName || dirName === "." || dirName === "..") throw new Error(m("install.dirNameNeeded"));
+  const target = join(pagesDir, dirName);
+  if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
+  const capDir = join(capabilitiesDir, dirName);
+  const specLabel = `${pkg}@${version || "latest"}`;
+  const emit = (p) => onProgress?.({ op: "npm", phase: "preparing", source: specLabel, target: dirName, ...p });
+  emit({ phase: "preparing" });
+  mkdirSync(capDir, { recursive: true });
+  writeFileSync$1(
+    join(capDir, "package.json"),
+    JSON.stringify({ name: dirName.toLowerCase(), version: "0.0.0", private: true }, null, 2) + "\n",
+    "utf-8"
+  );
+  applyNpmRegistryEnv();
+  const cli = bundledNpmCli();
+  if (!existsSync(cli)) {
+    rmSync(capDir, { recursive: true, force: true });
+    throw new Error(m("install.npmMissing"));
+  }
+  emit({ phase: "installing", message: `npm install ${specLabel}` });
+  try {
+    await runStream(
+      getNodeExePath(),
+      [cli, "install", specLabel, "--no-audit", "--no-fund"],
+      capDir,
+      `npm install ${specLabel}`,
+      (line) => emit({ phase: "installing", message: line }),
+      // mirror the npm install into the new page's own log file, like a hosted page's output
+      dirName
+    );
+  } catch (err) {
+    rmSync(capDir, { recursive: true, force: true });
+    throw err;
+  }
+  emit({ phase: "validating" });
+  const entry = resolveMcpPkgEntry(pkg, capDir);
+  if (!entry) {
+    rmSync(capDir, { recursive: true, force: true });
+    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: "install.npmNoBin" });
+    throw new Error(m("install.npmNoBin", { pkg }));
+  }
+  mkdirSync(target, { recursive: true });
+  const manifest = {
+    name: dirName,
+    description: {
+      zh: msgIn("zh", "install.importedNpmDesc"),
+      en: msgIn("en", "install.importedNpmDesc")
+    },
+    kind: "terminal",
+    startCommand: `node "${entry}"`,
+    npmPackage: pkg,
+    capabilityDir: capDir
+  };
+  writeFileSync$1(join(target, "container.json"), JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  try {
+    readPageMeta(pagesDir, dirName);
+  } catch (err) {
+    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err);
+    logEvent({
+      level: "warn",
+      kind: "install.needsConfig",
+      pageId: dirName,
+      detail: err.message
+    });
+  }
+  emit({ phase: "done", percent: 100 });
+  return dirName;
+}
+async function planCopy(root2) {
+  const entries2 = [];
+  let totalBytes = 0;
+  const walk = async (dir, relBase) => {
+    const items2 = await readdir(dir, { withFileTypes: true });
+    items2.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    for (const it of items2) {
+      if (it.name === "node_modules" || it.name === ".git") continue;
+      const abs = join(dir, it.name);
+      const rel = relBase ? `${relBase}/${it.name}` : it.name;
+      if (it.isDirectory()) {
+        entries2.push({ abs, rel, dir: true, size: 0 });
+        await walk(abs, rel);
+      } else if (it.isFile()) {
+        const s = await stat(abs);
+        entries2.push({ abs, rel, dir: false, size: s.size });
+        totalBytes += s.size;
+      }
+    }
+  };
+  await walk(root2, "");
+  return { entries: entries2, totalBytes };
+}
+async function copyDirWithProgress(srcDir, target, emit) {
+  const { entries: entries2, totalBytes } = await planCopy(srcDir);
+  mkdirSync(target, { recursive: true });
+  let received = 0;
+  let last = 0;
+  const report = (force = false) => {
+    const now = Date.now();
+    if (!force && now - last < 100) return;
+    last = now;
+    emit({
+      phase: "receiving",
+      percent: totalBytes ? Math.min(100, Math.floor(received / totalBytes * 100)) : 100,
+      received,
+      total: totalBytes
+    });
+  };
+  report(true);
+  for (const e of entries2) {
+    const dest = join(target, e.rel);
+    if (e.dir) {
+      if (!existsSync(dest)) mkdirSync(dest, { recursive: true });
+      continue;
+    }
+    await copyFile(e.abs, dest);
+    received += e.size;
+    report();
+  }
+  report(true);
+}
+async function installFromLocalDir(pagesDir, srcDir, name, port, originUrl, onProgress, opts) {
+  if (!existsSync(srcDir) || !existsSync(join(srcDir, ".")))
+    throw new Error(m("install.srcMissing", { dir: srcDir }));
+  let dirName = (name || "").trim().replace(/[^\w.-]/g, "");
+  if (!dirName) dirName = srcDir.split(/[\\/]/).filter(Boolean).pop() || "";
+  if (!dirName) throw new Error(m("install.dirNameFail"));
+  const target = join(pagesDir, dirName);
+  if (existsSync(target)) throw new Error(m("dsh.pageExists", { id: dirName }));
+  const emit = (p) => onProgress?.({ op: "dir", phase: "preparing", source: srcDir, target: dirName, ...p });
+  emit({ phase: "preparing" });
+  const cls = classifyProject(srcDir);
+  if (cls.tier === "red") {
+    logEvent({ level: "warn", kind: "install.rejected", pageId: dirName, detail: cls.reason });
+    throw new Error(m(cls.reason, cls.reasonParams));
+  }
+  await copyDirWithProgress(srcDir, target, emit);
+  emit({ phase: "validating" });
+  applyPortOverride(dirName, port);
+  seedContainerManifest(pagesDir, dirName, port, cls);
+  try {
+    readPageMeta(pagesDir, dirName);
+  } catch (err) {
+    console.warn(`[installer] ${dirName}: seeded but readPageMeta failed (kept on disk):`, err);
+    logEvent({
+      level: "warn",
+      kind: "install.needsConfig",
+      pageId: dirName,
+      detail: err.message
+    });
+  }
+  emit({ phase: "finalizing" });
+  await runInstallStep(target, cls, opts, emit);
+  const origin = (originUrl || "").trim();
+  if (origin) {
+    try {
+      await adoptOrigin(target, origin);
+    } catch (err) {
+      console.warn("[installer] adoptOrigin failed (ignored):", err.message);
+    }
+  }
+  emit({ phase: "done", percent: 100 });
+  return dirName;
+}
+function removePage(pagesDir, id2) {
+  if (id2 === "__container__") throw new Error(m("install.cannotRemoveContainer"));
+  if (BUILTIN_PAGE_IDS.has(id2)) throw new Error(m("install.builtinUndeletable", { id: id2 }));
+  const target = join(pagesDir, id2);
+  if (!target.startsWith(pagesDir + sep)) throw new Error(m("install.illegalPageId"));
+  let capabilityDir;
+  try {
+    const raw = JSON.parse(readFileSync(join(target, "container.json"), "utf-8"));
+    if (typeof raw.capabilityDir === "string" && raw.capabilityDir.trim()) capabilityDir = raw.capabilityDir.trim();
+  } catch {
+  }
+  rmSync(target, { recursive: true, force: true });
+  if (capabilityDir) rmSync(capabilityDir, { recursive: true, force: true });
+  const { [id2]: _dropped, ...pagePorts } = getSettings().pagePorts ?? {};
+  const { [id2]: _depDropped, ...pageDepsRest } = getSettings().pageDeps ?? {};
+  const pageDeps = {};
+  for (const [k, v] of Object.entries(pageDepsRest)) {
+    const kept = (v ?? []).filter((d) => d !== id2);
+    if (kept.length) pageDeps[k] = kept;
+  }
+  updateSettings({ pagePorts, pageDeps });
+}
+function registerPagesIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  ipcMain$1.handle(IPC.ListPages, async () => {
+    registry2.reconcile();
+    await registry2.refreshRuntimePresence().catch(() => void 0);
+    return ok2(registry2.list());
+  });
+  ipcMain$1.handle(IPC.StartPage, async (_e, id2) => {
+    try {
+      return ok2(await registry2.startWithDeps(id2));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.StopPage, async (_e, id2) => {
+    registry2.stop(id2);
+    return ok2(registry2.get(id2));
+  });
+  ipcMain$1.handle(IPC.RestartPage, async (_e, id2) => {
+    try {
+      return ok2(await registry2.restartWithDeps(id2));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetPageLogs, (_e, id2) => ok2(registry2.logs(id2)));
+  ipcMain$1.handle(
+    IPC.InstallPageFromGit,
+    async (_e, repoUrl, name, port, opts) => {
+      const sender = _e.sender;
+      const onProgress = (p) => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p);
+      };
+      try {
+        const dirName = await installFromGit(
+          resolvePagesDir(),
+          repoUrl,
+          name,
+          port,
+          void 0,
+          onProgress,
+          opts
+        );
+        registry2.reconcile();
+        clearUpdateCache();
+        return ok2(dirName);
+      } catch (err) {
+        return fail2(err);
+      } finally {
+        onProgress({ op: "git", phase: "done", percent: 100 });
+      }
+    }
+  );
+  ipcMain$1.handle(
+    IPC.InstallPageFromDir,
+    async (_e, srcDir, name, port, originUrl, opts) => {
+      const sender = _e.sender;
+      const onProgress = (p) => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p);
+      };
+      try {
+        const dirName = await installFromLocalDir(
+          resolvePagesDir(),
+          srcDir,
+          name,
+          port,
+          originUrl,
+          onProgress,
+          opts
+        );
+        registry2.reconcile();
+        clearUpdateCache();
+        return ok2(dirName);
+      } catch (err) {
+        return fail2(err);
+      } finally {
+        onProgress({ op: "dir", phase: "done", percent: 100 });
+      }
+    }
+  );
+  ipcMain$1.handle(
+    IPC.InstallPageFromNpm,
+    async (_e, spec, name) => {
+      const sender = _e.sender;
+      const onProgress = (p) => {
+        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p);
+      };
+      try {
+        const dirName = await installFromNpm(
+          resolvePagesDir(),
+          spec,
+          name,
+          onProgress,
+          resolveCapabilitiesDir()
+        );
+        registry2.reconcile();
+        clearUpdateCache();
+        return ok2(dirName);
+      } catch (err) {
+        return fail2(err);
+      } finally {
+        onProgress({ op: "npm", phase: "done", percent: 100 });
+      }
+    }
+  );
+  ipcMain$1.handle(
+    IPC.PreflightImport,
+    async (_e, source, isDir) => {
+      try {
+        const cls = isDir ? classifyProject(String(source || "").trim()) : await probeRemoteTier(String(source || "").trim());
+        if (!cls) return ok2({ tier: null });
+        return ok2({
+          tier: cls.tier,
+          kind: cls.kind,
+          needsInstall: cls.needsInstall,
+          reason: cls.reason ? m(cls.reason, cls.reasonParams) : void 0,
+          // a rejected well-known repo (codex & friends) has a runnable npm CLI: offer it.
+          suggestNpm: cls.tier === "red" ? npmSuggestionFor(String(source || "")) ?? void 0 : void 0
+        });
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.ChooseDirectory, async (e, title2) => {
+    try {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const opts = {
+        properties: ["openDirectory", "createDirectory"],
+        title: title2 || m("dialog.chooseDir")
+      };
+      const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+      if (res.canceled || !res.filePaths.length) return ok2(null);
+      return ok2(res.filePaths[0]);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.SetPageDisabled, (_e, id2, disabled) => {
+    try {
+      const state = registry2.get(id2);
+      if (!state) return fail2(new Error(m("page.unknown", { id: id2 })));
+      if (state.external) return fail2(new Error(m("page.disableExternal")));
+      const s = getSettings();
+      const set = new Set(s.disabledPages || []);
+      if (disabled) set.add(id2);
+      else set.delete(id2);
+      updateSettings({ disabledPages: [...set] });
+      if (disabled && (state.status === "running" || state.status === "starting"))
+        registry2.stop(id2);
+      else registry2.announceChange();
+      return ok2(registry2.get(id2));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.RemovePage, (_e, id2) => {
+    try {
+      registry2.stop(id2);
+      removePage(resolvePagesDir(), id2);
+      registry2.reconcile();
+      const s = getSettings();
+      if (s.autoStartPages.includes(id2))
+        updateSettings({ autoStartPages: s.autoStartPages.filter((x) => x !== id2) });
+      if (s.defaultView.kind === "page" && s.defaultView.pageId === id2)
+        setDefaultView({ kind: "none" });
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ResetBuiltinPage, (_e, id2) => {
+    try {
+      if (!BUILTIN_PAGE_IDS.has(id2)) return fail2(new Error(m("ipc.resetNotBuiltin")));
+      const wasRunning = registry2.get(id2)?.status === "running";
+      registry2.stop(id2);
+      rmSync(join(resolvePagesDir(), id2), { recursive: true, force: true });
+      ensureDefaultOpenclawPage();
+      ensureBuiltinPages();
+      registry2.reconcile();
+      if (wasRunning) {
+        registry2.start(id2).catch((err) => console.error(`[page:${id2}] reset auto-start failed:`, err));
+      }
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.SetPagePort, (_e, id2, port) => {
+    try {
+      const clear = port === void 0 || port === null || Number(port) === 0;
+      if (!clear && !isValidPort(port)) return { ok: false, error: m("ipc.portRange") };
+      const pagePorts = { ...getSettings().pagePorts };
+      if (clear) delete pagePorts[id2];
+      else pagePorts[id2] = Number(port);
+      updateSettings({ pagePorts });
+      registry2.reconcile();
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.SetPageDeps, (_e, id2, deps) => {
+    try {
+      const pageDeps = { ...getSettings().pageDeps };
+      const next2 = Array.isArray(deps) ? [...new Set(deps.map((d) => String(d).trim()).filter((d) => d && d !== id2))] : [];
+      const cleaned = {};
+      for (const [k, v] of Object.entries(pageDeps)) if (k !== id2 && Array.isArray(v)) cleaned[k] = v;
+      if (next2.length) cleaned[id2] = next2;
+      const graph = {};
+      for (const p of registry2.list()) graph[p.id] = p.id === id2 ? next2 : [...p.dependsOn ?? []];
+      const cycle = findDepCycle(graph, id2);
+      if (cycle) return { ok: false, error: m("ipc.depsCycle", { chain: cycle.join(" → ") }) };
+      updateSettings({ pageDeps: cleaned });
+      registry2.reconcile();
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.OpenPageExternal, async (_e, url) => {
+    try {
+      await shell$1.openExternal(url);
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.KillPortHolder, async (_e, port) => {
+    try {
+      const n = Number(port);
+      if (!Number.isFinite(n) || n < 1 || n > 65535) return fail2(new Error(m("ipc.portRange")));
+      return ok2(await killPortHolder(n));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.CheckPortFree,
+    async (_e, port, pageId) => {
+      try {
+        const n = Number(port);
+        if (!isValidPort(n)) return fail2(new Error(m("ipc.portRange")));
+        const bind = await probePortBind(n);
+        if (bind === "free") return ok2({ port: n, free: true });
+        const holder = await findPortHolder(n);
+        if (bind === "error" && !holder) return ok2({ port: n, free: false, probeError: true });
+        if (holder && pageId && registry2.get(pageId)?.pid === holder.pid) {
+          return ok2({ port: n, free: true });
+        }
+        return ok2({ port: n, free: false, ...holder ? { holder } : {}, ...bind === "error" ? { probeError: true } : {} });
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.EnvRoot, () => {
+    return ok2({
+      envRoot: resolveEnvRoot(),
+      installDir: resolveInstallDir(),
+      home: homedir$1()
+    });
+  });
+  ipcMain$1.handle(
+    IPC.DownloadDir,
+    () => ok2({
+      downloadDir: resolveDownloadDir(),
+      defaultDir: defaultDownloadDir(),
+      custom: Boolean((getSettings().downloadDir || "").trim())
+    })
+  );
+}
+function findDepCycle(graph, start) {
+  const path2 = [];
+  const onPath = /* @__PURE__ */ new Set();
+  const visited = /* @__PURE__ */ new Set();
+  const walk = (node) => {
+    if (onPath.has(node)) return [...path2, node];
+    if (visited.has(node)) return null;
+    visited.add(node);
+    onPath.add(node);
+    path2.push(node);
+    for (const dep of graph[node] ?? []) {
+      if (graph[dep] === void 0) continue;
+      const found = walk(dep);
+      if (found) return found;
+    }
+    path2.pop();
+    onPath.delete(node);
+    return null;
+  };
+  return walk(start);
+}
+function probeUrl(url, timeoutMs = 8e3) {
+  return new Promise((resolve2) => {
+    const start = Date.now();
+    const getter = url.startsWith("https:") ? get$1 : get$2;
+    let settled = false;
+    const req = getter(url, (res) => {
+      if (settled) return;
+      settled = true;
+      const ms = Date.now() - start;
+      const status = res.statusCode ?? 0;
+      res.destroy();
+      resolve2({ ok: status > 0, ms, status });
+    });
+    req.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      resolve2({ ok: false, error: err.message });
+    });
+    req.setTimeout(timeoutMs, () => {
+      if (settled) return;
+      settled = true;
+      req.destroy();
+      resolve2({ ok: false, error: `timeout ${timeoutMs}ms` });
+    });
+  });
+}
+function probeLoopback() {
+  return new Promise((resolve2) => {
+    const start = Date.now();
+    const server = createServer((sock) => {
+      sock.end("ok");
+    });
+    server.on("error", (err) => resolve2({ ok: false, error: err.message }));
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        server.close();
+        resolve2({ ok: false, error: "no address" });
+        return;
+      }
+      const client = createConnection({ host: "127.0.0.1", port: addr.port });
+      client.on("connect", () => {
+        const ms = Date.now() - start;
+        client.destroy();
+        server.close();
+        resolve2({ ok: true, ms });
+      });
+      client.on("error", (err) => {
+        client.destroy();
+        server.close();
+        resolve2({ ok: false, error: err.message });
+      });
+    });
+  });
+}
+function reachStep(id2, p) {
+  if (p.ok) return { id: id2, ok: true, ms: p.ms, detail: m("net.reachable", { ms: p.ms ?? 0 }) };
+  return { id: id2, ok: false, detail: m("net.unreachable", { err: p.error || `HTTP ${p.status ?? "?"}` }) };
+}
+async function runNetworkProbe(npmRegistry) {
+  const proxy = {
+    http: process.env.HTTP_PROXY || process.env.http_proxy || "",
+    https: process.env.HTTPS_PROXY || process.env.https_proxy || "",
+    no: process.env.NO_PROXY || process.env.no_proxy || ""
+  };
+  const proxyStep = {
+    id: "proxy",
+    ok: true,
+    // informational — presence isn't a failure
+    detail: proxy.http || proxy.https ? proxy.http || proxy.https : m("net.proxyNone")
+  };
+  const [gateway, github, npm, mirror] = await Promise.all([
+    probeLoopback(),
+    probeUrl("https://github.com"),
+    probeUrl("https://registry.npmjs.org/-/ping"),
+    probeUrl("https://registry.npmmirror.com/-/ping")
+  ]);
+  const steps = [
+    reachStep("gateway", gateway),
+    reachStep("github", github),
+    reachStep("npm", npm),
+    reachStep("npmmirror", mirror),
+    proxyStep
+  ];
+  const healthy = gateway.ok && github.ok && (npm.ok || mirror.ok);
+  return { steps, proxy, healthy };
+}
+async function probeRegistries(timeoutMs = 6e3) {
+  const results = await Promise.all(
+    REGISTRY_CANDIDATES.map(async (c) => {
+      const p = await probeUrl(`${c.url.replace(/\/+$/, "")}/-/ping`, timeoutMs);
+      return { id: c.id, url: c.url, ok: p.ok, ms: p.ms, status: p.status, error: p.error };
+    })
+  );
+  return results;
+}
+const CACHE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "Shared Dictionary"];
+const STORAGE_DIRS = ["Local Storage", "Session Storage", "IndexedDB", "FileSystem", "WebStorage"];
+async function dirBytes(path2) {
+  let entries2;
+  try {
+    entries2 = await promises.readdir(path2, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const ent of entries2) {
+    const child = join(path2, ent.name);
+    if (ent.isDirectory()) {
+      total += await dirBytes(child);
+      continue;
+    }
+    if (!ent.isFile()) continue;
+    try {
+      const st = await promises.stat(child);
+      total += st.size;
+    } catch {
+    }
+  }
+  return total;
+}
+async function sumDirs(names2) {
+  const root2 = app$1.getPath("userData");
+  const sizes = await Promise.all(names2.map((n) => dirBytes(join(root2, n))));
+  return sizes.reduce((a, b) => a + b, 0);
+}
+async function getWebDataReport() {
+  const [cacheBytes, storageBytes, cookies] = await Promise.all([
+    sumDirs(CACHE_DIRS),
+    sumDirs(STORAGE_DIRS),
+    session.defaultSession.cookies.get({})
+  ]);
+  const counts = /* @__PURE__ */ new Map();
+  for (const c of cookies) {
+    const domain = (c.domain || "").replace(/^\./, "") || "(unknown)";
+    counts.set(domain, (counts.get(domain) || 0) + 1);
+  }
+  const cookieDomains = [...counts.entries()].map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count || a.domain.localeCompare(b.domain));
+  return { cacheBytes, storageBytes, cookieDomains, totalCookies: cookies.length };
+}
+function cookieUrl(cookie) {
+  const host = (cookie.domain || "").replace(/^\./, "");
+  const scheme = cookie.secure ? "https" : "http";
+  const path2 = cookie.path && cookie.path !== "/" ? cookie.path : "";
+  return `${scheme}://${host}${path2}`;
+}
+async function clearCookies(domain) {
+  const all = await session.defaultSession.cookies.get({});
+  const targets = domain ? all.filter((c) => {
+    const host = (c.domain || "").replace(/^\./, "");
+    return host === domain || host.endsWith(`.${domain}`);
+  }) : all;
+  let removed = 0;
+  for (const c of targets) {
+    try {
+      await session.defaultSession.cookies.remove(cookieUrl(c), c.name);
+      removed += 1;
+    } catch {
+    }
+  }
+  return removed;
+}
+async function clearWebData(args) {
+  const scope2 = args.scope;
+  let removedCookies = 0;
+  if (scope2 === "cache") {
+    await session.defaultSession.clearCache();
+  } else if (scope2 === "cookies") {
+    removedCookies = await clearCookies(args.domain);
+  } else if (scope2 === "storage") {
+    await session.defaultSession.clearStorageData({
+      storages: ["localstorage", "indexdb", "filesystem", "serviceworkers", "shadercache"]
+    });
+  } else {
+    removedCookies = await clearCookies(args.domain);
+    await session.defaultSession.clearStorageData();
+    await session.defaultSession.clearCache();
+  }
+  return { removedCookies, scope: scope2 };
+}
+const MAX_DEPTH = 8;
+const MAX_FILES = 25e4;
+const SOFT_TIMEOUT_MS = 4e3;
+async function scanDir(path2, depth, budget) {
+  if (depth > MAX_DEPTH || budget.files >= MAX_FILES || Date.now() > budget.deadline) {
+    budget.truncated = true;
+    return 0;
+  }
+  let entries2;
+  try {
+    entries2 = await promises.readdir(path2, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const ent of entries2) {
+    if (budget.files >= MAX_FILES || Date.now() > budget.deadline) {
+      budget.truncated = true;
+      break;
+    }
+    const child = join(path2, ent.name);
+    if (ent.isSymbolicLink()) continue;
+    if (ent.isDirectory()) {
+      total += await scanDir(child, depth + 1, budget);
+      continue;
+    }
+    if (!ent.isFile()) continue;
+    budget.files += 1;
+    try {
+      const st = await promises.stat(child);
+      total += st.size;
+    } catch {
+    }
+  }
+  return total;
+}
+async function subDirs(path2) {
+  try {
+    const entries2 = await promises.readdir(path2, { withFileTypes: true });
+    return entries2.filter((e) => e.isDirectory() && !e.isSymbolicLink()).map((e) => e.name).sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+async function dirScope(dir, id2, labelKey, label, budget, withChildren = false) {
+  const bytes = await scanDir(dir, 0, budget);
+  const scope2 = { id: id2, labelKey, label, bytes };
+  if (withChildren) {
+    const kids = await subDirs(dir);
+    const children = [];
+    for (const name of kids) {
+      const kidBytes = await scanDir(join(dir, name), 1, budget);
+      children.push({ id: `${id2}/${name}`, labelKey: "diskMgr.entry", label: name, bytes: kidBytes });
+    }
+    if (children.length) scope2.children = children;
+  }
+  return scope2;
+}
+async function volumeBytes(path2) {
+  try {
+    const s = await promises.statfs(path2);
+    const total = s.bsize * s.blocks;
+    const free = s.bsize * s.bavail;
+    return { total: total > 0 ? total : null, free: Number.isFinite(free) ? free : null };
+  } catch {
+    return { free: null, total: null };
+  }
+}
+async function webCacheBytes(budget) {
+  const root2 = app$1.getPath("userData");
+  let total = 0;
+  for (const name of [...CACHE_DIRS, ...STORAGE_DIRS]) {
+    total += await scanDir(join(root2, name), 0, budget);
+  }
+  return total;
+}
+async function getDiskReport() {
+  const budget = { files: 0, deadline: Date.now() + SOFT_TIMEOUT_MS, truncated: false };
+  const userData = app$1.getPath("userData");
+  const scopes = [];
+  scopes.push({
+    id: "webcache",
+    labelKey: "diskMgr.webcache",
+    bytes: await webCacheBytes(budget)
+  });
+  scopes.push(
+    await dirScope(resolvePagesDir(), "pages", "diskMgr.pages", void 0, budget, true)
+  );
+  scopes.push(await dirScope(resolveEnvRoot(), "env", "diskMgr.env", void 0, budget, true));
+  scopes.push(
+    await dirScope(
+      resolveCapabilitiesDir(),
+      "capabilities",
+      "diskMgr.capabilities",
+      void 0,
+      budget
+    )
+  );
+  scopes.push(
+    await dirScope(join(userData, "mcp"), "mcp", "diskMgr.mcp", void 0, budget)
+  );
+  scopes.push(
+    await dirScope(bridgeDir(), "mcp-bridge", "diskMgr.mcpBridge", void 0, budget)
+  );
+  scopes.push(await dirScope(logsDir(), "logs", "diskMgr.logs", void 0, budget));
+  scopes.push(
+    await dirScope(resolveWorkspaceDir(), "workspace", "diskMgr.workspace", void 0, budget)
+  );
+  scopes.push(
+    await dirScope(resolveDownloadDir(), "downloads", "diskMgr.downloads", void 0, budget)
+  );
+  const usedBytes = scopes.reduce((a, s) => a + s.bytes, 0);
+  const { free, total } = await volumeBytes(userData);
+  const report = {
+    usedBytes,
+    freeBytes: free,
+    totalBytes: total,
+    scopes,
+    generatedAt: Date.now()
+  };
+  if (budget.truncated) {
+    report.scopes.push({
+      id: "__truncated__",
+      labelKey: "diskMgr.truncated",
+      bytes: 0
+    });
+  }
+  return report;
+}
+async function clearLogs() {
+  const root2 = logsDir();
+  const pagesDir = join(root2, "pages");
+  const wipe = async (dir) => {
+    let entries2;
+    try {
+      entries2 = await promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries2) {
+      if (!ent.isFile()) continue;
+      const file = join(dir, ent.name);
+      if (/\.(log|jsonl)\.\d+$/.test(ent.name)) {
+        try {
+          await promises.unlink(file);
+        } catch {
+        }
+        continue;
+      }
+      if (/\.(log|jsonl)$/.test(ent.name)) {
+        try {
+          await promises.writeFile(file, "");
+        } catch {
+        }
+      }
+    }
+  };
+  await wipe(root2);
+  await wipe(pagesDir);
+}
+async function clearDiskScope(id2) {
+  if (id2 === "webcache") {
+    await clearWebData({ scope: "cache" });
+    await clearWebData({ scope: "storage" });
+    return;
+  }
+  if (id2 === "logs") {
+    await clearLogs();
+    return;
+  }
+  throw new Error(`scope not clearable: ${id2}`);
 }
 let tray = null;
 let trayImage = null;
@@ -18039,6 +20100,309 @@ function createTray(injected) {
   tray.on("click", () => hooks.onShowWindow());
   rebuildTrayMenu();
 }
+let surveyTimer = null;
+const UPDATE_SURVEY_MS = 30 * 6e4;
+let runSurveyFn = null;
+function runSurvey() {
+  runSurveyFn?.();
+}
+function registerUpdatesIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  ipcMain$1.handle(IPC.RollbackAsar, () => {
+    try {
+      if (!canRollbackAsar().available) return fail2(new Error(m("update.noRollback")));
+      if (!rollbackToPreviousAsar()) return fail2(new Error(m("update.rollbackFailed")));
+      setTimeout(() => app$1.exit(0), 700);
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetUpdateHistory, () => {
+    try {
+      return ok2(getUpdateHistory());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.CheckUpdates, async (_e, force) => {
+    try {
+      const results = await checkUpdates(registry2.list(), Boolean(force));
+      setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)));
+      return ok2(results);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  if (surveyTimer) clearInterval(surveyTimer);
+  runSurveyFn = () => {
+    checkUpdates(registry2.list(), true).then((results) => {
+      setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)));
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send(IPC.OnUpdateResults, results);
+      }
+    }).catch(() => void 0);
+  };
+  setTimeout(() => runSurvey(), 45e3).unref?.();
+  surveyTimer = setInterval(() => runSurvey(), UPDATE_SURVEY_MS);
+  surveyTimer.unref?.();
+  ipcMain$1.handle(IPC.PerformUpdate, async (_e, target) => {
+    const sender = _e.sender;
+    const onProgress = (p) => {
+      if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p);
+    };
+    try {
+      const res = await performUpdate(target, onProgress);
+      clearUpdateCache();
+      return ok2(res);
+    } catch (err) {
+      return fail2(err);
+    } finally {
+      onProgress({ name: target.name, phase: "done", percent: 100 });
+    }
+  });
+}
+function readTailText(file, cap) {
+  try {
+    const total = statSync(file).size;
+    const len = Math.min(total, cap);
+    const buf = Buffer.allocUnsafe(len);
+    const fd = openSync(file, "r");
+    try {
+      readSync(fd, buf, 0, len, total - len);
+    } finally {
+      closeSync(fd);
+    }
+    return buf.toString("utf8");
+  } catch {
+    return `(unavailable: ${file})
+`;
+  }
+}
+function capture(cmd, args, cwd, timeoutMs = 8e3) {
+  return new Promise((resolve2) => {
+    const child = spawn(cmd, args, { cwd, windowsHide: true, timeout: timeoutMs });
+    let out = "";
+    child.stdout?.on("data", (d) => out += String(d));
+    child.on("error", () => resolve2(""));
+    child.on("close", () => resolve2(out.trim()));
+  });
+}
+const SECRET_KEY_RE = /token|key|secret|password|pwd|auth|cookie/i;
+const ENV_MAP_KEYS = ["pageEnvs", "pageCustomEnvs"];
+function maskSettings() {
+  const s = getSettings();
+  const out = { ...s };
+  for (const mapKey of ENV_MAP_KEYS) {
+    const envs = s[mapKey];
+    if (!envs) continue;
+    out[mapKey] = Object.fromEntries(
+      Object.entries(envs).map(([page, vars]) => [
+        page,
+        Object.fromEntries(
+          Object.entries(vars ?? {}).map(([k, v]) => [k, SECRET_KEY_RE.test(k) && v ? "***" : v])
+        )
+      ])
+    );
+  }
+  return out;
+}
+async function exportDiagnostics(registry2) {
+  const ts = isoShanghai().replace(/[:.]/g, "-").slice(0, 19);
+  const stage = join(app$1.getPath("temp"), `dsh-diag-${ts}`);
+  mkdirSync(stage, { recursive: true });
+  try {
+    let nodeRuntime$1 = null;
+    try {
+      nodeRuntime$1 = await Promise.resolve().then(() => nodeRuntime).then((r) => r.getNodeRuntimeInfo());
+    } catch {
+    }
+    let runtimes = {};
+    try {
+      const [{ isDshInstalled: isDshInstalled2 }, { isOpenclawInstalled: isOpenclawInstalled2 }] = await Promise.all([
+        Promise.resolve().then(() => dsh),
+        Promise.resolve().then(() => openclaw)
+      ]);
+      runtimes = { dshInstalled: isDshInstalled2(), openclawInstalled: isOpenclawInstalled2() };
+    } catch {
+    }
+    writeFileSync$1(
+      join(stage, "versions.json"),
+      JSON.stringify(
+        {
+          generatedAt: isoShanghai(),
+          appVersion: app$1.getVersion(),
+          packaged: app$1.isPackaged,
+          exePath: app$1.getPath("exe"),
+          userData: app$1.getPath("userData"),
+          electron: process.versions.electron,
+          chrome: process.versions.chrome,
+          node: process.versions.node,
+          bundledNode: nodeRuntime$1,
+          onDemandRuntimes: runtimes
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+    writeFileSync$1(join(stage, "settings.json"), JSON.stringify(maskSettings(), null, 2), "utf8");
+    const pages = registry2.list().map((p) => {
+      let manifest = null;
+      try {
+        const f = join(p.dir, "container.json");
+        manifest = existsSync(f) ? JSON.parse(readFileSyncSafe(f)) : null;
+      } catch {
+        manifest = "(unreadable)";
+      }
+      return {
+        id: p.id,
+        name: p.name,
+        kind: p.kind,
+        status: p.status,
+        pid: p.pid,
+        port: p.containerPort ?? p.port,
+        external: p.external,
+        lastError: p.lastError,
+        crashes: p.crashes,
+        dependsOn: p.dependsOn,
+        healthUrl: p.healthUrl,
+        containerJson: manifest
+      };
+    });
+    writeFileSync$1(join(stage, "pages.json"), JSON.stringify(pages, null, 2), "utf8");
+    try {
+      const { probePortBind: probePortBind2, findPortHolder: findPortHolder2 } = await Promise.resolve().then(() => portHolder);
+      const portRows = await Promise.allSettled(
+        pages.filter((p) => !p.external && typeof p.port === "number" && p.port > 0).map(async (p) => ({
+          pageId: p.id,
+          port: p.port,
+          bind: await probePortBind2(p.port),
+          holder: await findPortHolder2(p.port)
+        }))
+      );
+      writeFileSync$1(
+        join(stage, "ports.json"),
+        JSON.stringify(
+          portRows.map((r) => r.status === "fulfilled" ? r.value : { error: String(r.reason) }),
+          null,
+          2
+        ),
+        "utf8"
+      );
+    } catch {
+    }
+    try {
+      const { listServers: listServers2 } = await Promise.resolve().then(() => mcpHub);
+      const summary = listServers2().map((s) => ({
+        id: s.spec.id,
+        name: s.spec.name,
+        command: s.spec.command,
+        args: s.spec.args ?? [],
+        enabled: s.spec.enabled !== false,
+        status: s.status,
+        serverInfo: s.serverInfo,
+        toolCount: s.toolCount,
+        lastError: s.lastError
+      }));
+      writeFileSync$1(join(stage, "mcp.json"), JSON.stringify(summary, null, 2), "utf8");
+    } catch {
+    }
+    try {
+      const { getMetricsHistory: getMetricsHistory2 } = await Promise.resolve().then(() => metrics);
+      const history2 = getMetricsHistory2();
+      writeFileSync$1(
+        join(stage, "metrics.json"),
+        JSON.stringify(
+          Object.fromEntries(Object.entries(history2).map(([id2, samples]) => [id2, samples.slice(-12)])),
+          null,
+          2
+        ),
+        "utf8"
+      );
+    } catch {
+    }
+    writeFileSync$1(
+      join(stage, "system.txt"),
+      [
+        `os: ${os.type()} ${os.release()} (${os.arch()})`,
+        `hostname: ${os.hostname()}`,
+        `cpus: ${os.cpus().length} x ${os.cpus()[0]?.model ?? "?"}`,
+        `totalMemory: ${(os.totalmem() / 1024 / 1024 / 1024).toFixed(1)} GB`,
+        `freeMemory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(1)} GB`,
+        `home: ${os.homedir()}`,
+        `locale: ${Intl.DateTimeFormat().resolvedOptions().locale} / TZ ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+        `env.proxy: ${process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY ?? "(none)"}`
+      ].join("\n"),
+      "utf8"
+    );
+    mkdirSync(join(stage, "logs"), { recursive: true });
+    writeFileSync$1(join(stage, "logs", "main.log"), readTailText(join(logsDir(), "main.log"), 1024 * 1024), "utf8");
+    writeFileSync$1(
+      join(stage, "logs", "events.jsonl"),
+      readTailText(join(logsDir(), "events.jsonl"), 512 * 1024),
+      "utf8"
+    );
+    for (const f of safePageLogFiles()) {
+      writeFileSync$1(
+        join(stage, "logs", f.name),
+        readTailText(join(logsDir(), "pages", f.name), 256 * 1024),
+        "utf8"
+      );
+    }
+    const gitLines = [];
+    for (const p of [{ id: "__container__", dir: registry2.containerEntry().dir }, ...pages.map((p2) => ({ id: p2.id, dir: registry2.get(p2.id)?.dir ?? "" }))]) {
+      if (!p.dir || !existsSync(join(p.dir, ".git"))) {
+        gitLines.push(`${p.id}: (no .git)`);
+        continue;
+      }
+      const head = await capture("git", ["rev-parse", "--short", "HEAD"], p.dir);
+      const branch = await capture("git", ["branch", "--show-current"], p.dir);
+      gitLines.push(`${p.id}: ${branch || "?"} @ ${head || "?"}`);
+    }
+    writeFileSync$1(join(stage, "git.txt"), gitLines.join("\n"), "utf8");
+    const zipPath = join(app$1.getPath("temp"), `dsh-diag-${ts}.zip`);
+    await zipFolder$1(stage, zipPath);
+    const dest = resolveExportPath(`dsh-diag-${ts}.zip`);
+    await promises.copyFile(zipPath, dest);
+    logEvent({ level: "info", kind: "diagnostics.export", detail: dest });
+    return dest;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+function readFileSyncSafe(file) {
+  return JSON.stringify(JSON.parse(readFileSync(file, "utf-8")));
+}
+function safePageLogFiles() {
+  try {
+    const dir = join(logsDir(), "pages");
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir).filter((f) => f.endsWith(".log")).map((name) => ({ name }));
+  } catch {
+    return [];
+  }
+}
+function zipFolder$1(src, dest) {
+  const srcLit = src.replace(/'/g, "''");
+  const destLit = dest.replace(/'/g, "''");
+  const ps = `$items = Get-ChildItem -LiteralPath '${srcLit}' | ForEach-Object { $_.FullName }; Compress-Archive -LiteralPath $items -DestinationPath '${destLit}' -Force -ErrorAction Stop`;
+  const encoded = Buffer.from(ps, "utf16le").toString("base64");
+  return new Promise((resolve2, reject) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-EncodedCommand", encoded], {
+      windowsHide: true,
+      timeout: 6e4
+    });
+    let err = "";
+    child.stderr?.on("data", (d) => err += String(d));
+    child.on("error", reject);
+    child.on("close", (code2) => {
+      if (code2 !== 0) return reject(new Error(`Compress-Archive failed (${code2}): ${err.trim()}`));
+      if (!existsSync(dest)) return reject(new Error("Compress-Archive produced no archive"));
+      resolve2();
+    });
+  });
+}
 function captureSettings() {
   const s = getSettings();
   return {
@@ -18057,6 +20421,7 @@ function captureSettings() {
     pageEnvs: s.pageEnvs,
     pageCustomEnvs: s.pageCustomEnvs,
     pagePorts: s.pagePorts,
+    pageDeps: s.pageDeps,
     crashAutoRestart: s.crashAutoRestart,
     systemNotifications: s.systemNotifications,
     accentColor: s.accentColor,
@@ -18196,102 +20561,6 @@ async function importSnapshot(registry2) {
   } finally {
     rmSync(extractTo, { recursive: true, force: true });
   }
-}
-function probeUrl(url, timeoutMs = 8e3) {
-  return new Promise((resolve2) => {
-    const start = Date.now();
-    const getter = url.startsWith("https:") ? get$1 : get$2;
-    let settled = false;
-    const req = getter(url, (res) => {
-      if (settled) return;
-      settled = true;
-      const ms = Date.now() - start;
-      const status = res.statusCode ?? 0;
-      res.destroy();
-      resolve2({ ok: status > 0, ms, status });
-    });
-    req.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      resolve2({ ok: false, error: err.message });
-    });
-    req.setTimeout(timeoutMs, () => {
-      if (settled) return;
-      settled = true;
-      req.destroy();
-      resolve2({ ok: false, error: `timeout ${timeoutMs}ms` });
-    });
-  });
-}
-function probeLoopback() {
-  return new Promise((resolve2) => {
-    const start = Date.now();
-    const server = createServer((sock) => {
-      sock.end("ok");
-    });
-    server.on("error", (err) => resolve2({ ok: false, error: err.message }));
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        server.close();
-        resolve2({ ok: false, error: "no address" });
-        return;
-      }
-      const client = createConnection({ host: "127.0.0.1", port: addr.port });
-      client.on("connect", () => {
-        const ms = Date.now() - start;
-        client.destroy();
-        server.close();
-        resolve2({ ok: true, ms });
-      });
-      client.on("error", (err) => {
-        client.destroy();
-        server.close();
-        resolve2({ ok: false, error: err.message });
-      });
-    });
-  });
-}
-function reachStep(id2, p) {
-  if (p.ok) return { id: id2, ok: true, ms: p.ms, detail: m("net.reachable", { ms: p.ms ?? 0 }) };
-  return { id: id2, ok: false, detail: m("net.unreachable", { err: p.error || `HTTP ${p.status ?? "?"}` }) };
-}
-async function runNetworkProbe(npmRegistry) {
-  const proxy = {
-    http: process.env.HTTP_PROXY || process.env.http_proxy || "",
-    https: process.env.HTTPS_PROXY || process.env.https_proxy || "",
-    no: process.env.NO_PROXY || process.env.no_proxy || ""
-  };
-  const proxyStep = {
-    id: "proxy",
-    ok: true,
-    // informational — presence isn't a failure
-    detail: proxy.http || proxy.https ? proxy.http || proxy.https : m("net.proxyNone")
-  };
-  const [gateway, github, npm, mirror] = await Promise.all([
-    probeLoopback(),
-    probeUrl("https://github.com"),
-    probeUrl("https://registry.npmjs.org/-/ping"),
-    probeUrl("https://registry.npmmirror.com/-/ping")
-  ]);
-  const steps = [
-    reachStep("gateway", gateway),
-    reachStep("github", github),
-    reachStep("npm", npm),
-    reachStep("npmmirror", mirror),
-    proxyStep
-  ];
-  const healthy = gateway.ok && github.ok && (npm.ok || mirror.ok);
-  return { steps, proxy, healthy };
-}
-async function probeRegistries(timeoutMs = 6e3) {
-  const results = await Promise.all(
-    REGISTRY_CANDIDATES.map(async (c) => {
-      const p = await probeUrl(`${c.url.replace(/\/+$/, "")}/-/ping`, timeoutMs);
-      return { id: c.id, url: c.url, ok: p.ok, ms: p.ms, status: p.status, error: p.error };
-    })
-  );
-  return results;
 }
 function listInterfaces() {
   const out = [];
@@ -18507,90 +20776,6 @@ async function sampleNetBar(registry2) {
   } catch {
   }
 }
-const CACHE_DIRS = ["Cache", "Code Cache", "GPUCache", "DawnCache", "Shared Dictionary"];
-const STORAGE_DIRS = ["Local Storage", "Session Storage", "IndexedDB", "FileSystem", "WebStorage"];
-async function dirBytes(path2) {
-  let entries2;
-  try {
-    entries2 = await promises.readdir(path2, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  let total = 0;
-  for (const ent of entries2) {
-    const child = join(path2, ent.name);
-    if (ent.isDirectory()) {
-      total += await dirBytes(child);
-      continue;
-    }
-    if (!ent.isFile()) continue;
-    try {
-      const st = await promises.stat(child);
-      total += st.size;
-    } catch {
-    }
-  }
-  return total;
-}
-async function sumDirs(names2) {
-  const root2 = app$1.getPath("userData");
-  const sizes = await Promise.all(names2.map((n) => dirBytes(join(root2, n))));
-  return sizes.reduce((a, b) => a + b, 0);
-}
-async function getWebDataReport() {
-  const [cacheBytes, storageBytes, cookies] = await Promise.all([
-    sumDirs(CACHE_DIRS),
-    sumDirs(STORAGE_DIRS),
-    session.defaultSession.cookies.get({})
-  ]);
-  const counts = /* @__PURE__ */ new Map();
-  for (const c of cookies) {
-    const domain = (c.domain || "").replace(/^\./, "") || "(unknown)";
-    counts.set(domain, (counts.get(domain) || 0) + 1);
-  }
-  const cookieDomains = [...counts.entries()].map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count || a.domain.localeCompare(b.domain));
-  return { cacheBytes, storageBytes, cookieDomains, totalCookies: cookies.length };
-}
-function cookieUrl(cookie) {
-  const host = (cookie.domain || "").replace(/^\./, "");
-  const scheme = cookie.secure ? "https" : "http";
-  const path2 = cookie.path && cookie.path !== "/" ? cookie.path : "";
-  return `${scheme}://${host}${path2}`;
-}
-async function clearCookies(domain) {
-  const all = await session.defaultSession.cookies.get({});
-  const targets = domain ? all.filter((c) => {
-    const host = (c.domain || "").replace(/^\./, "");
-    return host === domain || host.endsWith(`.${domain}`);
-  }) : all;
-  let removed = 0;
-  for (const c of targets) {
-    try {
-      await session.defaultSession.cookies.remove(cookieUrl(c), c.name);
-      removed += 1;
-    } catch {
-    }
-  }
-  return removed;
-}
-async function clearWebData(args) {
-  const scope2 = args.scope;
-  let removedCookies = 0;
-  if (scope2 === "cache") {
-    await session.defaultSession.clearCache();
-  } else if (scope2 === "cookies") {
-    removedCookies = await clearCookies(args.domain);
-  } else if (scope2 === "storage") {
-    await session.defaultSession.clearStorageData({
-      storages: ["localstorage", "indexdb", "filesystem", "serviceworkers", "shadercache"]
-    });
-  } else {
-    removedCookies = await clearCookies(args.domain);
-    await session.defaultSession.clearStorageData();
-    await session.defaultSession.clearCache();
-  }
-  return { removedCookies, scope: scope2 };
-}
 const lastCpu = /* @__PURE__ */ new Map();
 const HISTORY_CAP = 120;
 const history = /* @__PURE__ */ new Map();
@@ -18761,458 +20946,641 @@ function pruneMetricsBaseline(livePids) {
   const keep = new Set(livePids);
   for (const pid of [...lastCpu.keys()]) if (!keep.has(pid)) lastCpu.delete(pid);
 }
-const SAVE_DEBOUNCE_MS = 400;
-const MIN_VISIBLE_PX = 60;
-let saveTimer = null;
-let watched = null;
-function boundsEnabled() {
-  return getSettings().rememberWindowBounds !== false;
+function resetMetricsHistory() {
+  history.clear();
+  lastCpu.clear();
 }
-function isValid(b) {
-  if (!b) return false;
-  return [b.x, b.y, b.width, b.height].every((n) => Number.isFinite(n));
-}
-function isOnSomeDisplay(rect) {
-  const probe = {
-    x: rect.x,
-    y: rect.y,
-    width: Math.max(1, Math.min(rect.width, MIN_VISIBLE_PX)),
-    height: Math.max(1, Math.min(rect.height, MIN_VISIBLE_PX))
-  };
-  return screen.getAllDisplays().some((d) => {
-    const a = d.bounds;
-    const ix = Math.max(probe.x, a.x);
-    const iy = Math.max(probe.y, a.y);
-    const ix2 = Math.min(probe.x + probe.width, a.x + a.width);
-    const iy2 = Math.min(probe.y + probe.height, a.y + a.height);
-    return ix2 - ix > 0 && iy2 - iy > 0;
-  });
-}
-function resolveBounds(minWidth, minHeight) {
-  if (!boundsEnabled()) return null;
-  const stored = getSettings().windowBounds;
-  if (!isValid(stored)) return null;
-  const rect = {
-    x: stored.x,
-    y: stored.y,
-    width: Math.max(stored.width, minWidth),
-    height: Math.max(stored.height, minHeight)
-  };
-  if (!isOnSomeDisplay(rect)) return null;
-  const display = screen.getDisplayMatching(rect);
-  const wa = display.workAreaSize;
-  return {
-    x: stored.x,
-    y: stored.y,
-    width: Math.min(rect.width, wa.width),
-    height: Math.min(rect.height, wa.height),
-    maximized: Boolean(stored.maximized)
-  };
-}
-function scheduleSave() {
-  if (!boundsEnabled()) return;
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    saveWindowBounds();
-  }, SAVE_DEBOUNCE_MS);
-}
-function saveWindowBounds() {
-  if (!boundsEnabled()) return;
-  const win = watched;
-  if (!win || win.isDestroyed() || win.isMinimized()) return;
-  const n = win.getNormalBounds();
-  const next2 = {
-    x: n.x,
-    y: n.y,
-    width: n.width,
-    height: n.height,
-    maximized: win.isMaximized()
-  };
-  const prev = getSettings().windowBounds;
-  if (prev && prev.x === next2.x && prev.y === next2.y && prev.width === next2.width && prev.height === next2.height && prev.maximized === next2.maximized)
-    return;
-  updateSettings({ windowBounds: next2 });
-}
-function flushWindowBounds() {
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
-  saveWindowBounds();
-}
-function forgetWindowBounds() {
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
-  clearWindowBounds();
-}
-function watchWindowBounds(win) {
-  if (watched === win) return;
-  if (watched && !watched.isDestroyed()) {
-    watched.off("resize", scheduleSave);
-    watched.off("move", scheduleSave);
-    watched.off("maximize", scheduleSave);
-    watched.off("unmaximize", scheduleSave);
-  }
-  watched = win;
-  win.on("resize", scheduleSave);
-  win.on("move", scheduleSave);
-  win.on("maximize", scheduleSave);
-  win.on("unmaximize", scheduleSave);
-}
-function unwatchWindowBounds() {
-  flushWindowBounds();
-  watched = null;
-}
-function popoutSlot(pageId) {
-  const b = getSettings().popoutBounds?.[pageId];
-  return isValid(b) ? b : null;
-}
-function resolvePopoutBounds(pageId, minWidth, minHeight) {
-  if (!boundsEnabled()) return null;
-  const stored = popoutSlot(pageId);
-  if (!stored) return null;
-  const rect = {
-    x: stored.x,
-    y: stored.y,
-    width: Math.max(stored.width, minWidth),
-    height: Math.max(stored.height, minHeight)
-  };
-  if (!isOnSomeDisplay(rect)) return null;
-  return { ...rect, maximized: Boolean(stored.maximized) };
-}
-function rememberPopoutBounds(win, pageId) {
-  if (!boundsEnabled()) return;
-  if (win.isMinimized()) return;
-  const n = win.getNormalBounds();
-  const prev = popoutSlot(pageId);
-  if (prev && prev.x === n.x && prev.y === n.y && prev.width === n.width && prev.height === n.height && prev.maximized === win.isMaximized())
-    return;
-  updateSettings({ popoutBounds: { ...getSettings().popoutBounds, [pageId]: { ...n, maximized: win.isMaximized() } } });
-}
-class PtySession {
-  constructor(id2, title2, cwd, shell2, args, env2) {
-    this.id = id2;
-    this.title = title2;
-    this.cwd = cwd;
-    this.proc = pty.spawn(shell2, args, {
-      name: "xterm-256color",
-      cols: 80,
-      rows: 24,
-      cwd: existsSync(cwd) ? cwd : os.homedir(),
-      env: env2,
-      ...WINPTY_BACKEND
-    });
-    this.proc.onData((chunk) => this.emitter.emit("data", chunk));
-    this.proc.onExit(({ exitCode }) => this.emitter.emit("exit", exitCode ?? 0));
-  }
-  id;
-  title;
-  cwd;
-  proc;
-  emitter = new EventEmitter();
-  on(event, cb) {
-    this.emitter.on(event, cb);
-    return () => this.emitter.off(event, cb);
-  }
-  write(data) {
-    try {
-      this.proc.write(data);
-    } catch {
-    }
-  }
-  resize(cols, rows) {
-    if (cols <= 0 || rows <= 0) return;
-    try {
-      this.proc.resize(cols, rows);
-    } catch {
-    }
-  }
-  kill() {
-    try {
-      this.proc.kill();
-    } catch {
-    }
-  }
-}
-function expandTilde(cmd) {
-  return cmd.replace(/(^|\s)~(?=[/\\]|$)/g, (_m, pre) => pre + os.homedir());
-}
-function whichOnPath(cmd, env2) {
-  if (cmd.includes("/") || cmd.includes("\\")) return null;
-  const pathKey = Object.keys(env2).find((k) => k.toUpperCase() === "PATH") || "PATH";
-  const exts = process.platform === "win32" ? (env2.PATHEXT || ".CMD;.EXE;.BAT;.COM").split(";").map((e) => e.toLowerCase()) : [""];
-  for (const dir of (env2[pathKey] || "").split(process.platform === "win32" ? ";" : ":")) {
-    if (!dir) continue;
-    for (const ext of exts) {
-      const candidate = join(dir, cmd + ext);
-      if (existsSync(candidate)) return candidate;
-    }
-  }
-  return null;
-}
-async function terminalEnv() {
-  const env2 = { ...process.env, TERM: "xterm-256color" };
-  let nodeDir = "";
-  try {
-    nodeDir = dirname(getNodeExePath());
-  } catch {
-    nodeDir = dirname(process.execPath);
-  }
-  const dirs = [nodeDir, ...await pnpmBinDirs()].filter(Boolean);
-  if (dirs.length) {
-    const sep2 = process.platform === "win32" ? ";" : ":";
-    const key = Object.keys(env2).find((k) => k.toUpperCase() === "PATH") || "PATH";
-    env2[key] = [...dirs, env2[key] || ""].join(sep2);
-  }
-  return env2;
-}
-function defaultShell() {
-  if (process.platform === "win32") return { shell: "powershell.exe", args: ["-NoLogo"] };
-  return { shell: process.env.SHELL || "/bin/bash", args: ["-l"] };
-}
-let counter = 0;
-const sessions = /* @__PURE__ */ new Map();
-const WINPTY_BACKEND = process.platform === "win32" ? { useConpty: false } : {};
-class PtyManager {
-  /** Start a shell rooted at `cwd`, titled `title`; returns its session descriptor.
-      With `run`, the session executes that command line instead of an interactive shell. */
-  async start(cwd, title2, run) {
-    const id2 = `pty-${Date.now().toString(36)}-${++counter}`;
-    let shell2;
-    let args;
-    let env2 = await terminalEnv();
-    if (run?.command.trim()) {
-      const [cmd, ...rest] = expandTilde(run.command.trim()).split(/\s+/);
-      env2 = { ...env2, ...run.env || {} };
-      shell2 = cmd === "node" ? getNodeExePath() : whichOnPath(cmd, env2) ?? cmd;
-      args = rest;
-      if (cmd !== "node" && !existsSync(shell2)) {
-        throw new Error(m("pty.commandNotFound", { cmd }));
-      }
-    } else {
-      ({ shell: shell2, args } = defaultShell());
-    }
-    const session2 = new PtySession(id2, title2, cwd, shell2, args, env2);
-    session2.on("exit", () => sessions.delete(id2));
-    sessions.set(id2, session2);
-    return { id: id2, title: title2, cwd: session2.cwd };
-  }
-  get(id2) {
-    return sessions.get(id2);
-  }
-  write(id2, data) {
-    sessions.get(id2)?.write(data);
-  }
-  resize(id2, cols, rows) {
-    sessions.get(id2)?.resize(cols, rows);
-  }
-  kill(id2) {
-    const s = sessions.get(id2);
-    if (!s) return;
-    s.kill();
-    sessions.delete(id2);
-  }
-  killAll() {
-    for (const s of [...sessions.values()]) s.kill();
-    sessions.clear();
-  }
-}
-let surveyTimer = null;
-const UPDATE_SURVEY_MS = 30 * 6e4;
+const metrics = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  collectPageMetrics,
+  getMetricsHistory,
+  pruneMetricsBaseline,
+  resetMetricsHistory
+}, Symbol.toStringTag, { value: "Module" }));
 let metricsTimer = null;
 const METRICS_POLL_MS = 5e3;
 const memRestarted = /* @__PURE__ */ new Set();
 const MEM_RESTART_MIN_UPTIME_MS = 10 * 6e4;
-function savedSite(pageId) {
-  return getSettings().externalSites?.find((s) => s.id === pageId) || null;
+function resetMemGuard() {
+  memRestarted.clear();
 }
-const popoutWindows = /* @__PURE__ */ new Map();
-let popoutSaveTimer = null;
-let guestKeysWired = false;
-let guestSchemeWired = false;
-const guestSchemeCss = /* @__PURE__ */ new WeakMap();
-function shellPreload() {
-  const dir = join(__dirname, "../preload");
-  for (const name of ["index.mjs", "index.js"]) {
-    if (existsSync(join(dir, name))) return join(dir, name);
-  }
-  return join(dir, "index.mjs");
-}
-function schedulePopoutSave() {
-  if (popoutSaveTimer) clearTimeout(popoutSaveTimer);
-  popoutSaveTimer = setTimeout(() => {
-    popoutSaveTimer = null;
-    flushPopoutBounds();
-  }, 800);
-  popoutSaveTimer.unref?.();
-}
-function flushPopoutBounds() {
-  if (popoutSaveTimer) {
-    clearTimeout(popoutSaveTimer);
-    popoutSaveTimer = null;
-  }
-  for (const [id2, win] of popoutWindows) {
-    if (!win.isDestroyed()) rememberPopoutBounds(win, id2);
-  }
-}
-function openPageWindow(registry2, pageId) {
-  const existing = popoutWindows.get(pageId);
-  if (existing && !existing.isDestroyed()) {
-    if (existing.isMinimized()) existing.restore();
-    existing.show();
-    existing.focus();
-    return existing;
-  }
-  const state = registry2.get(pageId);
-  const restored = resolvePopoutBounds(pageId, 720, 480);
-  const win = new BrowserWindow({
-    width: restored?.width ?? 1e3,
-    height: restored?.height ?? 700,
-    x: restored?.x,
-    y: restored?.y,
-    minWidth: 720,
-    minHeight: 480,
-    show: false,
-    autoHideMenuBar: true,
-    title: state?.name || savedSite(pageId)?.name || pageId,
-    backgroundColor: "#000000",
-    // same frameless contract as the main shell: the renderer draws its own title strip
-    frame: false,
-    icon: appIconPath(),
-    webPreferences: {
-      preload: shellPreload(),
-      // mirrors the main window: the popout hosts the page in a <webview> of its own
-      sandbox: false,
-      webviewTag: true
+function registerLogsIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  ipcMain$1.handle(IPC.ListEvents, (_e, args) => {
+    try {
+      return ok2(listEvents(args || {}));
+    } catch (err) {
+      return fail2(err);
     }
   });
-  popoutWindows.set(pageId, win);
-  win.on("ready-to-show", () => {
-    if (!win.isDestroyed()) win.show();
+  ipcMain$1.handle(IPC.GetMetricsHistory, () => {
+    try {
+      return ok2(getMetricsHistory());
+    } catch (err) {
+      return fail2(err);
+    }
   });
-  win.on("page-title-updated", (e) => {
-    e.preventDefault();
+  ipcMain$1.handle(IPC.OpenLogsDir, async () => {
+    try {
+      const err = await shell$1.openPath(logsDir());
+      return err ? fail2(new Error(err)) : ok2(logsDir());
+    } catch (e) {
+      return fail2(e);
+    }
   });
-  win.on("resize", schedulePopoutSave);
-  win.on("move", schedulePopoutSave);
-  const pushMaximized = () => {
-    if (!win.isDestroyed()) win.webContents.send(IPC.OnMaximizedChanged, win.isMaximized());
-  };
-  win.on("maximize", () => {
-    schedulePopoutSave();
-    pushMaximized();
+  ipcMain$1.handle(IPC.ListLogFiles, () => {
+    try {
+      return ok2(listLogFiles());
+    } catch (err) {
+      return fail2(err);
+    }
   });
-  win.on("unmaximize", () => {
-    schedulePopoutSave();
-    pushMaximized();
+  ipcMain$1.handle(IPC.ReadLogs, (_e, args) => {
+    try {
+      return ok2(readLogTail(args?.key ?? "", args?.tail, args?.filter));
+    } catch (err) {
+      return fail2(err);
+    }
   });
-  win.on("closed", () => {
-    popoutWindows.delete(pageId);
+  ipcMain$1.handle(IPC.ExportDiagnostics, async () => {
+    try {
+      return ok2(await exportDiagnostics(registry2));
+    } catch (err) {
+      return fail2(err);
+    }
   });
-  const devUrl = process.env["ELECTRON_RENDERER_URL"];
-  if (devUrl) win.loadURL(`${devUrl}?popout=${encodeURIComponent(pageId)}`);
-  else win.loadFile(join(__dirname, "../renderer/index.html"), { query: { popout: pageId } });
-  return win;
-}
-function activeKeybindings() {
-  const stored = getSettings().keybindings || {};
-  const out = { ...DEFAULT_KEYBINDINGS };
-  for (const action of Object.keys(out)) {
-    const v = stored[action];
-    if (typeof v === "string") out[action] = v;
-  }
-  return out;
-}
-const GUEST_ACTIONS = ["palette", "terminal", "popoutCurrent"];
-function wireGuestShortcuts(registry2) {
-  if (guestKeysWired) return;
-  guestKeysWired = true;
-  app$1.on("web-contents-created", (_e, contents) => {
-    if (contents.getType() !== "webview") return;
-    contents.on("before-input-event", (event, input) => {
-      if (input.type !== "keyDown") return;
-      const bindings = activeKeybindings();
-      let fired = null;
-      for (const action of GUEST_ACTIONS) {
-        if (matchesAccelerator(bindings[action], {
-          key: input.key,
-          code: input.code,
-          ctrl: input.control,
-          shift: input.shift,
-          alt: input.alt,
-          meta: input.meta
-        })) {
-          fired = action;
-          break;
+  ipcMain$1.handle(IPC.ExportSnapshot, async () => {
+    try {
+      return ok2(await exportSnapshot(registry2));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ImportSnapshot, async () => {
+    try {
+      return ok2(await importSnapshot(registry2));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.RunNetworkProbe, async () => {
+    try {
+      return ok2(await runNetworkProbe());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetPageMetrics, async () => {
+    try {
+      return ok2(await collectPageMetrics(registry2, getSettings().memWarnMb ?? 0));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetSystemInfo, () => {
+    try {
+      return ok2(getSystemInfo());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetNetworkStats, async () => {
+    try {
+      return ok2(await getNetworkStats());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  startLogStream((ev) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnLogLine, ev);
+    }
+  });
+  if (metricsTimer) clearInterval(metricsTimer);
+  metricsTimer = setInterval(async () => {
+    try {
+      const settings = getSettings();
+      const metrics2 = await collectPageMetrics(registry2, settings.memWarnMb ?? 0);
+      pruneMetricsBaseline(
+        registry2.running().map((p) => p.pid).filter(Boolean)
+      );
+      setTrayResourceWarn(metrics2.some((mm) => mm.overLimit));
+      if (settings.memLimitAction === "restart") {
+        for (const mm of metrics2) {
+          if (!mm.overLimit || memRestarted.has(mm.pageId)) continue;
+          const st = registry2.get(mm.pageId);
+          if (!st?.startedAt || Date.now() - st.startedAt < MEM_RESTART_MIN_UPTIME_MS) continue;
+          memRestarted.add(mm.pageId);
+          logEvent({
+            level: "warn",
+            kind: "mem.restart",
+            pageId: mm.pageId,
+            meta: { memMb: mm.memMb, limitMb: settings.memWarnMb ?? 0 }
+          });
+          registry2.restart(mm.pageId).catch(
+            (err) => console.warn("[metrics] memory restart failed:", err.message)
+          );
         }
       }
-      if (!fired) return;
-      event.preventDefault();
-      const url = contents.getURL();
-      const pageId = url ? registry2.running().find((p) => p.url && url.startsWith(p.url))?.id : void 0;
-      const signal = { action: fired, ...pageId ? { pageId } : {} };
-      const hostId = contents.hostWebContents?.id;
+      for (const id2 of [...memRestarted]) {
+        if (!registry2.running().some((p) => p.id === id2)) memRestarted.delete(id2);
+      }
       for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed() && win.webContents.id === hostId) {
-          win.webContents.send(IPC.OnHotkey, signal);
-          break;
-        }
+        if (!win.isDestroyed()) win.webContents.send(IPC.OnPageMetrics, metrics2);
       }
-    });
+    } catch {
+    }
+  }, METRICS_POLL_MS);
+  metricsTimer.unref?.();
+  startNetBarLoop(registry2);
+}
+function registerSettingsIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  ipcMain$1.handle(IPC.GetSettings, () => ok2(getSettings()));
+  ipcMain$1.handle(
+    IPC.ShowSystemToast,
+    (_e, payload) => notifyToast(payload?.level, payload?.text || "")
+  );
+  ipcMain$1.handle(IPC.ProbeRegistries, async () => {
+    try {
+      return ok2(await probeRegistries());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetWebData, async () => {
+    try {
+      return ok2(await getWebDataReport());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ClearWebData, async (_e, args) => {
+    try {
+      return ok2(await clearWebData(args));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetDiskReport, async () => {
+    try {
+      return ok2(await getDiskReport());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.ClearDiskScope, async (_e, scope2) => {
+    try {
+      await clearDiskScope(scope2);
+      return ok2(await getDiskReport());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.UpdateSettings,
+    async (_e, partial) => {
+      try {
+        if (partial.defaultView) {
+          const prevDv = getSettings().defaultView;
+          const prevId = prevDv.kind === "page" ? prevDv.pageId : null;
+          let nextId2 = partial.defaultView.kind === "page" ? partial.defaultView.pageId : null;
+          if (nextId2 && registry2.get(nextId2)?.external) nextId2 = null;
+          syncAutoStartForDefaultView(prevId, nextId2);
+          setDefaultView(partial.defaultView);
+        }
+        const rest = { ...partial };
+        delete rest.defaultView;
+        if (Object.keys(rest).length) updateSettings(rest);
+        if (typeof partial.launchAtStartup === "boolean") {
+          applyLaunchAtStartup(partial.launchAtStartup);
+        }
+        if ("npmRegistry" in partial) applyNpmRegistryEnv();
+        if ("containerChannel" in partial || "dshChannel" in partial) {
+          resetBranchProbe();
+          clearUpdateCache();
+          void runSurvey();
+        }
+        if ("memLimitAction" in partial) resetMemGuard();
+        if (typeof partial.containerMcpServer === "boolean") {
+          try {
+            if (partial.containerMcpServer) await startContainerMcpServer(() => registry2);
+            else await stopContainerMcpServer();
+          } catch (err) {
+            updateSettings({ containerMcpServer: false });
+            throw err;
+          }
+        }
+        if ("autopilotEnabled" in partial || "autopilotExecutorPage" in partial || "autopilotConcurrency" in partial) {
+          kickAutopilot();
+        }
+        if (partial.rememberWindowBounds === false) forgetWindowBounds();
+        if (partial.trayPageEntries || partial.trayBadge) rebuildTrayMenu();
+        if (partial.locale) {
+          invalidateLocaleCache();
+          registry2.reconcile();
+          notifyLocaleChanged();
+          registry2.emitChanged();
+          runSurvey();
+        }
+        return ok2(getSettings());
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+}
+function registerTerminalIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  const ptyManager = new PtyManager();
+  const cliPtyByPage = /* @__PURE__ */ new Map();
+  const intentionalKills = /* @__PURE__ */ new Set();
+  registry2.onKillTerminal = (id2) => {
+    const sid = cliPtyByPage.get(id2);
+    if (!sid || !ptyManager.get(sid)) {
+      registry2.reportTerminal(id2, "exit", 0);
+      return;
+    }
+    intentionalKills.add(sid);
+    ptyManager.kill(sid);
+  };
+  ipcMain$1.handle(IPC.PageRunSpec, (_e, id2) => {
+    try {
+      const meta = registry2.get(id2);
+      if (!meta || meta.external) return ok2(null);
+      if (meta.kind === "dsh" || meta.kind === "openclaw") return ok2(null);
+      const port = meta.containerPort || meta.port;
+      return ok2({
+        command: expandStartCommand(meta.startCommand),
+        env: { ...port ? { PORT: String(port) } : {}, ...buildPageEnv(meta) }
+      });
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.OpenTerminalPage, (_e, id2) => {
+    try {
+      const meta = registry2.get(id2);
+      if (!meta || meta.kind !== "terminal") throw new Error(m("ipc.notTerminal", { id: id2 }));
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed()) w.webContents.send(IPC.OpenTerminalPage, id2);
+      }
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  const terminalDirFor = (target) => {
+    if (target === "container") return resolveProjectDir();
+    if (target === "openclaw") return resolveOpenclawHome();
+    if (target === "dsh-root") return resolveDshHome();
+    if (target.startsWith("dsh:")) return resolveDshProfileDir(target.slice(4));
+    const page = registry2.get(target);
+    if (!page) throw new Error(m("ipc.unknownTarget", { target }));
+    return page.dir;
+  };
+  const ptyTextForLog2 = (chunk) => chunk.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-Z\\-_]/g, "").replace(/\r\n?/g, "\n");
+  ipcMain$1.handle(
+    IPC.PtyStart,
+    async (e, target, opts) => {
+      try {
+        const cwd = terminalDirFor(target);
+        const title2 = target === "container" ? m("ipc.containerRoot") : target;
+        const info = await ptyManager.start(cwd, title2, {
+          run: opts?.command ? { command: opts.command, env: opts.env } : void 0,
+          shell: opts?.shell
+        });
+        const session2 = ptyManager.get(info.id);
+        if (session2) {
+          const sender = e.sender;
+          const boundPage = opts?.command ? registry2.get(target) : void 0;
+          const cliId = boundPage?.kind === "terminal" ? boundPage.id : null;
+          if (cliId) {
+            cliPtyByPage.set(cliId, info.id);
+            registry2.reportTerminal(cliId, "running");
+          }
+          let buf = "";
+          let timer = null;
+          const FLUSH_MS = 16;
+          const FLUSH_MAX = 64 * 1024;
+          const flush = () => {
+            if (timer) {
+              clearTimeout(timer);
+              timer = null;
+            }
+            if (!buf) return;
+            const data = buf;
+            buf = "";
+            if (!sender.isDestroyed()) sender.send(IPC.OnPtyData, { id: info.id, data });
+          };
+          session2.on("data", (chunk) => {
+            const text = String(chunk);
+            if (cliId) logPageLine(cliId, ptyTextForLog2(text));
+            buf += text;
+            if (buf.length >= FLUSH_MAX) flush();
+            else if (!timer) timer = setTimeout(flush, FLUSH_MS);
+          });
+          session2.on("exit", (code2) => {
+            flush();
+            const intentional = intentionalKills.delete(info.id);
+            if (cliId) {
+              if (cliPtyByPage.get(cliId) === info.id) cliPtyByPage.delete(cliId);
+              registry2.reportTerminal(cliId, "exit", intentional ? 0 : Number(code2));
+            }
+            if (!sender.isDestroyed())
+              sender.send(IPC.OnPtyExit, { id: info.id, code: Number(code2) });
+          });
+        }
+        return ok2(info);
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.PtyShells, () => {
+    try {
+      return ok2(listShells());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.PtyWrite, (_e, id2, data) => {
+    try {
+      ptyManager.write(id2, data);
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.PtyResize, (_e, id2, cols, rows) => {
+    try {
+      ptyManager.resize(id2, cols, rows);
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.PtyKill, (_e, id2) => {
+    try {
+      intentionalKills.add(id2);
+      ptyManager.kill(id2);
+      return ok2(true);
+    } catch (err) {
+      return fail2(err);
+    }
   });
 }
-const GUEST_DARK_PROBE = `(() => {
-  const de = document.documentElement
-  if (!de) return false
-  const root = getComputedStyle(de)
-  if ((root.colorScheme || 'normal').indexOf('dark') >= 0) return false
-  const rgba = (c) => {
-    const m = String(c).match(/rgba?\\(([\\d.]+)[,\\s]+([\\d.]+)[,\\s]+([\\d.]+)(?:[,\\s/]+([\\d.]+))?\\)/)
-    return m ? { r: +m[1], g: +m[2], b: +m[3], a: m[4] === undefined ? 1 : +m[4] } : null
-  }
-  const body = document.body ? rgba(getComputedStyle(document.body).backgroundColor) : null
-  const bg = (body && body.a ? body : rgba(root.backgroundColor)) || null
-  if (!bg || bg.a === 0) return false
-  return 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b < 110
-})()`;
-const GUEST_DARK_CSS = ":root{color-scheme:dark}";
-async function backfillGuestScheme(contents) {
-  if (contents.isDestroyed()) return;
-  const prev = guestSchemeCss.get(contents);
-  if (prev) {
-    guestSchemeCss.delete(contents);
-    await contents.removeInsertedCSS(prev).catch(() => void 0);
-  }
-  if (!nativeTheme.shouldUseDarkColors) return;
-  try {
-    if (await contents.executeJavaScript(GUEST_DARK_PROBE, false) !== true) return;
-    guestSchemeCss.set(contents, await contents.insertCSS(GUEST_DARK_CSS, { cssOrigin: "user" }));
-  } catch {
-  }
-}
-function wireGuestScheme() {
-  if (guestSchemeWired) return;
-  guestSchemeWired = true;
-  app$1.on("web-contents-created", (_e, contents) => {
-    if (contents.getType() !== "webview") return;
-    contents.on("dom-ready", () => void backfillGuestScheme(contents));
-    contents.once("destroyed", () => guestSchemeCss.delete(contents));
+function registerAgentsIpc(ctx) {
+  const { registry: registry2, ok: ok2, fail: fail2 } = ctx;
+  ipcMain$1.handle(IPC.DshStatus, async (_e, profile) => {
+    try {
+      return ok2(await getDshStatus(profile));
+    } catch (err) {
+      return fail2(err);
+    }
   });
-  nativeTheme.on("updated", () => {
-    for (const c of webContents.getAllWebContents()) {
-      if (!c.isDestroyed() && c.getType() === "webview") void backfillGuestScheme(c);
+  ipcMain$1.handle(IPC.DshListPlugins, (_e, profile) => {
+    try {
+      return ok2(listDshPlugins(profile));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.DshPluginUpdates, async (_e, profile) => {
+    try {
+      return ok2(await checkDshPluginUpdates(profile));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.DshInstallPlugin,
+    async (_e, spec, profile) => {
+      try {
+        await installDshPlugin(spec, profile);
+        return ok2(true);
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(
+    IPC.DshUninstallPlugin,
+    async (_e, name, profile) => {
+      try {
+        await uninstallDshPlugin(name, profile);
+        return ok2(true);
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(
+    IPC.DshUpdatePlugin,
+    async (_e, name, channel, gitUrl, profile) => {
+      try {
+        return ok2(await updateDshPlugin(name, channel, gitUrl, profile));
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.DshUpdateAll, async (_e, profile) => {
+    try {
+      return ok2(await updateAllDshPlugins(profile));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.DshCreatePage, (_e, profile, port) => {
+    try {
+      const id2 = createDshPage(profile, Number(port) || 5173);
+      registry2.reconcile();
+      return ok2(id2);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.DshToken, (_e, profile) => {
+    try {
+      registry2.reconcile();
+      return ok2(resolveDshToken(registry2.list(), profile || ""));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.OpenclawStatus, async () => {
+    try {
+      return ok2(await getOpenclawStatus());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.OpenclawCreatePage, (_e, port) => {
+    try {
+      const id2 = createOpenclawPage(Number(port) || void 0);
+      registry2.reconcile();
+      return ok2(id2);
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.OpenclawToken, () => {
+    try {
+      return ok2(getOpenclawGatewayToken());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.OpenclawInitToken,
+    (_e, rotate) => {
+      try {
+        const { token, created } = initializeOpenclawToken(Boolean(rotate));
+        let restarted = false;
+        const page = registry2.get("openclaw");
+        if (page && page.status === "running") {
+          restarted = true;
+          registry2.restart("openclaw").catch((err) => {
+            console.warn("[openclaw] token restart failed (ignored):", err.message);
+          });
+        }
+        return ok2({ token, created, restarted });
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+}
+function registerMcpIpc(ctx) {
+  const { ok: ok2, fail: fail2 } = ctx;
+  hubEvents.removeAllListeners("changed");
+  hubEvents.on("changed", (states) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnMcpStateChanged, states);
+    }
+  });
+  hubEvents.removeAllListeners("calls");
+  hubEvents.on("calls", (calls) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnMcpCalls, calls);
+    }
+  });
+  ipcMain$1.handle(IPC.McpListServers, () => {
+    try {
+      return ok2(listServers());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpSaveServer, async (_e, spec) => {
+    try {
+      return ok2(await saveServer(spec));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpRemoveServer, async (_e, id2) => {
+    try {
+      return ok2(await removeServer(id2));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpConnect, async (_e, id2) => {
+    try {
+      await connect(id2);
+      return ok2();
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpDisconnect, async (_e, id2) => {
+    try {
+      await disconnect(id2);
+      return ok2();
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpListTools, (_e, serverId) => {
+    try {
+      return ok2(listTools(serverId));
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetMcpCalls, () => {
+    try {
+      return ok2(getCalls());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.McpCallTool,
+    async (_e, args) => {
+      try {
+        return ok2(await callTool(args));
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.McpBridgeInfo, () => {
+    try {
+      return ok2({ dir: bridgeDir(), catalogFile: bridgeCatalogFile(), configFile: bridgeConfigFile() });
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.GetContainerMcpInfo, () => {
+    try {
+      const running = isContainerMcpServerRunning();
+      const info = getContainerMcpServerInfo();
+      return ok2({
+        enabled: !!getSettings().containerMcpServer,
+        running,
+        ...running && info ? { url: info.url, tokenFile: info.tokenFile } : {}
+      });
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.McpPackagesStatus, () => {
+    try {
+      return ok2(mcpPackagesStatus());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(IPC.WorkspaceGet, () => {
+    try {
+      return ok2(workspaceInfo());
+    } catch (err) {
+      return fail2(err);
+    }
+  });
+  ipcMain$1.handle(
+    IPC.WorkspaceSave,
+    (_e, patch) => {
+      try {
+        return ok2(writeWorkspace(patch || {}));
+      } catch (err) {
+        return fail2(err);
+      }
+    }
+  );
+  ipcMain$1.handle(IPC.WorkspaceBroadcast, () => {
+    try {
+      return ok2(broadcastWorkspace());
+    } catch (err) {
+      return fail2(err);
     }
   });
 }
 function registerIpc(registry2) {
-  const ok = (data) => ({ ok: true, data });
-  const fail = (err) => ({
-    ok: false,
-    error: err instanceof Error ? err.message : String(err)
-  });
+  const ctx = { registry: registry2, ok, fail };
   for (const channel of Object.values(IPC)) {
     ipcMain$1.removeHandler(channel);
   }
@@ -19241,967 +21609,15 @@ function registerIpc(registry2) {
       if (!win.isDestroyed()) win.webContents.send(IPC.OnEvent, ev);
     }
   });
-  wireGuestShortcuts(registry2);
-  wireGuestScheme();
-  nativeTheme.on("updated", () => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IPC.OnNativeTheme, nativeTheme.shouldUseDarkColors);
-    }
-  });
-  ipcMain$1.handle(IPC.GetNativeTheme, () => ok(nativeTheme.shouldUseDarkColors));
-  ipcMain$1.handle(
-    IPC.SetNativeTheme,
-    (_e, source) => {
-      if (source === "auto" || source === void 0 || source === null)
-        nativeTheme.themeSource = "system";
-      else if (typeof source === "boolean") nativeTheme.themeSource = source ? "dark" : "light";
-      else nativeTheme.themeSource = source;
-      return ok(true);
-    }
-  );
-  ipcMain$1.handle(IPC.MinimizeWindow, (e) => {
-    BrowserWindow.fromWebContents(e.sender)?.minimize();
-    return ok(true);
-  });
-  ipcMain$1.handle(IPC.ToggleMaximize, (e) => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (!win) return ok(false);
-    if (win.isMaximized()) win.unmaximize();
-    else win.maximize();
-    return ok(win.isMaximized());
-  });
-  ipcMain$1.handle(IPC.CloseWindow, (e) => {
-    BrowserWindow.fromWebContents(e.sender)?.close();
-    return ok(true);
-  });
-  ipcMain$1.handle(
-    IPC.GetIsMaximized,
-    (e) => ok(Boolean(BrowserWindow.fromWebContents(e.sender)?.isMaximized()))
-  );
-  ipcMain$1.handle(IPC.GetNodeInfo, async () => {
-    try {
-      return ok(await getNodeRuntimeInfo());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ListNodeVersions, async (_e, includeIncompatible) => {
-    try {
-      return ok(await listNodeVersions(!!includeIncompatible));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.UpdateNodeRuntime, async (e, version) => {
-    const sender = e.sender;
-    const onProgress = (p) => {
-      if (!sender.isDestroyed()) sender.send(IPC.OnNodeUpdateProgress, p);
-    };
-    try {
-      return ok(await updateNodeRuntime(version, onProgress));
-    } catch (err) {
-      return fail(err);
-    } finally {
-      onProgress({ name: "Node", phase: "done" });
-    }
-  });
-  ipcMain$1.handle(IPC.RestoreBundledNode, async () => {
-    try {
-      return ok(await restoreBundledNode());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(
-    IPC.ProvisionBuiltin,
-    async (_e, kind, version) => {
-      try {
-        const res = await provisionBuiltin(kind, version);
-        clearUpdateCache();
-        if (kind === "mcp") refreshBuiltinPackages();
-        registry2.emitChanged();
-        return ok(res);
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.ListPages, async () => {
-    registry2.reconcile();
-    await registry2.refreshRuntimePresence().catch(() => void 0);
-    return ok(registry2.list());
-  });
-  ipcMain$1.handle(IPC.StartPage, async (_e, id2) => {
-    try {
-      return ok(await registry2.startWithDeps(id2));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.StopPage, async (_e, id2) => {
-    registry2.stop(id2);
-    return ok(registry2.get(id2));
-  });
-  ipcMain$1.handle(IPC.RestartPage, async (_e, id2) => {
-    try {
-      return ok(await registry2.restartWithDeps(id2));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetPageLogs, (_e, id2) => ok(registry2.logs(id2)));
-  ipcMain$1.handle(IPC.ListEvents, (_e, args) => {
-    try {
-      return ok(listEvents(args || {}));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetMetricsHistory, () => {
-    try {
-      return ok(getMetricsHistory());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(
-    IPC.InstallPageFromGit,
-    async (_e, repoUrl, name, port, opts) => {
-      const sender = _e.sender;
-      const onProgress = (p) => {
-        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p);
-      };
-      try {
-        const dirName = await installFromGit(
-          resolvePagesDir(),
-          repoUrl,
-          name,
-          port,
-          void 0,
-          onProgress,
-          opts
-        );
-        registry2.reconcile();
-        clearUpdateCache();
-        return ok(dirName);
-      } catch (err) {
-        return fail(err);
-      } finally {
-        onProgress({ op: "git", phase: "done", percent: 100 });
-      }
-    }
-  );
-  ipcMain$1.handle(
-    IPC.InstallPageFromDir,
-    async (_e, srcDir, name, port, originUrl, opts) => {
-      const sender = _e.sender;
-      const onProgress = (p) => {
-        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p);
-      };
-      try {
-        const dirName = await installFromLocalDir(
-          resolvePagesDir(),
-          srcDir,
-          name,
-          port,
-          originUrl,
-          onProgress,
-          opts
-        );
-        registry2.reconcile();
-        clearUpdateCache();
-        return ok(dirName);
-      } catch (err) {
-        return fail(err);
-      } finally {
-        onProgress({ op: "dir", phase: "done", percent: 100 });
-      }
-    }
-  );
-  ipcMain$1.handle(
-    IPC.InstallPageFromNpm,
-    async (_e, spec, name) => {
-      const sender = _e.sender;
-      const onProgress = (p) => {
-        if (!sender.isDestroyed()) sender.send(IPC.OnInstallProgress, p);
-      };
-      try {
-        const dirName = await installFromNpm(resolvePagesDir(), spec, name, onProgress);
-        registry2.reconcile();
-        clearUpdateCache();
-        return ok(dirName);
-      } catch (err) {
-        return fail(err);
-      } finally {
-        onProgress({ op: "npm", phase: "done", percent: 100 });
-      }
-    }
-  );
-  ipcMain$1.handle(
-    IPC.PreflightImport,
-    async (_e, source, isDir) => {
-      try {
-        const cls = isDir ? classifyProject(String(source || "").trim()) : await probeRemoteTier(String(source || "").trim());
-        if (!cls) return ok({ tier: null });
-        return ok({
-          tier: cls.tier,
-          kind: cls.kind,
-          needsInstall: cls.needsInstall,
-          reason: cls.reason ? m(cls.reason, cls.reasonParams) : void 0,
-          // a rejected well-known repo (codex & friends) has a runnable npm CLI: offer it.
-          suggestNpm: cls.tier === "red" ? npmSuggestionFor(String(source || "")) ?? void 0 : void 0
-        });
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.ChooseDirectory, async (e, title2) => {
-    try {
-      const win = BrowserWindow.fromWebContents(e.sender);
-      const opts = {
-        properties: ["openDirectory", "createDirectory"],
-        title: title2 || m("dialog.chooseDir")
-      };
-      const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
-      if (res.canceled || !res.filePaths.length) return ok(null);
-      return ok(res.filePaths[0]);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.SetPageDisabled, (_e, id2, disabled) => {
-    try {
-      const state = registry2.get(id2);
-      if (!state) return fail(new Error(m("page.unknown", { id: id2 })));
-      if (state.external) return fail(new Error(m("page.disableExternal")));
-      const s = getSettings();
-      const set = new Set(s.disabledPages || []);
-      if (disabled) set.add(id2);
-      else set.delete(id2);
-      updateSettings({ disabledPages: [...set] });
-      if (disabled && (state.status === "running" || state.status === "starting"))
-        registry2.stop(id2);
-      else registry2.announceChange();
-      return ok(registry2.get(id2));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.RemovePage, (_e, id2) => {
-    try {
-      registry2.stop(id2);
-      removePage(resolvePagesDir(), id2);
-      registry2.reconcile();
-      const s = getSettings();
-      if (s.autoStartPages.includes(id2))
-        updateSettings({ autoStartPages: s.autoStartPages.filter((x) => x !== id2) });
-      if (s.defaultView.kind === "page" && s.defaultView.pageId === id2)
-        setDefaultView({ kind: "none" });
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ResetBuiltinPage, (_e, id2) => {
-    try {
-      if (!BUILTIN_PAGE_IDS.has(id2)) return fail(new Error(m("ipc.resetNotBuiltin")));
-      const wasRunning = registry2.get(id2)?.status === "running";
-      registry2.stop(id2);
-      rmSync(join(resolvePagesDir(), id2), { recursive: true, force: true });
-      ensureDefaultOpenclawPage();
-      ensureBuiltinPages();
-      registry2.reconcile();
-      if (wasRunning) {
-        registry2.start(id2).catch((err) => console.error(`[page:${id2}] reset auto-start failed:`, err));
-      }
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.SetPagePort, (_e, id2, port) => {
-    try {
-      const clear = port === void 0 || port === null || Number(port) === 0;
-      if (!clear && !isValidPort(port)) return { ok: false, error: m("ipc.portRange") };
-      const pagePorts = { ...getSettings().pagePorts };
-      if (clear) delete pagePorts[id2];
-      else pagePorts[id2] = Number(port);
-      updateSettings({ pagePorts });
-      registry2.reconcile();
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.OpenPageExternal, async (_e, url) => {
-    try {
-      await shell$1.openExternal(url);
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.OpenPageWindow, (_e, pageId) => {
-    try {
-      if (!registry2.get(pageId) && !savedSite(pageId)) {
-        return fail(new Error(m("page.unknown", { id: pageId })));
-      }
-      openPageWindow(registry2, pageId);
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetSettings, () => ok(getSettings()));
-  ipcMain$1.handle(IPC.OpenLogsDir, async () => {
-    try {
-      const err = await shell$1.openPath(logsDir());
-      return err ? fail(new Error(err)) : ok(logsDir());
-    } catch (e) {
-      return fail(e);
-    }
-  });
-  ipcMain$1.handle(IPC.ListLogFiles, () => {
-    try {
-      return ok(listLogFiles());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ReadLogs, (_e, args) => {
-    try {
-      return ok(readLogTail(args?.key ?? "", args?.tail, args?.filter));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ExportDiagnostics, async () => {
-    try {
-      return ok(await exportDiagnostics(registry2));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.KillPortHolder, async (_e, port) => {
-    try {
-      const n = Number(port);
-      if (!Number.isFinite(n) || n < 1 || n > 65535) return fail(new Error(m("ipc.portRange")));
-      return ok(await killPortHolder(n));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(
-    IPC.CheckPortFree,
-    async (_e, port, pageId) => {
-      try {
-        const n = Number(port);
-        if (!isValidPort(n)) return fail(new Error(m("ipc.portRange")));
-        const bind = await probePortBind(n);
-        if (bind === "free") return ok({ port: n, free: true });
-        const holder = await findPortHolder(n);
-        if (bind === "error" && !holder) return ok({ port: n, free: false, probeError: true });
-        if (holder && pageId && registry2.get(pageId)?.pid === holder.pid) {
-          return ok({ port: n, free: true });
-        }
-        return ok({ port: n, free: false, ...holder ? { holder } : {}, ...bind === "error" ? { probeError: true } : {} });
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.RollbackAsar, () => {
-    try {
-      if (!canRollbackAsar().available) return fail(new Error(m("update.noRollback")));
-      if (!rollbackToPreviousAsar()) return fail(new Error(m("update.rollbackFailed")));
-      setTimeout(() => app$1.exit(0), 700);
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ExportSnapshot, async () => {
-    try {
-      return ok(await exportSnapshot(registry2));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ImportSnapshot, async () => {
-    try {
-      return ok(await importSnapshot(registry2));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.RunNetworkProbe, async () => {
-    try {
-      return ok(await runNetworkProbe());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ProbeRegistries, async () => {
-    try {
-      return ok(await probeRegistries());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetWebData, async () => {
-    try {
-      return ok(await getWebDataReport());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ClearWebData, async (_e, args) => {
-    try {
-      return ok(await clearWebData(args));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetUpdateHistory, () => {
-    try {
-      return ok(getUpdateHistory());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetPageMetrics, async () => {
-    try {
-      return ok(await collectPageMetrics(registry2, getSettings().memWarnMb ?? 0));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetSystemInfo, () => {
-    try {
-      return ok(getSystemInfo());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.GetNetworkStats, async () => {
-    try {
-      return ok(await getNetworkStats());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  startLogStream((ev) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send(IPC.OnLogLine, ev);
-    }
-  });
-  if (metricsTimer) clearInterval(metricsTimer);
-  metricsTimer = setInterval(async () => {
-    try {
-      const settings = getSettings();
-      const metrics = await collectPageMetrics(registry2, settings.memWarnMb ?? 0);
-      pruneMetricsBaseline(
-        registry2.running().map((p) => p.pid).filter(Boolean)
-      );
-      setTrayResourceWarn(metrics.some((mm) => mm.overLimit));
-      if (settings.memLimitAction === "restart") {
-        for (const mm of metrics) {
-          if (!mm.overLimit || memRestarted.has(mm.pageId)) continue;
-          const st = registry2.get(mm.pageId);
-          if (!st?.startedAt || Date.now() - st.startedAt < MEM_RESTART_MIN_UPTIME_MS) continue;
-          memRestarted.add(mm.pageId);
-          logEvent({
-            level: "warn",
-            kind: "mem.restart",
-            pageId: mm.pageId,
-            meta: { memMb: mm.memMb, limitMb: settings.memWarnMb ?? 0 }
-          });
-          registry2.restart(mm.pageId).catch(
-            (err) => console.warn("[metrics] memory restart failed:", err.message)
-          );
-        }
-      }
-      for (const id2 of [...memRestarted]) {
-        if (!registry2.running().some((p) => p.id === id2)) memRestarted.delete(id2);
-      }
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send(IPC.OnPageMetrics, metrics);
-      }
-    } catch {
-    }
-  }, METRICS_POLL_MS);
-  metricsTimer.unref?.();
-  startNetBarLoop(registry2);
-  ipcMain$1.handle(
-    IPC.UpdateSettings,
-    (_e, partial) => {
-      try {
-        if (partial.defaultView) {
-          const prevDv = getSettings().defaultView;
-          const prevId = prevDv.kind === "page" ? prevDv.pageId : null;
-          let nextId2 = partial.defaultView.kind === "page" ? partial.defaultView.pageId : null;
-          if (nextId2 && registry2.get(nextId2)?.external) nextId2 = null;
-          syncAutoStartForDefaultView(prevId, nextId2);
-          setDefaultView(partial.defaultView);
-        }
-        const rest = { ...partial };
-        delete rest.defaultView;
-        if (Object.keys(rest).length) updateSettings(rest);
-        if (typeof partial.launchAtStartup === "boolean") {
-          applyLaunchAtStartup(partial.launchAtStartup);
-        }
-        if ("npmRegistry" in partial) applyNpmRegistryEnv();
-        if ("containerChannel" in partial || "dshChannel" in partial) {
-          resetBranchProbe();
-          clearUpdateCache();
-          void runSurvey();
-        }
-        if ("memLimitAction" in partial) memRestarted.clear();
-        if (partial.rememberWindowBounds === false) forgetWindowBounds();
-        if (partial.trayPageEntries || partial.trayBadge) rebuildTrayMenu();
-        if (partial.locale) {
-          invalidateLocaleCache();
-          registry2.reconcile();
-          notifyLocaleChanged();
-          registry2.emitChanged();
-          runSurvey();
-        }
-        return ok(getSettings());
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.EnvRoot, () => {
-    return ok({
-      envRoot: resolveEnvRoot(),
-      installDir: resolveInstallDir(),
-      home: homedir$1()
-    });
-  });
-  ipcMain$1.handle(
-    IPC.DownloadDir,
-    () => ok({
-      downloadDir: resolveDownloadDir(),
-      defaultDir: defaultDownloadDir(),
-      custom: Boolean((getSettings().downloadDir || "").trim())
-    })
-  );
-  ipcMain$1.handle(IPC.CheckUpdates, async (_e, force) => {
-    try {
-      const results = await checkUpdates(registry2.list(), Boolean(force));
-      setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)));
-      return ok(results);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  if (surveyTimer) clearInterval(surveyTimer);
-  const runSurvey = () => {
-    checkUpdates(registry2.list(), true).then((results) => {
-      setTrayUpdatePending(results.some((r) => r.ok && (r.hasUpdate || r.pendingRestart)));
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send(IPC.OnUpdateResults, results);
-      }
-    }).catch(() => void 0);
-  };
-  setTimeout(runSurvey, 45e3).unref?.();
-  surveyTimer = setInterval(runSurvey, UPDATE_SURVEY_MS);
-  surveyTimer.unref?.();
-  ipcMain$1.handle(IPC.PerformUpdate, async (_e, target) => {
-    const sender = _e.sender;
-    const onProgress = (p) => {
-      if (!sender.isDestroyed()) sender.send(IPC.OnUpdateProgress, p);
-    };
-    try {
-      const res = await performUpdate(target, onProgress);
-      clearUpdateCache();
-      return ok(res);
-    } catch (err) {
-      return fail(err);
-    } finally {
-      onProgress({ name: target.name, phase: "done", percent: 100 });
-    }
-  });
-  ipcMain$1.handle(IPC.RelaunchApp, () => {
-    if (!app$1.isPackaged) {
-      dialog.showMessageBox({ type: "info", title: m("dialog.title"), message: m("update.relaunchDev") }).catch(() => void 0);
-      return ok(false);
-    }
-    if (relaunchToApplyStaged()) {
-      setTimeout(() => app$1.exit(0), 700);
-      return ok(true);
-    }
-    const args = process.argv.slice(1).filter((a) => a !== "--autostart");
-    app$1.relaunch({ args: [...args, "--dsh-relaunched"] });
-    app$1.exit(0);
-    return ok(true);
-  });
-  ipcMain$1.handle(IPC.QuitApp, () => {
-    app$1.quit();
-    return ok(true);
-  });
-  const ptyManager = new PtyManager();
-  const cliPtyByPage = /* @__PURE__ */ new Map();
-  const intentionalKills = /* @__PURE__ */ new Set();
-  registry2.onKillTerminal = (id2) => {
-    const sid = cliPtyByPage.get(id2);
-    if (!sid || !ptyManager.get(sid)) {
-      registry2.reportTerminal(id2, "exit", 0);
-      return;
-    }
-    intentionalKills.add(sid);
-    ptyManager.kill(sid);
-  };
-  ipcMain$1.handle(IPC.PageRunSpec, (_e, id2) => {
-    try {
-      const meta = registry2.get(id2);
-      if (!meta || meta.external) return ok(null);
-      if (meta.kind === "dsh" || meta.kind === "openclaw") return ok(null);
-      const port = meta.containerPort || meta.port;
-      return ok({
-        command: expandStartCommand(meta.startCommand),
-        env: { ...port ? { PORT: String(port) } : {}, ...buildPageEnv(meta) }
-      });
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.OpenTerminalPage, (_e, id2) => {
-    try {
-      const meta = registry2.get(id2);
-      if (!meta || meta.kind !== "terminal") throw new Error(m("ipc.notTerminal", { id: id2 }));
-      for (const w of BrowserWindow.getAllWindows()) {
-        if (!w.isDestroyed()) w.webContents.send(IPC.OpenTerminalPage, id2);
-      }
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  const terminalDirFor = (target) => {
-    if (target === "container") return resolveProjectDir();
-    if (target === "openclaw") return resolveOpenclawHome();
-    if (target === "dsh-root") return resolveDshHome();
-    if (target.startsWith("dsh:")) return resolveDshProfileDir(target.slice(4));
-    const page = registry2.get(target);
-    if (!page) throw new Error(m("ipc.unknownTarget", { target }));
-    return page.dir;
-  };
-  const ptyTextForLog = (chunk) => chunk.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-Z\\-_]/g, "").replace(/\r\n?/g, "\n");
-  ipcMain$1.handle(
-    IPC.PtyStart,
-    async (e, target, opts) => {
-      try {
-        const cwd = terminalDirFor(target);
-        const title2 = target === "container" ? m("ipc.containerRoot") : target;
-        const info = await ptyManager.start(
-          cwd,
-          title2,
-          opts?.command ? { command: opts.command, env: opts.env } : void 0
-        );
-        const session2 = ptyManager.get(info.id);
-        if (session2) {
-          const sender = e.sender;
-          const boundPage = opts?.command ? registry2.get(target) : void 0;
-          const cliId = boundPage?.kind === "terminal" ? boundPage.id : null;
-          if (cliId) {
-            cliPtyByPage.set(cliId, info.id);
-            registry2.reportTerminal(cliId, "running");
-          }
-          let buf = "";
-          let timer = null;
-          const FLUSH_MS = 16;
-          const FLUSH_MAX = 64 * 1024;
-          const flush = () => {
-            if (timer) {
-              clearTimeout(timer);
-              timer = null;
-            }
-            if (!buf) return;
-            const data = buf;
-            buf = "";
-            if (!sender.isDestroyed()) sender.send(IPC.OnPtyData, { id: info.id, data });
-          };
-          session2.on("data", (chunk) => {
-            const text = String(chunk);
-            if (cliId) logPageLine(cliId, ptyTextForLog(text));
-            buf += text;
-            if (buf.length >= FLUSH_MAX) flush();
-            else if (!timer) timer = setTimeout(flush, FLUSH_MS);
-          });
-          session2.on("exit", (code2) => {
-            flush();
-            const intentional = intentionalKills.delete(info.id);
-            if (cliId) {
-              if (cliPtyByPage.get(cliId) === info.id) cliPtyByPage.delete(cliId);
-              registry2.reportTerminal(cliId, "exit", intentional ? 0 : Number(code2));
-            }
-            if (!sender.isDestroyed())
-              sender.send(IPC.OnPtyExit, { id: info.id, code: Number(code2) });
-          });
-        }
-        return ok(info);
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.PtyWrite, (_e, id2, data) => {
-    try {
-      ptyManager.write(id2, data);
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.PtyResize, (_e, id2, cols, rows) => {
-    try {
-      ptyManager.resize(id2, cols, rows);
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.PtyKill, (_e, id2) => {
-    try {
-      intentionalKills.add(id2);
-      ptyManager.kill(id2);
-      return ok(true);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.ToggleDevTools, (e, guestId) => {
-    try {
-      const guest = typeof guestId === "number" ? webContents.fromId(guestId) : void 0;
-      if (typeof guestId === "number" && !guest) return fail(new Error(m("ipc.guestGone")));
-      const target = guest ?? BrowserWindow.fromWebContents(e.sender)?.webContents ?? e.sender;
-      if (target.isDevToolsOpened()) target.closeDevTools();
-      else target.openDevTools({ mode: "detach" });
-      return ok({ opened: target.isDevToolsOpened(), scope: guest ? "webview" : "window" });
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.DshStatus, async (_e, profile) => {
-    try {
-      return ok(await getDshStatus(profile));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.DshListPlugins, (_e, profile) => {
-    try {
-      return ok(listDshPlugins(profile));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.DshPluginUpdates, async (_e, profile) => {
-    try {
-      return ok(await checkDshPluginUpdates(profile));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(
-    IPC.DshInstallPlugin,
-    async (_e, spec, profile) => {
-      try {
-        await installDshPlugin(spec, profile);
-        return ok(true);
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(
-    IPC.DshUninstallPlugin,
-    async (_e, name, profile) => {
-      try {
-        await uninstallDshPlugin(name, profile);
-        return ok(true);
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(
-    IPC.DshUpdatePlugin,
-    async (_e, name, channel, gitUrl, profile) => {
-      try {
-        return ok(await updateDshPlugin(name, channel, gitUrl, profile));
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.DshUpdateAll, async (_e, profile) => {
-    try {
-      return ok(await updateAllDshPlugins(profile));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.DshCreatePage, (_e, profile, port) => {
-    try {
-      const id2 = createDshPage(profile, Number(port) || 5173);
-      registry2.reconcile();
-      return ok(id2);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.DshToken, (_e, profile) => {
-    try {
-      registry2.reconcile();
-      return ok(resolveDshToken(registry2.list(), profile || ""));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.OpenclawStatus, async () => {
-    try {
-      return ok(await getOpenclawStatus());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.OpenclawCreatePage, (_e, port) => {
-    try {
-      const id2 = createOpenclawPage(Number(port) || void 0);
-      registry2.reconcile();
-      return ok(id2);
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.OpenclawToken, () => {
-    try {
-      return ok(getOpenclawGatewayToken());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(
-    IPC.OpenclawInitToken,
-    (_e, rotate) => {
-      try {
-        const { token, created } = initializeOpenclawToken(Boolean(rotate));
-        let restarted = false;
-        const page = registry2.get("openclaw");
-        if (page && page.status === "running") {
-          restarted = true;
-          registry2.restart("openclaw").catch((err) => {
-            console.warn("[openclaw] token restart failed (ignored):", err.message);
-          });
-        }
-        return ok({ token, created, restarted });
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  hubEvents.removeAllListeners("changed");
-  hubEvents.on("changed", (states) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send(IPC.OnMcpStateChanged, states);
-    }
-  });
-  ipcMain$1.handle(IPC.McpListServers, () => {
-    try {
-      return ok(listServers());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.McpSaveServer, async (_e, spec) => {
-    try {
-      return ok(await saveServer(spec));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.McpRemoveServer, async (_e, id2) => {
-    try {
-      return ok(await removeServer(id2));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.McpConnect, async (_e, id2) => {
-    try {
-      await connect(id2);
-      return ok();
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.McpDisconnect, async (_e, id2) => {
-    try {
-      await disconnect(id2);
-      return ok();
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.McpListTools, (_e, serverId) => {
-    try {
-      return ok(listTools(serverId));
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(
-    IPC.McpCallTool,
-    async (_e, args) => {
-      try {
-        return ok(await callTool(args));
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.McpBridgeInfo, () => {
-    try {
-      return ok({ dir: bridgeDir(), catalogFile: bridgeCatalogFile(), configFile: bridgeConfigFile() });
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.McpPackagesStatus, () => {
-    try {
-      return ok(mcpPackagesStatus());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(IPC.WorkspaceGet, () => {
-    try {
-      return ok(workspaceInfo());
-    } catch (err) {
-      return fail(err);
-    }
-  });
-  ipcMain$1.handle(
-    IPC.WorkspaceSave,
-    (_e, patch) => {
-      try {
-        return ok(writeWorkspace(patch || {}));
-      } catch (err) {
-        return fail(err);
-      }
-    }
-  );
-  ipcMain$1.handle(IPC.WorkspaceBroadcast, () => {
-    try {
-      return ok(broadcastWorkspace());
-    } catch (err) {
-      return fail(err);
-    }
-  });
+  registerWindowIpc(ctx);
+  registerRuntimeIpc(ctx);
+  registerPagesIpc(ctx);
+  registerSettingsIpc(ctx);
+  registerLogsIpc(ctx);
+  registerUpdatesIpc(ctx);
+  registerTerminalIpc(ctx);
+  registerAgentsIpc(ctx);
+  registerMcpIpc(ctx);
 }
 let sequence = 0;
 function nextId() {
@@ -20303,17 +21719,17 @@ function copyMissing(src, dst) {
 function ensureAsciiUserData() {
   const asciiLeaf = "DesktopContainer";
   try {
-    const current = app$1.getPath("userData");
-    if (!/[^\x20-\x7e]/.test(current)) return;
+    const current2 = app$1.getPath("userData");
+    if (!/[^\x20-\x7e]/.test(current2)) return;
     const target = join(app$1.getPath("appData"), asciiLeaf);
     if (/[^\x20-\x7e]/.test(target)) {
       console.warn("[container] no ASCII userData path available (Chinese username?):", target);
       return;
     }
     if (existsSync(target)) {
-      if (existsSync(current)) {
+      if (existsSync(current2)) {
         try {
-          const n = copyMissing(current, target);
+          const n = copyMissing(current2, target);
           console.warn(
             `[container] both userData folders existed; merged ${n} file(s) from the Chinese path into ASCII (no overwrite)`
           );
@@ -20324,15 +21740,15 @@ function ensureAsciiUserData() {
       app$1.setPath("userData", target);
       return;
     }
-    if (!existsSync(current)) {
+    if (!existsSync(current2)) {
       app$1.setPath("userData", target);
       return;
     }
     try {
-      renameSync(current, target);
+      renameSync(current2, target);
       app$1.setPath("userData", target);
       try {
-        writeFileSync$1(join(target, MIGRATION_MARKER), `migrated from ${current} at ${isoShanghai()}`);
+        writeFileSync$1(join(target, MIGRATION_MARKER), `migrated from ${current2} at ${isoShanghai()}`);
       } catch {
       }
     } catch (err) {
@@ -20499,13 +21915,13 @@ function dialogWarn(msg) {
 }
 function reacquireSingleInstanceLock() {
   const RETRY_MS = 500;
-  const MAX_ATTEMPTS = 10;
+  const MAX_ATTEMPTS2 = 10;
   const attempt = (n) => {
     if (app$1.requestSingleInstanceLock()) {
       console.log(`[container] relaunched instance took over the single-instance lock (attempt ${n})`);
       return;
     }
-    if (n >= MAX_ATTEMPTS) {
+    if (n >= MAX_ATTEMPTS2) {
       const msg = m("err.dualInstance");
       console.error(`[container] ${msg} (lock still held after ${n} attempts)`);
       dialogWarn(msg);
@@ -20525,7 +21941,7 @@ if (!gotLock) {
   }
   app$1.on("second-instance", showWindow);
   app$1.whenReady().then(async () => {
-    electronApp.setAppUserModelId("com.dsh.desktop-container");
+    electronApp.setAppUserModelId("com.desktop-container");
     ensureUnpackedForUpdate();
     markBootOk();
     logEvent({
@@ -20577,6 +21993,12 @@ if (!gotLock) {
     }
     setMcpPackagesRoot(join(app$1.getPath("userData"), "mcp"));
     autoStartAll().catch((err) => console.warn("[mcp-hub] auto-start failed", err));
+    if (settings.containerMcpServer) {
+      startContainerMcpServer(() => registry ?? void 0).catch(
+        (err) => console.warn("[container-mcp] start failed:", err)
+      );
+    }
+    initAutopilot(() => registry ?? void 0);
     void pnpmBinDirs().catch(() => void 0);
     app$1.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -20600,7 +22022,11 @@ if (!gotLock) {
       e.preventDefault();
       const grace = new Promise((resolve2) => setTimeout(resolve2, QUIT_FLUSH_MS));
       Promise.race([registry.shutdownAll(), grace]).then(
-        () => shutdownAll(),
+        async () => {
+          disposeAutopilot();
+          await stopContainerMcpServer().catch(() => void 0);
+          await shutdownAll();
+        },
         (err) => {
           console.error("[container] shutdownAll failed, forcing exit:", err);
         }

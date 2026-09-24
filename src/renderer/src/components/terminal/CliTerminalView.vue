@@ -4,11 +4,21 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import type { PageState } from '@renderer/stores/pages'
+import { useSettingsStore } from '@renderer/stores/settings'
 import { useIsLight } from '@renderer/composables/useTheme'
+import { TERMINAL_SCROLLBACK_DEFAULT, TERMINAL_SCROLLBACK_MAX } from '@shared/types'
+import TerminalSearchBar from './TerminalSearchBar.vue'
 import { t } from '@renderer/i18n'
 
 const props = defineProps<{ page: PageState | null }>()
 const emit = defineEmits<{ exit: [] }>()
+const settingsStore = useSettingsStore()
+
+/** Clamp the persisted scrollback setting into the range xterm may safely hold. */
+function scrollbackLines(): number {
+  const n = settingsStore.settings.terminalScrollback ?? TERMINAL_SCROLLBACK_DEFAULT
+  return Math.max(1, Math.min(TERMINAL_SCROLLBACK_MAX, Math.round(n) || TERMINAL_SCROLLBACK_DEFAULT))
+}
 
 const containerEl = ref<HTMLElement | null>(null)
 let term: Terminal | null = null
@@ -74,7 +84,7 @@ function ensureTerm(): void {
     cursorBlink: true,
     fontFamily: 'Consolas, Menlo, "Cascadia Code", monospace',
     fontSize: 13,
-    scrollback: 8000,
+    scrollback: scrollbackLines(),
     theme: { background: c.bg, foreground: c.fg }
   })
   fit = new FitAddon()
@@ -196,6 +206,7 @@ onBeforeUnmount(stopPty)
 <template>
   <div class="cli-term">
     <div ref="containerEl" class="cli-term-surface" />
+    <TerminalSearchBar :get-term="() => term" />
     <div v-if="state === 'starting'" class="cli-term-overlay">
       <span class="status-dot starting" />
       <span class="neon">{{ t('cliView.launching', { name: props.page?.name || t('cliView.process') }) }}</span>

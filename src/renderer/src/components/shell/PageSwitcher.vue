@@ -155,22 +155,27 @@ defineExpose({ close })
 
 <template>
   <div class="switcher-wrap">
-    <button
-      class="switcher"
-      :class="{ open }"
-      :aria-haspopup="'listbox'"
-      :aria-expanded="open"
-      :aria-controls="open ? listId : undefined"
-      :title="activePage ? `${props.title} · ${statusText(activePage)}` : props.title"
-      @click="toggle"
+    <el-tooltip
+      :content="activePage ? `${props.title} · ${statusText(activePage)}` : props.title"
+      placement="bottom"
+      popper-class="dsh-tip-popper"
     >
-      <!-- Live status of whatever is on screen, so the bar reads the state at a glance. -->
-      <i v-if="activeDotClass" class="status-dot" :class="activeDotClass" aria-hidden="true" />
-      <span class="switcher-title">{{ props.title }}</span>
-      <svg class="caret" :class="{ open }" width="8" height="5" viewBox="0 0 8 5" aria-hidden="true">
-        <path d="M1 1 L4 4 L7 1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-      </svg>
-    </button>
+      <button
+        class="switcher"
+        :class="{ open }"
+        :aria-haspopup="'listbox'"
+        :aria-expanded="open"
+        :aria-controls="open ? listId : undefined"
+        @click="toggle"
+      >
+        <!-- Live status of whatever is on screen, so the bar reads the state at a glance. -->
+        <i v-if="activeDotClass" class="status-dot" :class="activeDotClass" aria-hidden="true" />
+        <span class="switcher-title">{{ props.title }}</span>
+        <svg class="caret" :class="{ open }" width="8" height="5" viewBox="0 0 8 5" aria-hidden="true">
+          <path d="M1 1 L4 4 L7 1" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+      </button>
+    </el-tooltip>
     <Transition name="switcher-menu">
       <ul
         v-if="open"
@@ -241,32 +246,38 @@ defineExpose({ close })
               <path d="M1 4h9" stroke="currentColor" stroke-width="0.9" />
             </template>
           </svg>
-          <button
-            class="row-name"
-            :class="{ 'is-blocked': blocked(p) }"
-            :disabled="needsStart(p)"
-            :title="rowTitle(p)"
-            @click="pick(p)"
-          >
-            {{ p.name }}
-          </button>
+          <el-tooltip :content="rowTitle(p)" placement="top" popper-class="dsh-tip-popper">
+            <button
+              class="row-name"
+              :class="{ 'is-blocked': blocked(p) }"
+              :disabled="needsStart(p)"
+              @click="pick(p)"
+            >
+              {{ p.name }}
+            </button>
+          </el-tooltip>
           <span v-if="blocked(p)" class="block-tag" :title="t('setup.runtimeMissingTag')">{{
             t('setup.missingTag')
           }}</span>
-          <button
+          <el-tooltip
             v-if="needsStart(p)"
-            :class="['row-start', { 'is-busy': props.busyPages?.[p.id] }]"
-            :disabled="props.busyPages?.[p.id]"
-            :title="props.busyPages?.[p.id] ? t('menu.startingTip') : `${t('menu.start')} ${p.name}`"
-            @click="onStart(p)"
+            :content="props.busyPages?.[p.id] ? t('menu.startingTip') : `${t('menu.start')} ${p.name}`"
+            placement="top"
+            popper-class="dsh-tip-popper"
           >
-            <el-icon v-if="props.busyPages?.[p.id]" class="is-loading row-spinner" aria-hidden="true"
-              ><Loading
-            /></el-icon>
-            <svg v-else width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
-              <path d="M1.6 0.7 L8 4.5 L1.6 8.3 Z" fill="currentColor" />
-            </svg>
-          </button>
+            <button
+              :class="['row-start', { 'is-busy': props.busyPages?.[p.id] }]"
+              :disabled="props.busyPages?.[p.id]"
+              @click="onStart(p)"
+            >
+              <el-icon v-if="props.busyPages?.[p.id]" class="is-loading row-spinner" aria-hidden="true"
+                ><Loading
+              /></el-icon>
+              <svg v-else width="9" height="9" viewBox="0 0 9 9" aria-hidden="true">
+                <path d="M1.6 0.7 L8 4.5 L1.6 8.3 Z" fill="currentColor" />
+              </svg>
+            </button>
+          </el-tooltip>
           <!-- Traffic light: running=green, error=red, starting=amber, stopped=grey.
                A page with no runtime installed never got that far — grey it, don't amber.
                CLI pages light up through the embedded terminal's PTY (registry.reportTerminal). -->

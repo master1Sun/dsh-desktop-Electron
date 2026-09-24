@@ -9,12 +9,15 @@ import {
   Lock,
   Bell,
   Key,
+  Coin,
   InfoFilled
 } from '@element-plus/icons-vue'
 import { usePagesStore } from '@renderer/stores/pages'
 import { useSettingsStore } from '@renderer/stores/settings'
 import type { DefaultView } from '@renderer/stores/settings'
 import type {
+  DiskReport,
+  DiskScope,
   DownloadDirInfo,
   RegistryProbe,
   WebDataReport
@@ -30,6 +33,7 @@ import {
 } from '@shared/types'
 import { acceleratorFromEvent, formatAccelerator, parseAccelerator } from '@shared/accel'
 import { t } from '@renderer/i18n'
+import { useStaleCache } from '@renderer/composables/useStaleCache'
 
 const emit = defineEmits<{
   'apply-theme': [mode: 'auto' | 'light' | 'dark']
@@ -39,7 +43,12 @@ const emit = defineEmits<{
 /* Optional single-pane mode for the IM sidebar: when a host passes `pane`, the vertical tab rail is
  * hidden and that tab is shown on its own. Absent (classic) = full tabbed card, unchanged.
  * `tabPosition` flips the rail to a top strip for the IM popup; unset = classic vertical left. */
-const props = defineProps<{ pane?: string; tabPosition?: 'left' | 'top' }>()
+const props = defineProps<{
+  pane?: string
+  tabPosition?: 'left' | 'top'
+  /** Deep-link tab from the command palette; applied only on change so free clicking still works. */
+  initialTab?: string
+}>()
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
@@ -81,12 +90,20 @@ const InfoTip = defineComponent({
     )
 })
 
-/** Which settings tab is open — one of view / behavior / alerts / keys / download / network / env / privacy. */
-const activeTab = ref(props.pane || 'view')
+/** Which settings tab is open — one of view / behavior / alerts / keys / download / network / env / privacy / storage. */
+const activeTab = ref(props.pane || props.initialTab || 'view')
 watch(
   () => props.pane,
   (p) => {
     if (p) activeTab.value = p
+  }
+)
+// #5: a palette deep link must still move the rail while the panel is already mounted, but only
+// on an actual change (else every parent re-render would yank the user back to the linked tab).
+watch(
+  () => props.initialTab,
+  (tab) => {
+    if (tab) activeTab.value = tab
   }
 )
 
@@ -190,7 +207,7 @@ async function resetKeybindings(): Promise<void> {
 /* ---- 下载目录 ----
    Embedded-page / external-site downloads save straight here (no "Save As" prompt); empty
    follows the OS Downloads folder. Mirrors the env-root browse/save row above. */
-const downloadDirInfo = ref<DownloadDirInfo | null>(null)
+const downloadDirInfo = useStaleCache<DownloadDirInfo | null>('settings.downloadDir', null)
 const downloadDirDraft = ref('')
 
 async function loadDownloadDir(): Promise<void> {
@@ -338,37 +355,25 @@ function commitFrost(f: number): void {
   void patch({ glassBlur: blurFromFrost(f), glassAlpha: alphaFromFrost(f) }, '')
 }
 
-/* ---- #26: 内存告警阈值 / 终端面板高度 ----------------------------------------------
-   Both were stored-and-used-but-never-editable: memWarnMb drives the gold tray badge and the
-   over-budget row colour, terminalHeight is what the drawer restores after a drag. Sliders here
-   write the same keys, so nothing downstream changes. */
+/* ---- #26: 内存告警阈值 -------------------------------------------------------------
+   memWarnMb drives the gold tray badge and the over-budget row colour. (Terminal height is set by
+   dragging the dock edge, not here — see TerminalDrawer.) */
 const MEM_WARN_MIN_MB = 100
 const MEM_WARN_MAX_MB = 8000
-const TERMINAL_MIN_H = 160
-const TERMINAL_MAX_H = 2000
-/** Mirrors TerminalDrawer's DEFAULT_H; kept literal so resetting doesn't need an import cycle. */
-const TERMINAL_DEFAULT_H = 320
 const memWarnDraft = ref(settingsStore.settings.memWarnMb ?? 800)
-const termHeightDraft = ref(settingsStore.settings.terminalHeight ?? TERMINAL_DEFAULT_H)
 watch(
-  () => [settingsStore.settings.memWarnMb, settingsStore.settings.terminalHeight] as const,
-  ([mem, th]) => {
+  () => settingsStore.settings.memWarnMb,
+  (mem) => {
     const nextMem = mem ?? 800
     if (nextMem !== memWarnDraft.value) memWarnDraft.value = nextMem
-    const nextTh = th ?? TERMINAL_DEFAULT_H
-    if (nextTh !== termHeightDraft.value) termHeightDraft.value = nextTh
   }
 )
-async function resetTerminalHeight(): Promise<void> {
-  termHeightDraft.value = TERMINAL_DEFAULT_H
-  await patch({ terminalHeight: TERMINAL_DEFAULT_H }, t('settings.saved'))
-}
 
 /* ---- #26: 网络镜像 ---------------------------------------------------------------
    One setting (npmRegistry) decides where every install the container drives goes. The panel can
    measure all candidate mirrors at once and jump to the fastest reachable one. An empty setting is
    *not* "no registry" — it means the built-in default, so the picker writes '' for that row. */
-const registryProbes = ref<Record<string, RegistryProbe>>({})
+const registryProbes = useStaleCache<Record<string, RegistryProbe>>('settings.registryProbes', {})
 const probing = ref(false)
 const currentRegistry = computed(
   () => settingsStore.settings.npmRegistry?.trim() || NPM_REGISTRY_DEFAULT
@@ -452,7 +457,7 @@ async function saveCustomRegistry(value: string): Promise<void> {
    Every <webview> shares one session, so this is deliberately explicit about scope: a per-domain
    cookie wipe is offered next to the global ones, and anything that logs the user out of
    *every* hosted service asks first. */
-const webData = ref<WebDataReport | null>(null)
+const webData = useStaleCache<WebDataReport | null>('settings.webData', null)
 const webDataLoading = ref(false)
 const webDataBusy = ref('')
 
@@ -534,6 +539,150 @@ async function clearSelectedSite(): Promise<void> {
   await clearWeb('cookies', domain)
   siteClear.value = ''
 }
+
+/* ---- #8: 存储 (disk-usage dashboard) ----------------------------------------------
+   A bounded recursive scan of everything the container owns on disk, so a user running out of
+   room can see which bucket (imported pages / provisioned runtimes / logs / webview cache) is
+   heavy before cleaning. Only `webcache` and `logs` are clearable from here — every other scope
+   is real page/runtime data that has to go through its own manager. */
+const disk = useStaleCache<DiskReport | null>('settings.disk', null)
+const diskLoading = ref(false)
+const diskBusy = ref('')
+/** Rows with an explicit clear route in the main process; anything else has no wipe button. */
+const CLEARABLE_SCOPES = new Set(['webcache', 'logs'])
+/** The synthetic marker disk-usage appends when a scan cap was hit — never shown as a data row. */
+const diskTruncated = computed(() => disk.value?.scopes.some((s) => s.id === '__truncated__') ?? false)
+const diskScopes = computed(() => (disk.value?.scopes ?? []).filter((s) => s.id !== '__truncated__'))
+/** Share of the scanned total, for the per-row proportion bar. */
+function diskPct(bytes: number): number {
+  const total = disk.value?.usedBytes ?? 0
+  return total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 0
+}
+/** Top-level scopes biggest-first: the heaviest bucket leads both the stacked bar and the rows,
+ *  so "where did my disk go" is answerable from the top down without scanning every line. */
+const sortedDiskScopes = computed(() => [...diskScopes.value].sort((a, b) => b.bytes - a.bytes))
+/** Fixed palette so a bucket keeps the SAME colour in the stacked bar and its row dot. */
+const DISK_PALETTE = [
+  '#5b8cff',
+  '#37c8a0',
+  '#f2a341',
+  '#e5636f',
+  '#9b7bf0',
+  '#3fb6d8',
+  '#c9a227',
+  '#6fbf5a',
+  '#d76bb0'
+]
+function diskColorAt(i: number): string {
+  return DISK_PALETTE[i % DISK_PALETTE.length]
+}
+/** Children biggest-first, and each child's bar weighed against ITS parent's total (a scope's
+ *  bytes already include its children), so nested rows read as slices of that row, not the disk. */
+function sortedChildren(s: DiskScope): DiskScope[] {
+  return [...(s.children ?? [])].sort((a, b) => b.bytes - a.bytes)
+}
+function childPct(childBytes: number, parentBytes: number): number {
+  return parentBytes > 0 ? Math.min(100, Math.round((childBytes / parentBytes) * 100)) : 0
+}
+/** Segments of the stacked overview bar (width = exact share, so the whole bar sums to 100%). */
+const diskSegments = computed(() => {
+  const total = disk.value?.usedBytes ?? 0
+  if (total <= 0) return []
+  return sortedDiskScopes.value
+    .filter((s) => s.bytes > 0)
+    .map((s) => ({
+      id: s.id,
+      name: s.label || t(s.labelKey),
+      pct: (s.bytes / total) * 100,
+      bytes: s.bytes
+    }))
+})
+/** Volume usage percent for the header bar; falls back to the scanned total when statfs is mute. */
+const diskVolumePct = computed(() => {
+  const r = disk.value
+  if (!r) return 0
+  if (r.totalBytes && r.totalBytes > 0) {
+    const used = r.totalBytes - (r.freeBytes ?? 0)
+    return Math.min(100, Math.max(0, Math.round((used / r.totalBytes) * 100)))
+  }
+  return 0
+})
+
+async function loadDisk(): Promise<void> {
+  diskLoading.value = true
+  try {
+    const res = await window.container.getDiskReport?.()
+    if (res?.ok) disk.value = (res.data ?? null) as DiskReport | null
+    else if (res?.error) ElMessage.error(res.error)
+  } catch {
+    /* a failed read leaves the previous report on screen */
+  } finally {
+    diskLoading.value = false
+  }
+}
+
+async function clearScope(scope: DiskScope): Promise<void> {
+  if (!CLEARABLE_SCOPES.has(scope.id)) return
+  try {
+    await ElMessageBox.confirm(t('settings.diskClearConfirm', { name: t(scope.labelKey) }), t('settings.diskClear'), {
+      type: 'warning',
+      confirmButtonText: t('common.ok'),
+      cancelButtonText: t('common.cancel')
+    })
+  } catch {
+    return
+  }
+  diskBusy.value = scope.id
+  try {
+    const res = await window.container.clearDiskScope?.(scope.id)
+    if (!res?.ok) throw new Error(res?.error || t('common.unknownError'))
+    disk.value = (res.data ?? null) as DiskReport | null
+    ElMessage.success(t('settings.diskCleared'))
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    diskBusy.value = ''
+  }
+}
+
+// Load lazily but never blank: the disk report persists across open/close, so switching to the tab
+// paints the previous scan at once and this re-scans in the background (the scan is bounded, not
+// free, hence only firing when the tab is shown and never while one is already running).
+watch(
+  activeTab,
+  (tab) => {
+    if (tab === 'storage' && !diskLoading.value) void loadDisk()
+  },
+  { immediate: true }
+)
+
+/* #11: the container's own MCP server. The switch is bound to the persisted setting, and `patch`
+ * only updates that store on success — so if the main process fails to bind and reverts the flag,
+ * the toggle visually snaps back on its own. `loading` covers the await window (a socket bind). */
+const containerMcpBusy = ref(false)
+async function toggleContainerMcp(value: boolean): Promise<void> {
+  containerMcpBusy.value = true
+  try {
+    await patch(
+      { containerMcpServer: value },
+      value ? t('settings.containerMcpOn') : t('settings.containerMcpOff')
+    )
+  } finally {
+    containerMcpBusy.value = false
+  }
+}
+
+/* #1 autopilot: the 行为 tab mirrors the TaskBoard control so the dispatch policy (enable, which
+ * CLI agent page runs tasks, how many at once, and the prompt handed to it) is discoverable in the
+ * canonical settings surface too. Enabling a change kicks a dispatch pass in the main process. */
+const autopilotTerminalPages = computed(() => pagesStore.pages.filter((p) => p.kind === 'terminal'))
+const autopilotPromptDraft = ref(settingsStore.settings.autopilotPrompt ?? '')
+watch(
+  () => settingsStore.settings.autopilotPrompt,
+  (v) => {
+    autopilotPromptDraft.value = v ?? ''
+  }
+)
 </script>
 
 <template>
@@ -635,7 +784,7 @@ async function clearSelectedSite(): Promise<void> {
               }}<InfoTip :content="t('settings.layoutModeTip')"
             /></template>
             <el-radio-group
-              :model-value="settingsStore.settings.layoutMode || 'classic'"
+              :model-value="settingsStore.settings.layoutMode ?? 'im'"
               @update:model-value="patch({ layoutMode: $event as 'classic' | 'im' })"
             >
               <el-radio-button value="classic">{{ t('settings.layoutClassic') }}</el-radio-button>
@@ -689,33 +838,6 @@ async function clearSelectedSite(): Promise<void> {
             />
           </el-form-item>
 
-          <!-- #26: terminal height (stored-only until now) plus the window/motion memory. -->
-          <el-form-item>
-            <template #label
-              >{{ t('settings.terminalHeight')
-              }}<InfoTip :content="t('settings.terminalHeightTip')"
-            /></template>
-            <div class="blur-row">
-              <el-slider
-                v-model="termHeightDraft"
-                :min="TERMINAL_MIN_H"
-                :max="TERMINAL_MAX_H"
-                :step="20"
-                class="set-slider"
-                @change="patch({ terminalHeight: termHeightDraft }, '')"
-              />
-              <span class="blur-val">{{ termHeightDraft }} px</span>
-              <el-button
-                v-if="termHeightDraft !== TERMINAL_DEFAULT_H"
-                link
-                type="primary"
-                @click="resetTerminalHeight"
-              >
-                {{ t('settings.accentReset') }}
-              </el-button>
-            </div>
-          </el-form-item>
-
           <el-form-item>
             <template #label
               >{{ t('settings.rememberWindow')
@@ -740,6 +862,17 @@ async function clearSelectedSite(): Promise<void> {
               <el-radio-button value="off">{{ t('settings.alwaysOff') }}</el-radio-button>
             </el-radio-group>
           </el-form-item>
+
+          <el-form-item>
+            <template #label
+              >{{ t('settings.marqueeBorder')
+              }}<InfoTip :content="t('settings.marqueeBorderTip')"
+            /></template>
+            <el-switch
+              :model-value="settingsStore.settings.marqueeBorder !== false"
+              @update:model-value="patch({ marqueeBorder: $event as boolean })"
+            />
+          </el-form-item>
         </el-form>
       </el-tab-pane>
 
@@ -759,6 +892,76 @@ async function clearSelectedSite(): Promise<void> {
             <el-switch
               :model-value="settingsStore.settings.systemNotifications"
               @update:model-value="patch({ systemNotifications: $event as boolean })"
+            />
+          </el-form-item>
+
+          <!-- #11: expose the container itself as an MCP server for external agents to drive. -->
+          <el-form-item>
+            <template #label
+              >{{ t('settings.containerMcpServer')
+              }}<InfoTip :content="t('settings.containerMcpServerTip')" />
+            </template>
+            <el-switch
+              :model-value="settingsStore.settings.containerMcpServer"
+              :loading="containerMcpBusy"
+              @update:model-value="toggleContainerMcp"
+            />
+          </el-form-item>
+
+          <!-- #1 autopilot:入队即把任务 headless 派发到选定的 CLI 智能体页。 -->
+          <el-form-item>
+            <template #label
+              >{{ t('settings.autopilotEnabled')
+              }}<InfoTip :content="t('settings.autopilotEnabledTip')" />
+            </template>
+            <el-switch
+              :model-value="settingsStore.settings.autopilotEnabled"
+              @update:model-value="patch({ autopilotEnabled: $event as boolean })"
+            />
+          </el-form-item>
+          <el-form-item>
+            <template #label
+              >{{ t('settings.autopilotExecutor')
+              }}<InfoTip :content="t('settings.autopilotExecutorTip')" />
+            </template>
+            <el-select
+              :model-value="settingsStore.settings.autopilotExecutorPage ?? ''"
+              class="set-ctl"
+              :placeholder="t('settings.autopilotNoExecutor')"
+              @update:model-value="patch({ autopilotExecutorPage: $event as string })"
+            >
+              <el-option
+                v-for="p in autopilotTerminalPages"
+                :key="p.id"
+                :label="p.name"
+                :value="p.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item>
+            <template #label
+              >{{ t('settings.autopilotConcurrency')
+              }}<InfoTip :content="t('settings.autopilotConcurrencyTip')" />
+            </template>
+            <el-input-number
+              :model-value="settingsStore.settings.autopilotConcurrency ?? 1"
+              :min="1"
+              :max="4"
+              controls-position="right"
+              @update:model-value="patch({ autopilotConcurrency: Number($event) || 1 })"
+            />
+          </el-form-item>
+          <el-form-item>
+            <template #label
+              >{{ t('settings.autopilotPrompt')
+              }}<InfoTip :content="t('settings.autopilotPromptTip')" />
+            </template>
+            <el-input
+              v-model="autopilotPromptDraft"
+              type="textarea"
+              :autosize="{ minRows: 2, maxRows: 6 }"
+              :placeholder="t('settings.autopilotPromptPlaceholder')"
+              @change="patch({ autopilotPrompt: autopilotPromptDraft })"
             />
           </el-form-item>
 
@@ -875,16 +1078,16 @@ async function clearSelectedSite(): Promise<void> {
           <!-- A customized row gets "restore default" back; a stock row keeps "clear"
                (unbind). The old clear-on-custom rows left the action unbound with no way
                back to its default short of the whole-table reset. -->
-          <el-button
+          <el-tooltip
             v-if="row.custom"
-            size="small"
-            text
-            type="primary"
-            :title="t('settings.keysReset')"
-            @click="restoreKeybinding(row.action)"
+            :content="t('settings.keysReset')"
+            placement="top"
+            popper-class="dsh-tip-popper"
           >
-            {{ t('settings.keysReset') }}
-          </el-button>
+            <el-button size="small" text type="primary" @click="restoreKeybinding(row.action)">
+              {{ t('settings.keysReset') }}
+            </el-button>
+          </el-tooltip>
           <el-button
             v-else
             size="small"
@@ -1174,6 +1377,101 @@ async function clearSelectedSite(): Promise<void> {
             </div>
           </el-form-item>
         </el-form>
+      </el-tab-pane>
+
+      <!-- #8: 存储。容器占用磁盘的分项仪表盘；只有 webcache / logs 两行可在此清理。 -->
+      <el-tab-pane name="storage">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Coin /></el-icon>{{ t('settings.tabStorage') }}</span
+          >
+        </template>
+        <div class="disk-wrap">
+          <div class="disk-head">
+            <span class="disk-title">
+              {{ t('settings.diskUsed', { size: sizeText(disk?.usedBytes ?? 0) }) }}
+            </span>
+            <el-button size="small" :loading="diskLoading" @click="loadDisk">
+              {{ t('common.refresh') }}
+            </el-button>
+          </div>
+
+          <!-- The hosting volume's overall usage; hidden when statfs can't answer. -->
+          <div v-if="disk && diskVolumePct > 0" class="disk-volume">
+            <div class="disk-bar">
+              <div class="disk-bar-fill" :style="{ width: diskVolumePct + '%' }"></div>
+            </div>
+            <span class="disk-volume-text">
+              {{ t('settings.diskVolume', { pct: diskVolumePct, free: sizeText(disk.freeBytes ?? 0), total: disk.totalBytes ? sizeText(disk.totalBytes) : '—' }) }}
+            </span>
+          </div>
+
+          <!-- Distribution at a glance: one stacked bar = the container total split by scope, then a
+               legend that doubles as the ranking. Hover a segment for exact bytes / share. -->
+          <div v-if="diskSegments.length" class="disk-dist">
+            <div class="disk-stack">
+              <el-tooltip
+                v-for="(seg, i) in diskSegments"
+                :key="seg.id"
+                :content="`${seg.name} · ${sizeText(seg.bytes)} · ${seg.pct.toFixed(1)}%`"
+                placement="top"
+              >
+                <div
+                  class="disk-stack-seg"
+                  :style="{ width: seg.pct + '%', background: diskColorAt(i) }"
+                ></div>
+              </el-tooltip>
+            </div>
+            <div class="disk-legend">
+              <span v-for="(seg, i) in diskSegments" :key="seg.id" class="disk-lg-item">
+                <i class="disk-dot" :style="{ background: diskColorAt(i) }"></i>
+                <span class="disk-lg-name">{{ seg.name }}</span>
+                <span class="disk-lg-pct">{{ Math.round(seg.pct) }}%</span>
+              </span>
+            </div>
+          </div>
+
+          <p v-if="diskTruncated" class="disk-note">{{ t('settings.diskTruncated') }}</p>
+          <p v-if="!disk && !diskLoading" class="disk-empty">{{ t('settings.diskEmpty') }}</p>
+
+          <div v-for="(s, i) in sortedDiskScopes" :key="s.id" class="disk-scope">
+            <div class="disk-row">
+              <i class="disk-dot" :style="{ background: diskColorAt(i) }"></i>
+              <span class="disk-name">{{ s.label || t(s.labelKey) }}</span>
+              <div class="disk-bar disk-bar-inline">
+                <div
+                  class="disk-bar-fill"
+                  :style="{ width: diskPct(s.bytes) + '%', background: diskColorAt(i) }"
+                ></div>
+              </div>
+              <span class="disk-pct">{{ diskPct(s.bytes) }}%</span>
+              <span class="disk-size">{{ sizeText(s.bytes) }}</span>
+              <el-button
+                v-if="CLEARABLE_SCOPES.has(s.id)"
+                size="small"
+                type="danger"
+                plain
+                :loading="diskBusy === s.id"
+                @click="clearScope(s)"
+              >
+                {{ t('settings.diskClear') }}
+              </el-button>
+              <span v-else class="disk-spacer"></span>
+            </div>
+            <div v-if="s.children && s.children.length" class="disk-children">
+              <div v-for="c in sortedChildren(s)" :key="c.id" class="disk-child">
+                <span class="disk-child-name">{{ c.label || t(c.labelKey) }}</span>
+                <div class="disk-bar disk-child-bar">
+                  <div
+                    class="disk-bar-fill"
+                    :style="{ width: childPct(c.bytes, s.bytes) + '%', background: diskColorAt(i) }"
+                  ></div>
+                </div>
+                <span class="disk-child-size">{{ sizeText(c.bytes) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </el-tab-pane>
     </el-tabs>
   </div>
@@ -1644,6 +1942,172 @@ async function clearSelectedSite(): Promise<void> {
 .settings-panel .keys-err {
   margin-top: 0;
   color: var(--err);
+}
+
+/* ---- #8 存储 dashboard ----
+   Shares the frosted hairline language of the 隐私数据 / 网络镜像 lists: one column, a proportion
+   bar per row, the byte count right-aligned. The volume bar at top is the disk-wide view; each
+   scope's inline bar is that scope's share of the scanned total (so they never sum to 100%). */
+.disk-wrap {
+  width: var(--settings-row-w);
+  max-width: 640px;
+}
+.disk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.disk-title {
+  font-weight: 650;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.disk-volume {
+  margin-bottom: 12px;
+}
+.disk-volume-text {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.disk-bar {
+  height: 8px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--glass-chip));
+  overflow: hidden;
+}
+.disk-bar-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.disk-note,
+.disk-empty {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.disk-scope {
+  margin-bottom: 12px;
+}
+.disk-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.disk-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 12%, transparent);
+}
+.disk-name {
+  min-width: 84px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.disk-bar-inline {
+  flex: 1;
+  min-width: 0;
+}
+.disk-pct {
+  flex: none;
+  min-width: 34px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.disk-size {
+  min-width: 72px;
+  text-align: right;
+  font-size: 12.5px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.disk-spacer {
+  /* keep clearable and non-clearable rows' byte columns aligned */
+  width: 56px;
+  flex: none;
+}
+.disk-children {
+  margin: 5px 0 0 18px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.disk-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--text-dim);
+}
+.disk-child-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.disk-child-bar {
+  flex: none;
+  width: 120px;
+  height: 5px;
+}
+.disk-child-size {
+  flex: none;
+  min-width: 72px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* ---- stacked distribution overview: the whole bar is the container total, each segment a scope.
+   The legend underneath doubles as the ranking (biggest first) so the split reads without maths. */
+.disk-dist {
+  margin-bottom: 14px;
+}
+.disk-stack {
+  display: flex;
+  width: 100%;
+  height: 16px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 10%, var(--glass-chip));
+}
+.disk-stack-seg {
+  height: 100%;
+  min-width: 2px;
+  transition: width 0.2s ease;
+}
+.disk-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 8px;
+}
+.disk-lg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.disk-lg-item .disk-dot {
+  width: 9px;
+  height: 9px;
+}
+.disk-lg-name {
+  color: var(--text);
+}
+.disk-lg-pct {
+  font-variant-numeric: tabular-nums;
 }
 </style>
 

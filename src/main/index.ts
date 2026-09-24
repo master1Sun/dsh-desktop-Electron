@@ -18,6 +18,8 @@ import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
 import { PageRegistry } from './runtime/pages'
 import { autoStartAll as mcpAutoStart, shutdownAll as mcpShutdown } from './runtime/mcp-hub'
+import { startContainerMcpServer, stopContainerMcpServer } from './runtime/container-mcp-server'
+import { initAutopilot, disposeAutopilot } from './runtime/autopilot'
 import { setMcpPackagesRoot } from './runtime/mcp-packages'
 import { registerIpc, flushPopoutBounds } from './shell/ipc'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './runtime/openclaw'
@@ -323,7 +325,13 @@ if (!gotLock) {
   app.on('second-instance', showWindow)
 
   app.whenReady().then(async () => {
-    electronApp.setAppUserModelId('com.dsh.desktop-container')
+    // Windows binds a toast to the Start-Menu shortcut whose AppUserModelID (AUMID) matches the
+    // one set at runtime — electron-builder's NSIS writes the shortcut with the `appId` from
+    // electron-builder.yml, so this string MUST equal that (`com.desktop-container`) or every
+    // Notification is silently dropped (isSupported() stays true, show() never throws). Dev / an
+    // unpackaged run has no such shortcut, so toasts can't render there either — the renderer
+    // falls back to its in-app corner toast in that case (see notifyToast).
+    electronApp.setAppUserModelId('com.desktop-container')
     ensureUnpackedForUpdate()
     markBootOk()
     // Timeline anchor: every later row is read relative to the boot it happened in.
@@ -427,6 +435,18 @@ if (!gotLock) {
     setMcpPackagesRoot(join(app.getPath('userData'), 'mcp'))
     mcpAutoStart().catch((err) => console.warn('[mcp-hub] auto-start failed', err))
 
+    // #11: bring the container's own MCP server up off the critical path, but only when the
+    // (default-off) gate is on. A bind failure is logged, never allowed to break the window.
+    if (settings.containerMcpServer) {
+      startContainerMcpServer(() => registry ?? undefined).catch((err) =>
+        console.warn('[container-mcp] start failed:', err)
+      )
+    }
+
+    // #1: autopilot task dispatch. Always initialised (a tick no-ops while the setting is off),
+    // so flipping 自动派发 on in the UI takes effect without a restart.
+    initAutopilot(() => registry ?? undefined)
+
     // Warm the pnpm-location probe (a cold `npm prefix -g` costs seconds) off the critical
     // path of the *first* dsh start; it's cached process-wide via pnpmBinDirs().
     void pnpmBinDirs().catch(() => undefined)
@@ -460,7 +480,11 @@ if (!gotLock) {
       // Tree-kill every tracked child on quit; nothing is left running detached across sessions.
       Promise.race([registry.shutdownAll(), grace])
         .then(
-          () => mcpShutdown(),
+          async () => {
+            disposeAutopilot()
+            await stopContainerMcpServer().catch(() => undefined)
+            await mcpShutdown()
+          },
           (err) => {
             // A throw here means the kill path itself broke — don't loop in the
             // uncaughtException handler, log once and force the exit.

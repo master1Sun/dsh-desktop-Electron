@@ -36,6 +36,8 @@ const DEFAULTS: ContainerSettings = {
   downloadDir: '',
   pageEnvs: {},
   pagePorts: {},
+  // #4: container-side per-page dependency overrides (pageId -> [depId…]); shadows container.json
+  pageDeps: {},
   // free-form per-page KEY=VALUE overrides, kept apart from the directory-typed pageEnvs
   pageCustomEnvs: {},
   // DSH tracks the `alpha` dist-tag (where its prereleases are published); switchable in Settings.
@@ -62,11 +64,17 @@ const DEFAULTS: ContainerSettings = {
   // bottom-docked terminal height the user dragged out; keep the default in sync with
   // TerminalDrawer's DEFAULT_H.
   terminalHeight: 320,
+  // scrollback lines kept per terminal surface; clamped to TERMINAL_SCROLLBACK_MAX at create time.
+  terminalScrollback: 8000,
+  // how the terminal is shown: docked into the page area, or a floating overlay that can minimize.
+  terminalMode: 'embedded',
   // #26: restore the last window geometry/maximized state. On by default: a container that
   // relaunches at 1280x860 every time is annoying once you've arranged it beside other windows.
   rememberWindowBounds: true,
   // #26: 'auto' keeps the previous behaviour of following the OS reduced-motion preference.
   reduceMotion: 'auto',
+  // the dark-mode flowing-light border ring is on by default (decorative; switchable in Settings).
+  marqueeBorder: true,
   // #26: '' = the built-in mirror (NPM_REGISTRY_DEFAULT), i.e. the pre-setting behaviour.
   npmRegistry: '',
   // #26: tray defaults mirror what the menu/badge did before they were configurable.
@@ -152,6 +160,18 @@ export function resolvePagesDir(): string {
   if (process.env.DSH_PAGES_DIR) return process.env.DSH_PAGES_DIR
   if (app.isPackaged) return join(app.getPath('userData'), 'pages')
   return join(resolveProjectDir(), 'pages')
+}
+
+/**
+ * Store for imported npm CLI *capabilities* (codex & friends): each gets its own
+ * `<capabilities>/<id>` folder holding the package under `node_modules`, mirroring where the
+ * dsh / openclaw / mcp runtimes are provisioned. Always under userData (never the repo) so a
+ * globally-installed CLI survives packaged updates; the page under `pages/<id>` keeps only a thin
+ * manifest that launches it.
+ */
+export function resolveCapabilitiesDir(): string {
+  if (process.env.DSH_CAPABILITIES_DIR) return process.env.DSH_CAPABILITIES_DIR
+  return join(app.getPath('userData'), 'capabilities')
 }
 
 /** Directory holding the app executable — the install dir when packaged, the repo root in dev. */

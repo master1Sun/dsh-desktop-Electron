@@ -10,6 +10,10 @@ import './assets/main.css'
 // Global glass + neon theme layer: reusable .glass / .neon-title / .reveal / .aurora
 // utilities shared by every panel and manager so the whole app reads consistently.
 import './styles/glass.css'
+// Wrap ElMessage once, before the app mounts, so every toast honours the system-notification
+// routing (see toast.ts); the enabled flag is pushed in by App.vue once settings load.
+import { installToastRouting } from './toast'
+installToastRouting()
 
 const app = createApp(App)
 app.use(createPinia())

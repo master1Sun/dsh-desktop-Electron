@@ -266,7 +266,9 @@ const portRows = computed(() => sample.value?.onlinePorts ?? [])
 .net-drop {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  /* Docked on the left after the brand: anchor the card's left edge to the trigger so it
+     expands rightward and stays inside the window (was right:0 when it lived on the far right). */
+  left: 0;
   min-width: 248px;
   max-width: 340px;
   background: color-mix(in srgb, var(--surface) 92%, transparent);

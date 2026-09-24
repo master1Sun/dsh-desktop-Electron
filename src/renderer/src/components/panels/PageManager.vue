@@ -348,8 +348,16 @@ const logsVisible = ref(false)
 /* ---- per-page config dialog: port override + auto-start (env dirs moved to the 环境目录 tab) ---- */
 const configFor = ref<PageState | null>(null)
 const configVisible = ref(false)
-const configDraft = reactive({ port: '', autoStart: false })
+const configDraft = reactive({ port: '', autoStart: false, deps: [] as string[] })
 const configSaving = ref(false)
+
+// #4: pages the dep editor may list — every installed page except the one being edited and
+// external links (which have no startable process to depend on).
+const depCandidates = computed(() =>
+  pagesStore.pages
+    .filter((p) => !p.external && p.id !== configFor.value?.id)
+    .map((p) => ({ value: p.id, label: p.name }))
+)
 
 /* ---- directory vars: the click-to-toggle two-choice pill the aggregated 环境目录 tab and
    AppManager show (system-common vs <envRoot>/<name>); text vars keep the free input ---- */
@@ -497,6 +505,8 @@ function openConfig(page: PageState): void {
   configFor.value = page
   configDraft.port = String(page.containerPort || page.port || '')
   configDraft.autoStart = (settingsStore.settings.autoStartPages || []).includes(page.id)
+  // Seed the dep editor from the page's effective list (override already folded in by main).
+  configDraft.deps = [...(page.dependsOn ?? [])]
   configSeq.value += 1
   portProbe.value = null
   configVisible.value = true
@@ -546,6 +556,19 @@ async function saveConfig(): Promise<void> {
         ? [...curAuto, page.id]
         : curAuto.filter((x) => x !== page.id)
       await settingsStore.patch({ autoStartPages: nextAuto })
+    }
+    // #4: commit the dep override only when it changed, so a plain port/env edit never
+    // rewrites the page's dependency wiring. Main rejects a set that closes a cycle.
+    const curDeps = page.dependsOn ?? []
+    const nextDeps = configDraft.deps
+    const sameDeps =
+      curDeps.length === nextDeps.length && [...curDeps].sort().join() === [...nextDeps].sort().join()
+    if (!sameDeps) {
+      const res = await window.container.setPageDeps?.(page.id, nextDeps)
+      if (res && !res.ok) {
+        ElMessage.error(res.error || t('pageMgr.msgDepsFail'))
+        return
+      }
     }
     ElMessage.success(t('pageMgr.msgConfigSaved'))
     configVisible.value = false
@@ -775,12 +798,18 @@ function hasDownDep(row: PageState): boolean {
                 <el-icon class="src-icon"><component :is="kindIcon" /></el-icon>
               </template>
             </el-input>
-            <el-button
-              size="large"
-              :icon="FolderOpened"
-              :title="t('pageMgr.btnBrowseDir')"
-              @click="chooseDir"
-            />
+            <el-tooltip
+              :content="t('pageMgr.btnBrowseDir')"
+              placement="top"
+              popper-class="dsh-tip-popper"
+            >
+              <el-button
+                size="large"
+                :icon="FolderOpened"
+                :aria-label="t('pageMgr.btnBrowseDir')"
+                @click="chooseDir"
+              />
+            </el-tooltip>
           </div>
           <div class="kind-row">
             <el-radio-group v-model="kindOverride" size="small">
@@ -999,15 +1028,15 @@ function hasDownDep(row: PageState): boolean {
                   </span>
                 </div>
                 <div v-if="runtimeMissing(row)" class="runtime-missing">
-                  <el-button
-                    size="small"
-                    text
-                    type="warning"
-                    :title="t('setup.runtimeMissingTag')"
-                    @click="guideForMissing(row)"
+                  <el-tooltip
+                    :content="t('setup.runtimeMissingTag')"
+                    placement="top"
+                    popper-class="dsh-tip-popper"
                   >
-                    {{ t('pageMgr.installRuntime') }}
-                  </el-button>
+                    <el-button size="small" text type="warning" @click="guideForMissing(row)">
+                      {{ t('pageMgr.installRuntime') }}
+                    </el-button>
+                  </el-tooltip>
                 </div>
                 <div
                   v-if="row.lastError"
@@ -1018,20 +1047,25 @@ function hasDownDep(row: PageState): boolean {
                 >
                   {{ row.lastError }}
                 </div>
-                <el-button
+                <el-tooltip
                   v-if="row.portHolder && !row.external"
-                  size="small"
-                  type="warning"
-                  plain
-                  round
-                  :loading="killing === row.id"
-                  :title="
+                  :content="
                     t('pageMgr.killPort', { name: row.portHolder.name, pid: row.portHolder.pid })
                   "
-                  @click="killHolderAndRetry(row)"
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  {{ t('pageMgr.killPortShort') }}
-                </el-button>
+                  <el-button
+                    size="small"
+                    type="warning"
+                    plain
+                    round
+                    :loading="killing === row.id"
+                    @click="killHolderAndRetry(row)"
+                  >
+                    {{ t('pageMgr.killPortShort') }}
+                  </el-button>
+                </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column :label="t('pageMgr.colPort')" width="88">
@@ -1080,107 +1114,153 @@ function hasDownDep(row: PageState): boolean {
                      glance: green=start / amber=stop / blue=config & popout / red=remove.
                      No `:loading` here — it used to swap the glyph for a spinner and lock the
                      row; a booting service is now stoppable straight from this button. -->
-                <el-button
+                <el-tooltip
                   v-if="
                     !row.external &&
                     !row.disabled &&
                     (row.kind === 'terminal' || row.containerPort || row.port)
                   "
-                  size="small"
-                  text
-                  :type="
-                    row.status === 'running' || row.status === 'starting'
-                      ? 'warning'
-                      : 'success'
-                  "
-                  :title="
+                  :content="
                     row.status === 'running' || row.status === 'starting'
                       ? t('pageMgr.actionStop')
                       : t('pageMgr.actionStart')
                   "
-                  @click="
-                    row.status === 'running'
-                      ? pagesStore.stop(row.id)
-                      : row.status === 'starting'
-                        ? pagesStore.cancel(row.id)
-                        : runtimeMissing(row)
-                          ? guideForMissing(row)
-                          : runRow(row)
-                  "
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  <el-icon>
-                    <VideoPause v-if="row.status === 'running' || row.status === 'starting'" />
-                    <VideoPlay v-else />
-                  </el-icon>
-                </el-button>
-                <el-button
+                  <el-button
+                    size="small"
+                    text
+                    :type="
+                      row.status === 'running' || row.status === 'starting'
+                        ? 'warning'
+                        : 'success'
+                    "
+                    :aria-label="
+                      row.status === 'running' || row.status === 'starting'
+                        ? t('pageMgr.actionStop')
+                        : t('pageMgr.actionStart')
+                    "
+                    @click="
+                      row.status === 'running'
+                        ? pagesStore.stop(row.id)
+                        : row.status === 'starting'
+                          ? pagesStore.cancel(row.id)
+                          : runtimeMissing(row)
+                            ? guideForMissing(row)
+                            : runRow(row)
+                    "
+                  >
+                    <el-icon>
+                      <VideoPause v-if="row.status === 'running' || row.status === 'starting'" />
+                      <VideoPlay v-else />
+                    </el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip
                   v-if="!row.external"
-                  size="small"
-                  text
-                  type="primary"
-                  :title="t('pageMgr.actionConfig')"
-                  @click="openConfig(row)"
+                  :content="t('pageMgr.actionConfig')"
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  <el-icon><Setting /></el-icon>
-                </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    type="primary"
+                    :aria-label="t('pageMgr.actionConfig')"
+                    @click="openConfig(row)"
+                  >
+                    <el-icon><Setting /></el-icon>
+                  </el-button>
+                </el-tooltip>
                 <!-- C2: every row is detachable — see popoutRow() for what each kind shows there.
                      Share (box + outgoing arrow) instead of CopyDocument: the old glyph read as
                      "copy", not "detach into its own window". -->
-                <el-button
+                <el-tooltip
                   v-if="!row.disabled"
-                  size="small"
-                  text
-                  type="primary"
-                  :title="t('pageMgr.popoutTip')"
-                  @click="popoutRow(row)"
+                  :content="t('pageMgr.popoutTip')"
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  <el-icon><Share /></el-icon>
-                </el-button>
-                <el-button
-                  size="small"
-                  text
-                  type="primary"
-                  :title="t('pageMgr.actionTerminal')"
-                  @click="openTerminal(row)"
+                  <el-button
+                    size="small"
+                    text
+                    type="primary"
+                    :aria-label="t('pageMgr.popoutTip')"
+                    @click="popoutRow(row)"
+                  >
+                    <el-icon><Share /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip
+                  :content="t('pageMgr.actionTerminal')"
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  <el-icon><Monitor /></el-icon>
-                </el-button>
-                <el-button
-                  size="small"
-                  text
-                  type="primary"
-                  :title="t('pageMgr.actionLogs')"
-                  @click="showLogs(row)"
+                  <el-button
+                    size="small"
+                    text
+                    type="primary"
+                    :aria-label="t('pageMgr.actionTerminal')"
+                    @click="openTerminal(row)"
+                  >
+                    <el-icon><Monitor /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip
+                  :content="t('pageMgr.actionLogs')"
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  <el-icon><Document /></el-icon>
-                </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    type="primary"
+                    :aria-label="t('pageMgr.actionLogs')"
+                    @click="showLogs(row)"
+                  >
+                    <el-icon><Document /></el-icon>
+                  </el-button>
+                </el-tooltip>
                 <!-- The built-in's removal substitute: switch it off (hidden from the switcher,
                      never started) instead — reversible, and the files/entry stay intact.
                      Filled ⊗ (CircleCloseFilled) reads as the standard "forbidden" mark; the
                      outline variant looked like a plain close button. -->
-                <el-button
+                <el-tooltip
                   v-if="canToggleDisable(row)"
-                  size="small"
-                  text
-                  :type="row.disabled ? 'success' : 'warning'"
-                  :title="row.disabled ? t('pageMgr.enableTip') : t('pageMgr.disableTip')"
-                  @click="toggleDisabled(row)"
+                  :content="row.disabled ? t('pageMgr.enableTip') : t('pageMgr.disableTip')"
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  <el-icon>
-                    <CircleCheck v-if="row.disabled" />
-                    <CircleCloseFilled v-else />
-                  </el-icon>
-                </el-button>
-                <el-button
+                  <el-button
+                    size="small"
+                    text
+                    :type="row.disabled ? 'success' : 'warning'"
+                    :aria-label="row.disabled ? t('pageMgr.enableTip') : t('pageMgr.disableTip')"
+                    @click="toggleDisabled(row)"
+                  >
+                    <el-icon>
+                      <CircleCheck v-if="row.disabled" />
+                      <CircleCloseFilled v-else />
+                    </el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip
                   v-if="!row.builtin"
-                  size="small"
-                  text
-                  type="danger"
-                  :title="t('common.delete')"
-                  @click="remove(row)"
+                  :content="t('common.delete')"
+                  placement="top"
+                  popper-class="dsh-tip-popper"
                 >
-                  <el-icon><Delete /></el-icon>
-                </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    type="danger"
+                    :aria-label="t('common.delete')"
+                    @click="remove(row)"
+                  >
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </el-tooltip>
               </template>
             </el-table-column>
           </el-table>
@@ -1340,6 +1420,29 @@ function hasDownDep(row: PageState): boolean {
         <el-form-item :label="t('appmgr.autoStart')">
           <el-switch v-model="configDraft.autoStart" size="small" />
           <span class="cfg-hint">{{ t('pageMgr.configAutoStartTip') }}</span>
+        </el-form-item>
+
+        <!-- #4: container-side dependency wiring (shadows container.json, edits nothing there).
+             Starting this page boots these first; a cycle is rejected by the main process. -->
+        <el-form-item :label="t('pageMgr.configDepsLabel')">
+          <el-select
+            v-model="configDraft.deps"
+            multiple
+            filterable
+            clearable
+            collapse-tags
+            collapse-tags-tooltip
+            style="width: 100%"
+            :placeholder="t('pageMgr.configDepsPlaceholder')"
+          >
+            <el-option
+              v-for="c in depCandidates"
+              :key="c.value"
+              :label="c.label"
+              :value="c.value"
+            />
+          </el-select>
+          <span class="cfg-hint">{{ t('pageMgr.configDepsTip') }}</span>
         </el-form-item>
 
         <!-- B2: arbitrary KEY=VALUE for this page. Declared env dirs are configured in the

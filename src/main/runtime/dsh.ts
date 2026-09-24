@@ -382,6 +382,31 @@ function installedBundleVersion(name: string, profileDir: string): string | null
 }
 
 /**
+ * Read the RESOLVED installed package's own metadata (its real version + declared repo/homepage)
+ * from node_modules. Two uses: an npm-pinned plugin records only a range (`^0.6.0`) in the profile,
+ * so comparing against that range misreads what is actually on disk (e.g. 0.6.4); and the npm
+ * registry's packument sometimes omits `repository` even though the shipped package.json carries
+ * it — this is the extra source that lets an npm-installed plugin still be weighed against git.
+ */
+function installedPkgMeta(name: string, profileDir: string): { version: string; repository: string } {
+  const parts = name.split('/')
+  for (const dir of bundleSearchDirs(profileDir)) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, ...parts, 'package.json'), 'utf-8'))
+      const repo = pkg.repository
+      return {
+        version: typeof pkg.version === 'string' ? pkg.version : '',
+        repository:
+          typeof repo === 'string' ? repo : repo?.url || (typeof pkg.homepage === 'string' ? pkg.homepage : '')
+      }
+    } catch {
+      /* try the next root */
+    }
+  }
+  return { version: '', repository: '' }
+}
+
+/**
  * node_modules dirs a bundle layer can resolve from: the profile's own (pnpm-installed plugins),
  * then each dsh root's top level *and* the nested tree dsh ships its built-in layers in —
  * `@deepseek-ai/dsh-base` & friends live under `@deepseek-ai/dsh/node_modules`, so omitting it
@@ -619,12 +644,21 @@ function parseGitSpec(version: string): { repo: string; ref?: string; isSha: boo
 /**
  * Highest semver tag of a remote git repo, with its commit sha (resolved from the
  * annotated-tag deref line). Lets git-pinned dsh plugins surface a real version number
- * instead of a bare short sha. Returns null when the repo publishes no semver tags.
+ * instead of a bare short sha. Returns `tag:null` when the repo publishes no semver tags,
+ * and carries `error` (the git stderr / spawn reason) when `ls-remote` itself failed — so a
+ * caller can tell "no tags / up to date" apart from "couldn't reach git" rather than defaulting
+ * to a silent "up to date".
  */
-async function latestGitTag(repo: string): Promise<{ version: string; sha: string } | null> {
-  if (/[\s;`$&|]/.test(repo)) return null
+async function latestGitTag(
+  repo: string
+): Promise<{ tag: { version: string; sha: string } | null; error?: string }> {
+  if (/[\s;`$&|]/.test(repo)) return { tag: null }
   const res = await runCli('git', ['ls-remote', '--tags', repo], { timeoutMs: 60_000 })
-  if (res.code !== 0) return null
+  if (res.code !== 0)
+    return {
+      tag: null,
+      error: (res.stderr || res.stdout || `git ls-remote exited ${res.code}`).trim().slice(-300)
+    }
   const tagSha = new Map<string, string>()
   const commitSha = new Map<string, string>()
   for (const line of res.stdout.split(/\r?\n/)) {
@@ -649,27 +683,70 @@ async function latestGitTag(repo: string): Promise<{ version: string; sha: strin
       bestName = name
     }
   }
-  if (!bestName) return null
+  if (!bestName) return { tag: null }
   const sha = commitSha.get(bestName) || tagSha.get(bestName) || ''
   // return the original tag name (keeps the `v` prefix so it doubles as a git ref)
-  return { version: bestName, sha }
+  return { tag: { version: bestName, sha } }
 }
 
-function isNewerVersion(installed: string, latest: string): boolean {
-  // strip leading range operators (^ ~ >= < = * v) so a caret range like "^1.2.3"
-  // isn't misread as major version 0 (which would flag every ranged plugin as outdated)
-  const clean = (s: string): string => s.replace(/^[\^~>=<*v]+/i, '').trim()
-  if (!/^\d/.test(clean(installed)) || !/^\d/.test(clean(latest))) return false
-  const seg = (s: string): number[] =>
-    clean(s)
-      .split(/[.+-]/)
-      .map((x) => parseInt(x, 10) || 0)
-  const a = seg(installed)
-  const b = seg(latest)
-  for (let i = 0; i < 3; i++) {
-    if ((a[i] || 0) !== (b[i] || 0)) return (b[i] || 0) > (a[i] || 0)
+interface SemverParts {
+  major: number
+  minor: number
+  patch: number
+  pre: (number | string)[]
+}
+
+/**
+ * Parse a semver into comparable parts, tolerating a leading range operator or `v` (so
+ * "^1.2.3" / "v1.2.3" read as 1.2.3) and ignoring build metadata (+…). Returns null for a
+ * non-semver ref (a bare branch name / commit sha) so callers treat it as "not comparable".
+ */
+function parseSemver(s: string): SemverParts | null {
+  const clean = (s || '').replace(/^[\^~>=<*v]+/i, '').trim()
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(clean)
+  if (!m) return null
+  const pre = m[4] ? m[4].split('.').map((x) => (/^\d+$/.test(x) ? parseInt(x, 10) : x)) : []
+  return { major: +m[1], minor: +m[2], patch: +m[3], pre }
+}
+
+/** semver.org precedence between the prerelease lists of two same-M.m.P versions. */
+function cmpPrerelease(a: (number | string)[], b: (number | string)[]): number {
+  // A release (empty pre) always outranks any prerelease.
+  if (!a.length && !b.length) return 0
+  if (!a.length) return 1
+  if (!b.length) return -1
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const ai = a[i]
+    const bi = b[i]
+    if (ai === undefined) return -1 // fewer fields is lower when the prefix ties
+    if (bi === undefined) return 1
+    if (ai === bi) continue
+    const aNum = typeof ai === 'number'
+    const bNum = typeof bi === 'number'
+    if (aNum && bNum) return (ai as number) < (bi as number) ? -1 : 1
+    if (aNum) return -1 // numeric identifiers sort below alphanumeric
+    if (bNum) return 1
+    return String(ai) < String(bi) ? -1 : 1
   }
-  return false
+  return 0
+}
+
+/**
+ * true when `latest` is a strictly newer semver than `installed`. Honours prerelease precedence,
+ * so the alpha-driven dsh plugin ecosystem can spot a `0.1.6-alpha.2 → 0.1.6-alpha.3` (or
+ * `…-alpha.x → 0.1.6`) bump. The prior coarse major/minor/patch test read every same-patch
+ * prerelease as equal and reported "no update" for exactly those — which surfaced as the plugin
+ * panel never seeing the newest git tag. Non-semver refs (branch / sha) compare false, keeping the
+ * old "can't weigh it, don't flag it" behaviour that the sha-pinned path handles separately.
+ */
+export function isNewerVersion(installed: string, latest: string): boolean {
+  const a = parseSemver(installed)
+  const b = parseSemver(latest)
+  if (!a || !b) return false
+  if (a.major !== b.major) return b.major > a.major
+  if (a.minor !== b.minor) return b.minor > a.minor
+  if (a.patch !== b.patch) return b.patch > a.patch
+  return cmpPrerelease(a.pre, b.pre) < 0
 }
 
 async function npmLatestVersion(name: string): Promise<string> {
@@ -726,14 +803,38 @@ function installedSemverOf(raw: string, git: { ref?: string } | null): string | 
  * since a bare sha/branch has no semver to weigh against npm. Any failed lookup omits that
  * source rather than erroring, so one unreachable host never blanks the whole hint.
  */
-async function describePluginUpdate(p: DshPluginInfo): Promise<DshPluginUpdate> {
+async function describePluginUpdate(p: DshPluginInfo, profileDir: string): Promise<DshPluginUpdate> {
   const gitDep = parseGitSpec(p.version)
-  const installedSem = installedSemverOf(p.version, gitDep)
-  const repo = gitDep?.repo || normalizeRepoUrl(await npmRepositoryUrl(p.name))
-  const [npmRaw, tag] = await Promise.all([
+  const meta = installedPkgMeta(p.name, profileDir)
+  // For an npm-pinned plugin the profile only records a range (`^0.6.0`), which is NOT what is on
+  // disk (pnpm may have resolved 0.6.4). Weigh against the resolved installed version so a range
+  // that is already satisfied is not falsely reported as updatable; git deps keep reading their ref.
+  const npmInstalled = cleanVersion(meta.version || '')
+  const installedSem =
+    !gitDep && isSemver(npmInstalled)
+      ? npmInstalled
+      : installedSemverOf(p.version, gitDep)
+  // Resolve the backing git repo: a git dep carries it; otherwise ask the npm registry, and fall
+  // back to the installed package's own repository/homepage so an npm-installed plugin can still be
+  // compared against git's newest tag (the mirror's packument often drops `repository`).
+  const repo =
+    gitDep?.repo ||
+    normalizeRepoUrl(await npmRepositoryUrl(p.name)) ||
+    normalizeRepoUrl(meta.repository)
+  const [npmRaw, gitLookup] = await Promise.all([
     npmLatestVersion(p.name),
-    repo ? latestGitTag(repo) : Promise.resolve(null)
+    repo
+      ? latestGitTag(repo)
+      : Promise.resolve({
+          tag: null as { version: string; sha: string } | null,
+          error: undefined as string | undefined
+        })
   ])
+  const tag = gitLookup.tag
+  // A failed `git ls-remote` must not read as "up to date": carry the reason so the panel can say
+  // "检测失败" instead of silently hiding an update the user can see on the repo page.
+  const gitErr = gitLookup.error
+  const withErr = <T extends DshPluginUpdate>(u: T): T => (gitErr ? { ...u, error: gitErr } : u)
   const npmSem = isSemver(cleanVersion(npmRaw)) ? cleanVersion(npmRaw) : null
   const gitSem = tag && isSemver(cleanVersion(tag.version)) ? cleanVersion(tag.version) : null
 
@@ -741,14 +842,14 @@ async function describePluginUpdate(p: DshPluginInfo): Promise<DshPluginUpdate> 
   if (gitDep && !installedSem && tag && repo) {
     const moved = (gitDep.ref || '').toLowerCase() !== tag.sha.toLowerCase()
     return moved
-      ? {
+      ? withErr({
           name: p.name,
           updateAvailable: true,
           latest: tag.version,
           channel: 'git',
           gitUrl: `${repo}#${tag.version}`
-        }
-      : { name: p.name, updateAvailable: false, channel: 'git' }
+        })
+      : withErr({ name: p.name, updateAvailable: false, channel: 'git' })
   }
 
   let best: { ver: string; channel: DshUpdateChannel; gitUrl?: string } | null = null
@@ -759,10 +860,11 @@ async function describePluginUpdate(p: DshPluginInfo): Promise<DshPluginUpdate> 
       channel: 'git',
       gitUrl: repo && tag ? `${repo}#${tag.version}` : undefined
     }
-  if (!best) return { name: p.name, updateAvailable: false, channel: gitDep ? 'git' : 'npm' }
+  if (!best) return withErr({ name: p.name, updateAvailable: false, channel: gitDep ? 'git' : 'npm' })
 
   const updateAvailable = installedSem ? isNewerVersion(installedSem, best.ver) : false
-  if (!updateAvailable) return { name: p.name, updateAvailable: false, channel: best.channel }
+  if (!updateAvailable)
+    return withErr({ name: p.name, updateAvailable: false, channel: best.channel })
   return {
     name: p.name,
     updateAvailable: true,
@@ -778,11 +880,18 @@ async function describePluginUpdate(p: DshPluginInfo): Promise<DshPluginUpdate> 
  * source so 全部更新 installs exactly what the check advertised.
  */
 export async function checkDshPluginUpdates(profile = DEFAULT_PROFILE): Promise<DshPluginUpdate[]> {
+  const profileDir = resolveDshProfileDir(profile)
   const plugins = listDshPlugins(profile).filter((p) => p.source === 'profile')
   return Promise.all(
     plugins.map(
       (p): Promise<DshPluginUpdate> =>
-        describePluginUpdate(p).catch(() => ({ name: p.name, updateAvailable: false }))
+        describePluginUpdate(p, profileDir).catch(
+          (e): DshPluginUpdate => ({
+            name: p.name,
+            updateAvailable: false,
+            error: (e as Error).message
+          })
+        )
     )
   )
 }

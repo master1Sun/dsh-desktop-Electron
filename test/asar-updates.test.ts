@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -37,6 +38,53 @@ describe('staged asar update clearing', () => {
     expect(meta.pendingAsar).toBeNull()
     expect(meta.version).toBe('0.1.2')
 
+    rmSync(root, { recursive: true, force: true })
+  })
+})
+
+describe('B1 sha512 content verification', () => {
+  // verifyStagedIntegrity resolves through updatesRoot() — the same fixed temp root as above.
+  const root = join(dirname(exePath), 'resources', 'updates')
+  const commit = 'deadbeefcafebabe'
+  const stagedZip = () => join(root, commit, 'app.zip')
+
+  function writeStaged(zipBody: Buffer, meta: Record<string, unknown>): void {
+    rmSync(root, { recursive: true, force: true })
+    mkdirSync(join(root, commit), { recursive: true })
+    writeFileSync(stagedZip(), zipBody)
+    // A real staged asar would sit beside the zip; verifyStagedIntegrity only reads the zip.
+    writeFileSync(join(root, 'update-meta.json'), JSON.stringify({ pendingAsar: join(commit, 'app.asar'), ...meta }))
+  }
+
+  it('sha512OfFile streams the same digest node:crypto computes in one shot', async () => {
+    mkdirSync(root, { recursive: true })
+    const body = Buffer.from('dsh asar payload '.repeat(10_000))
+    const p = join(root, 'hash-me.bin')
+    writeFileSync(p, body)
+    const want = createHash('sha512').update(body).digest('hex')
+    expect(await asar.sha512OfFile(p)).toBe(want)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('verifyStagedIntegrity passes when the staged zip matches meta.sha512', async () => {
+    const body = Buffer.from('good zip bytes')
+    writeStaged(body, { sha512: createHash('sha512').update(body).digest('hex'), version: '9.9.9' })
+    expect(await asar.verifyStagedIntegrity()).toBe(true)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('verifyStagedIntegrity fails on a tampered or missing zip', async () => {
+    const body = Buffer.from('good zip bytes')
+    writeStaged(body, { sha512: 'f'.repeat(128), version: '9.9.9' })
+    expect(await asar.verifyStagedIntegrity()).toBe(false)
+    rmSync(stagedZip(), { force: true }) // zip deleted after staging: also unverifiable
+    expect(await asar.verifyStagedIntegrity()).toBe(false)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('verifyStagedIntegrity lets pre-hash releases through (no meta.sha512 = legacy contract)', async () => {
+    writeStaged(Buffer.from('legacy zip'), { version: '9.9.8' })
+    expect(await asar.verifyStagedIntegrity()).toBe(true)
     rmSync(root, { recursive: true, force: true })
   })
 })

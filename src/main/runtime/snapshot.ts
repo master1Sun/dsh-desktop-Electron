@@ -51,6 +51,7 @@ function captureSettings(): Partial<ContainerSettings> {
     pageEnvs: s.pageEnvs,
     pageCustomEnvs: s.pageCustomEnvs,
     pagePorts: s.pagePorts,
+    pageDeps: s.pageDeps,
     crashAutoRestart: s.crashAutoRestart,
     systemNotifications: s.systemNotifications,
     accentColor: s.accentColor,

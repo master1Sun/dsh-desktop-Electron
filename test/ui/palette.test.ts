@@ -163,6 +163,8 @@ beforeEach(() => {
   persistedSettings.externalSites = []
   persistedSettings.theme = 'auto'
   persistedSettings.locale = 'zh'
+  // Settings is reached through the classic top menu here, so pin classic (the shell defaults to IM).
+  persistedSettings.layoutMode = 'classic'
   ;(window as unknown as { container: unknown }).container = makeContainerMock()
 })
 
@@ -219,6 +221,50 @@ describe('command palette contents', () => {
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await flush(40)
     expect(paletteOpen()).toBe(false)
+  })
+
+  it('fires a Ctrl+letter quick-open for a 操作/页面 row while the palette is open', async () => {
+    await mountApp()
+    await openPalette()
+    // The first row that carries a quick-open badge; its letter is assigned deterministically.
+    const badge = document.querySelector('.palette-item .item-key') as HTMLElement | null
+    expect(badge).not.toBeNull()
+    const text = (badge?.textContent || '').trim()
+    expect(text).toMatch(/^Ctrl\+[a-z]$/)
+    const letter = text.replace('Ctrl+', '')
+    // The combo must be handled by the palette itself, so fire it from inside the input.
+    const input = document.querySelector('.palette-input') as HTMLInputElement
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: letter, ctrlKey: true, bubbles: true }))
+    await flush(40)
+    // run() closes the palette before dispatching the command, so closing proves the quick-open fired.
+    expect(paletteOpen()).toBe(false)
+  })
+
+  it('also gives a 面板 entry a Ctrl+letter quick-open badge', async () => {
+    await mountApp()
+    await openPalette()
+    const panelsSec = [...document.querySelectorAll('.palette-group')].find(
+      (g) => (g.querySelector('.group-label')?.textContent || '').trim() === '面板'
+    )
+    expect(panelsSec).toBeTruthy()
+    // The first panel row must carry a badge; firing its combo closes the palette (run() ran it).
+    const badge = panelsSec!.querySelector('.item-key') as HTMLElement | null
+    expect(badge).not.toBeNull()
+    const letter = (badge?.textContent || '').trim().replace('Ctrl+', '')
+    const input = document.querySelector('.palette-input') as HTMLInputElement
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: letter, ctrlKey: true, bubbles: true }))
+    await flush(40)
+    expect(paletteOpen()).toBe(false)
+  })
+
+  it('leaves a reserved Ctrl+letter (select-all) to the input instead of quick-opening', async () => {
+    await mountApp()
+    await openPalette()
+    const input = document.querySelector('.palette-input') as HTMLInputElement
+    // 'a' is reserved for editing and never takes a quick-open slot.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true }))
+    await flush(40)
+    expect(paletteOpen()).toBe(true)
   })
 })
 

@@ -14,13 +14,15 @@ import {
   type McpServerSpec,
   type PageProgress,
   type ReadLogsArgs,
+  type ToastLevel,
   type UpdateCheckResult,
   type UpdateProgress,
   type LogLineEvent,
   type NetSample,
   type PageMetrics,
   type WebDataClearArgs,
-  type WorkspaceNote
+  type WorkspaceNote,
+  type WorkspaceTask
 } from '../shared/types'
 
 const api = {
@@ -61,8 +63,14 @@ const api = {
     ipcRenderer.invoke(IPC.SetPageDisabled, id, disabled),
   resetBuiltinPage: (id: string) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),
   setPagePort: (id: string, port?: number) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
+  // #4: override a page's dependency list (container-side, keeps its container.json untouched)
+  setPageDeps: (id: string, deps?: string[]) => ipcRenderer.invoke(IPC.SetPageDeps, id, deps),
   openExternal: (url: string) => ipcRenderer.invoke(IPC.OpenPageExternal, url),
   getSettings: () => ipcRenderer.invoke(IPC.GetSettings),
+  // forward one renderer toast to the OS notification center; resolves whether it showed,
+  // so the caller can fall back to the in-app corner toast when notifications are unavailable
+  showSystemToast: (level: ToastLevel, text: string) =>
+    ipcRenderer.invoke(IPC.ShowSystemToast, { level, text } as { level: ToastLevel; text: string }),
   updateSettings: (partial: Record<string, unknown>) =>
     ipcRenderer.invoke(IPC.UpdateSettings, partial),
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
@@ -81,6 +89,9 @@ const api = {
   // #26: embedded-webview data (cookies per domain + cache/storage bytes) and its wipe buttons.
   getWebData: () => ipcRenderer.invoke(IPC.GetWebData),
   clearWebData: (args: WebDataClearArgs) => ipcRenderer.invoke(IPC.ClearWebData, args),
+  // #8: disk-usage dashboard (Settings ▸ 存储) + its two allowlisted wipe scopes.
+  getDiskReport: () => ipcRenderer.invoke(IPC.GetDiskReport),
+  clearDiskScope: (scope: string) => ipcRenderer.invoke(IPC.ClearDiskScope, scope),
   getSystemInfo: () => ipcRenderer.invoke(IPC.GetSystemInfo),
   getNetworkStats: () => ipcRenderer.invoke(IPC.GetNetworkStats),
   getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
@@ -170,8 +181,11 @@ const api = {
     ipcRenderer.on(IPC.OpenTerminalPage, listener)
     return () => ipcRenderer.removeListener(IPC.OpenTerminalPage, listener)
   },
-  ptyStart: (target: string, opts?: { command?: string; env?: Record<string, string> }) =>
-    ipcRenderer.invoke(IPC.PtyStart, target, opts),
+  ptyStart: (
+    target: string,
+    opts?: { command?: string; env?: Record<string, string>; shell?: string }
+  ) => ipcRenderer.invoke(IPC.PtyStart, target, opts),
+  ptyShells: () => ipcRenderer.invoke(IPC.PtyShells),
   ptyWrite: (id: string, data: string) => ipcRenderer.invoke(IPC.PtyWrite, id, data),
   ptyResize: (id: string, cols: number, rows: number) =>
     ipcRenderer.invoke(IPC.PtyResize, id, cols, rows),
@@ -237,17 +251,25 @@ const api = {
   mcpDisconnect: (id: string) => ipcRenderer.invoke(IPC.McpDisconnect, id),
   mcpListTools: (serverId?: string) => ipcRenderer.invoke(IPC.McpListTools, serverId),
   mcpCallTool: (args: McpCallToolArgs) => ipcRenderer.invoke(IPC.McpCallTool, args),
+  getMcpCalls: () => ipcRenderer.invoke(IPC.GetMcpCalls),
   mcpBridgeInfo: () => ipcRenderer.invoke(IPC.McpBridgeInfo),
+  // #11: state + connection info of the container's OWN MCP server (gated, default off)
+  getContainerMcpInfo: () => ipcRenderer.invoke(IPC.GetContainerMcpInfo),
   mcpPackagesStatus: () => ipcRenderer.invoke(IPC.McpPackagesStatus),
   // shared workspace: the one container-owned context every hosted agent reads/writes
   workspaceGet: () => ipcRenderer.invoke(IPC.WorkspaceGet),
-  workspaceSave: (patch: { task?: string; notes?: WorkspaceNote[] }) =>
+  workspaceSave: (patch: { task?: string; notes?: WorkspaceNote[]; tasks?: WorkspaceTask[] }) =>
     ipcRenderer.invoke(IPC.WorkspaceSave, patch),
   workspaceBroadcast: () => ipcRenderer.invoke(IPC.WorkspaceBroadcast),
   onMcpStateChanged: (cb: (states: unknown[]) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, states: unknown[]): void => cb(states)
     ipcRenderer.on(IPC.OnMcpStateChanged, listener)
     return () => ipcRenderer.removeListener(IPC.OnMcpStateChanged, listener)
+  },
+  onMcpCalls: (cb: (calls: unknown[]) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, calls: unknown[]): void => cb(calls)
+    ipcRenderer.on(IPC.OnMcpCalls, listener)
+    return () => ipcRenderer.removeListener(IPC.OnMcpCalls, listener)
   }
 }
 

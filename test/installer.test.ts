@@ -295,6 +295,34 @@ describe('removePage built-in protection', () => {
       rmSync(pagesDir, { recursive: true, force: true })
     }
   })
+
+  it('also deletes the capability dir an imported npm CLI recorded in its manifest', () => {
+    const pagesDir = mkdtempSync(join(tmpdir(), 'dsh-inst-rm2-'))
+    const capBase = mkdtempSync(join(tmpdir(), 'dsh-inst-cap-'))
+    try {
+      const page = join(pagesDir, 'codex')
+      mkdirSync(page, { recursive: true })
+      const capDir = join(capBase, 'codex')
+      mkdirSync(join(capDir, 'node_modules', '@openai'), { recursive: true })
+      writeFileSync(
+        join(page, 'container.json'),
+        JSON.stringify({
+          name: 'codex',
+          kind: 'terminal',
+          startCommand: 'node "entry"',
+          npmPackage: '@openai/codex',
+          capabilityDir: capDir
+        })
+      )
+      removePage(pagesDir, 'codex')
+      expect(existsSync(page)).toBe(false)
+      // The real files under userData/capabilities/<id> are uninstalled too, never orphaned.
+      expect(existsSync(capDir)).toBe(false)
+    } finally {
+      rmSync(pagesDir, { recursive: true, force: true })
+      rmSync(capBase, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('parseNpmSpec', () => {

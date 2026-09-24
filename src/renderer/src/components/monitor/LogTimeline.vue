@@ -124,14 +124,16 @@ watch(
       </span>
       <span class="lv-body">
         <!-- eslint-disable-next-line vue/no-v-html -- html is escapeHtml()'d before markup is added -->
-        <span class="lv-text" v-html="r.html" /><button
+        <span class="lv-text" v-html="r.html" /><el-tooltip
           v-if="r.err"
-          class="lv-ask"
-          :title="t('app.askAiBtn')"
-          @click.stop="emit('ask', r.raw)"
+          :content="t('app.askAiBtn')"
+          placement="top"
+          popper-class="dsh-tip-popper"
         >
-          {{ t('app.askAiBtn') }}
-        </button>
+          <button class="lv-ask" @click.stop="emit('ask', r.raw)">
+            {{ t('app.askAiBtn') }}
+          </button>
+        </el-tooltip>
       </span>
     </div>
   </div>

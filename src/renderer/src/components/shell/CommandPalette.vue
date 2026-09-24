@@ -20,13 +20,78 @@ export interface Command {
   run: () => void
 }
 
-const props = defineProps<{ commands: Command[] }>()
+const props = defineProps<{
+  commands: Command[]
+  /**
+   * Optional deep-search channel (#5): given the trimmed query, resolve extra commands (log
+   * matches, MCP tools, settings rows) that are too costly to keep in the static list. Called
+   * on a debounce; a stale response is dropped by an internal sequence guard. Empty query skips it.
+   */
+  asyncSearch?: (query: string) => Promise<Command[]>
+}>()
 const visible = defineModel<boolean>({ required: true })
 
 const query = ref('')
 const active = ref(0)
 const inputEl = ref<HTMLInputElement | null>(null)
 const listEl = ref<HTMLElement | null>(null)
+
+/** Deep-search rows layered on top of the static commands for the current query. */
+const asyncResults = ref<Command[]>([])
+const searching = ref(false)
+let searchSeq = 0
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Static + deep rows, deduped by id (a deep hit never replaces a real command). */
+const allCommands = computed<Command[]>(() => {
+  if (!asyncResults.value.length) return props.commands
+  const seen = new Set(props.commands.map((c) => c.id))
+  const extra = asyncResults.value.filter((c) => !seen.has(c.id))
+  return extra.length ? [...props.commands, ...extra] : props.commands
+})
+
+/* ---- palette-only Ctrl+letter quick-open (操作 + 页面 + 面板) ----------------------
+   A fast path that lives entirely inside the palette: while it is open, Ctrl+<letter> fires the
+   matching command and the combo shows as a badge on the row. No global binding is added (a hosted
+   page never loses the key), and the letter is assigned by walking the *static* command list in
+   order, so a command keeps the same letter no matter what is typed. Only the editing keys and the
+   palette toggle stay out of the pool (Ctrl+A/C/V/X/Z + Ctrl+K); everything else is fair game, and
+   any command past the last free letter simply shows no badge (graceful overflow). */
+const RESERVED_KEYS = new Set(['a', 'c', 'v', 'x', 'z', 'k'])
+const QUICK_KEY_POOL = 'abcdefghijklmnopqrstuvwxyz'.split('').filter((ch) => !RESERVED_KEYS.has(ch))
+
+/** 操作 / 面板 items are all eligible; 页面 items only their primary open/start/enter command. */
+function isQuickEligible(cmd: Command): boolean {
+  if (cmd.group === t('palette.groupActions')) return true
+  if (cmd.group === t('palette.groupPanels')) return true
+  if (cmd.group === t('palette.groupPages')) return /^(open-|start-|term-|site-)/.test(cmd.id)
+  return false
+}
+
+/** Stable id → letter map over the static commands (deep-search rows never take a slot). */
+const quickKeyById = computed<Map<string, string>>(() => {
+  const map = new Map<string, string>()
+  let i = 0
+  for (const c of props.commands) {
+    if (!isQuickEligible(c)) continue
+    if (i >= QUICK_KEY_POOL.length) break
+    map.set(c.id, QUICK_KEY_POOL[i++])
+  }
+  return map
+})
+/** Reverse: letter → the command it fires (only static commands carry a live `run`). */
+const quickKeyCommands = computed<Map<string, Command>>(() => {
+  const byId = new Map(props.commands.map((c) => [c.id, c]))
+  const map = new Map<string, Command>()
+  quickKeyById.value.forEach((letter, id) => {
+    const c = byId.get(id)
+    if (c) map.set(letter, c)
+  })
+  return map
+})
+function quickKeyOf(id: string): string | undefined {
+  return quickKeyById.value.get(id)
+}
 
 /** Subsequence fuzzy match; earlier + tighter hits score lower (better). */
 function score(cmd: Command, q: string): number | null {
@@ -48,7 +113,7 @@ function score(cmd: Command, q: string): number | null {
 
 const filtered = computed(() => {
   const q = query.value.trim()
-  const scored = props.commands
+  const scored = allCommands.value
     .map((c) => ({ c, s: score(c, q) }))
     .filter((x): x is { c: Command; s: number } => x.s !== null)
     .sort((a, b) => a.s - b.s)
@@ -86,6 +151,38 @@ watch(ordered, () => {
 })
 watch(query, () => {
   active.value = 0
+})
+
+// #5: debounce the deep search so a fast typist fires one query, not one per keystroke; a
+// response from a since-superseded query is dropped via the sequence guard.
+watch(query, (q) => {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+  const trimmed = q.trim()
+  if (!props.asyncSearch || !trimmed) {
+    asyncResults.value = []
+    searching.value = false
+    return
+  }
+  searching.value = true
+  const seq = ++searchSeq
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    props
+      .asyncSearch!(trimmed)
+      .then((cmds) => {
+        if (seq !== searchSeq) return
+        asyncResults.value = cmds
+      })
+      .catch(() => {
+        if (seq === searchSeq) asyncResults.value = []
+      })
+      .finally(() => {
+        if (seq === searchSeq) searching.value = false
+      })
+  }, 180)
 })
 
 watch(visible, async (v) => {
@@ -127,6 +224,20 @@ function close(): void {
 }
 
 function onListKeydown(ev: KeyboardEvent): void {
+  // Ctrl+letter quick-open wins over the arrow/enter nav and never reaches the global handler
+  // (stopPropagation), so a hosted page or the window menu can't also act on the same combo.
+  if (ev.ctrlKey && !ev.altKey && !ev.metaKey && !ev.shiftKey) {
+    const letter = (ev.key || '').toLowerCase()
+    if (/^[a-z]$/.test(letter)) {
+      const cmd = quickKeyCommands.value.get(letter)
+      if (cmd) {
+        ev.preventDefault()
+        ev.stopPropagation()
+        run(cmd)
+        return
+      }
+    }
+  }
   switch (ev.key) {
     case 'ArrowDown':
       ev.preventDefault()
@@ -164,7 +275,13 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onDocumentKeydown, true)
 })
 
-const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') : t('palette.none')))
+const emptyText = computed(() =>
+  searching.value
+    ? t('palette.searching')
+    : allCommands.value.length
+      ? t('palette.noMatch')
+      : t('palette.none')
+)
 </script>
 
 <template>
@@ -186,6 +303,9 @@ const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') :
             aria-expanded="true"
             aria-controls="palette-results"
           />
+          <span v-if="searching" class="search-spin" :aria-label="t('palette.searching')"
+            >⋯</span
+          >
           <kbd class="esc-hint">Esc</kbd>
         </div>
 
@@ -206,7 +326,10 @@ const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') :
                 @click="run(row.cmd)"
               >
                 <span class="item-title">{{ row.cmd.title }}</span>
-                <span v-if="row.cmd.hint" class="item-hint">{{ row.cmd.hint }}</span>
+                <span class="item-right">
+                  <span v-if="row.cmd.hint" class="item-hint">{{ row.cmd.hint }}</span>
+                  <kbd v-if="quickKeyOf(row.cmd.id)" class="item-key">Ctrl+{{ quickKeyOf(row.cmd.id) }}</kbd>
+                </span>
               </button>
             </div>
           </template>
@@ -215,6 +338,7 @@ const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') :
         <div class="palette-foot">
           <span><kbd>↑</kbd><kbd>↓</kbd> {{ t('palette.nav') }}</span>
           <span><kbd>Enter</kbd> {{ t('palette.run') }}</span>
+          <span><kbd>Ctrl</kbd>+<kbd>A</kbd> {{ t('palette.quickOpen') }}</span>
           <span><kbd>Esc</kbd> {{ t('palette.close') }}</span>
         </div>
       </div>
@@ -285,6 +409,18 @@ const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') :
 .esc-hint {
   flex: none;
 }
+.search-spin {
+  flex: none;
+  color: var(--accent);
+  font-size: 15px;
+  line-height: 1;
+  animation: palette-spin 1s steps(6, end) infinite;
+}
+@keyframes palette-spin {
+  to {
+    opacity: 0.4;
+  }
+}
 
 .palette-list {
   max-height: min(52vh, 420px);
@@ -338,6 +474,15 @@ const emptyText = computed(() => (props.commands.length ? t('palette.noMatch') :
   flex: none;
   font-size: 11.5px;
   color: var(--text-dim);
+}
+.item-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.item-key {
+  flex: none;
 }
 
 .palette-foot {

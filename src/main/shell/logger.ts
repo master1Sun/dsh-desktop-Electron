@@ -33,7 +33,7 @@ import type { LogFileInfo, LogReadResult, LogLineEvent } from '../../shared/type
  */
 
 const MAX_BYTES = 5 * 1024 * 1024
-const ROTATED_KEEP = 1 // main.log → main.log.1 (oldest dropped)
+const ROTATED_KEEP = 2 // main.log → main.log.1 → main.log.2 (oldest dropped)
 
 let logsRoot: string | null = null
 let installed = false

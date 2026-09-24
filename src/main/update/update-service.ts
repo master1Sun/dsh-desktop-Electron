@@ -11,7 +11,9 @@ import { resolveInstallDir, getSettings } from '../shell/store'
 import {
   MCP_PKG_GROUP,
   mcpPackagesRoot,
-  mcpPackagesStatus
+  mcpPackagesStatus,
+  mcpPkgVersion,
+  resolveMcpPkgEntry
 } from '../runtime/mcp-packages'
 import { m } from '../shell/i18n'
 import { logEvent } from '../shell/events'
@@ -179,6 +181,42 @@ async function checkBuiltin(
   }
 }
 
+/**
+ * An imported npm CLI capability (codex & friends): a page that declared `npmPackage` and keeps
+ * its real files under `userData/capabilities/<id>` (the page dir holds only a thin manifest, see
+ * installer.installFromNpm). Reads the installed version straight from that package's own
+ * package.json, compares against the registry latest, and offers an in-place re-provision. Absent
+ * the package on disk it reads "未检测到已安装版本".
+ */
+async function checkNpmCapability(p: PageMeta): Promise<UpdateCheckResult> {
+  const base: UpdateCheckResult = {
+    name: p.name,
+    dir: p.capabilityDir || p.dir,
+    isContainer: false,
+    ok: false,
+    source: 'npm',
+    packageName: p.npmPackage,
+    capabilityId: p.id,
+    action: 'reprovision',
+    canAutoUpdate: true
+  }
+  const capDir = p.capabilityDir
+  const pkg = p.npmPackage
+  if (!capDir || !pkg) return { ...base, error: m('upd.versionNotDetected') }
+  const current = mcpPkgVersion(pkg, capDir)
+  if (!current || resolveMcpPkgEntry(pkg, capDir) === null)
+    return { ...base, error: m('upd.versionNotDetected') }
+  const latest = await fetchNpmLatest(pkg)
+  if (!latest) return { ...base, currentVersion: current, error: m('upd.registryUnreachable') }
+  return {
+    ...base,
+    ok: true,
+    currentVersion: current,
+    latestVersion: latest,
+    hasUpdate: isNewer(current, latest)
+  }
+}
+
 /** The unified, cached set of update rows: container self-update, imported pages, dsh, openclaw. */
 async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
   const name = containerName()
@@ -188,7 +226,8 @@ async function computeAll(pages: PageMeta[]): Promise<UpdateCheckResult[]> {
     // On relaunch, relaunchToApplyStaged swaps a staged asar into resources/ in place
     // (packaged only — a dev checkout just stages the download, since out/ isn't the running asar).
     checkAsarUpdate(name, resolveInstallDir()),
-    ...pages.filter((p) => !p.id.startsWith('__')).map(checkPage),
+    ...pages.filter((p) => !p.id.startsWith('__') && !p.npmPackage).map(checkPage),
+    ...pages.filter((p) => p.npmPackage).map(checkNpmCapability),
     checkBuiltin(
       m('upd.dshName'),
       join(app.getPath('userData'), 'dsh'),
@@ -292,7 +331,7 @@ async function runNpm(
  */
 function npmWatcher(
   name: string,
-  builtin: BuiltinKind,
+  builtin: BuiltinKind | undefined,
   onProgress?: ProgressCb
 ): ((line: string) => void) | undefined {
   if (!onProgress) return undefined
@@ -430,6 +469,60 @@ async function reprovisionOpenclaw(
 }
 
 /**
+ * Re-provision one npm CLI capability in place: `npm install -g --prefix <capDir> <pkg>@<pinned||latest>`
+ * (the same global-prefix shape dsh/openclaw use) against the container's configured registry, then
+ * compare the on-disk version to report whether anything moved. Driven from a row's
+ * `capabilityId`/`packageName`/`dir`, so 更新检测's per-capability 更新 button reaches it via performUpdate.
+ */
+async function updateCapability(
+  packageName: string,
+  capDir: string,
+  rowName: string,
+  pinned?: string,
+  onProgress?: ProgressCb
+): Promise<UpdateOutcome> {
+  const name = rowName
+  const watch = npmWatcher(name, undefined, onProgress)
+  const before = mcpPkgVersion(packageName, capDir)
+  try {
+    mkdirSync(capDir, { recursive: true })
+    writeFileSync(join(capDir, '.npmrc'), `registry=${registryUrl()}\n`)
+    const node = getNodeExePath()
+    const npmCli = bundledNpmCli()
+    if (!existsSync(npmCli)) throw new Error(m('upd.npmMissing', { npm: npmCli }))
+    await runNpm(
+      node,
+      [
+        npmCli,
+        'install',
+        '-g',
+        `${packageName}@${pinned || 'latest'}`,
+        '--ignore-scripts',
+        '--no-audit',
+        '--no-fund'
+      ],
+      { ...process.env, npm_config_prefix: capDir },
+      15 * 60_000,
+      watch
+    )
+  } catch (err) {
+    const msg = (err as Error).message || String(err)
+    const hint = /EPERM|EACCES|EROFS|permission/i.test(msg) ? m('upd.dshDirNotWritable') : ''
+    return { name, ok: false, updated: false, error: msg + hint }
+  }
+  const after = mcpPkgVersion(packageName, capDir)
+  return {
+    name,
+    ok: true,
+    updated: Boolean(after && after !== before),
+    message:
+      after && after !== before
+        ? m('upd.dshUpgraded', { after })
+        : m('upd.dshUpToDate', { after: after || '?' })
+  }
+}
+
+/**
  * One aggregated update row for the curated MCP server packages (userData/mcp). The panel
  * shows a single group row rather than one per package: they install together and the version
  * column reads "installed/total" while some are still missing (no real npm package backs
@@ -449,24 +542,34 @@ async function checkMcpPackages(): Promise<UpdateCheckResult> {
     canAutoUpdate: true
   }
   const statuses = mcpPackagesStatus()
-  const missing = statuses.filter((s) => !s.installed).length
+  const total = statuses.length
+  const installedCount = statuses.filter((s) => s.installed).length
+  const missing = total - installedCount
   let registryDown = false
-  let outdated: string | null = null
+  let outdatedCount = 0
   for (const s of statuses) {
     if (!s.installed) continue
     const latest = await fetchNpmLatest(s.pkg)
     if (!latest) registryDown = true
-    else if (s.version && isNewer(s.version, latest)) outdated = outdated || s.pkg
+    else if (s.version && isNewer(s.version, latest)) outdatedCount++
   }
+  // One "installed/total" reading across every state (it used to show a single package's version
+  // once all were present, which read as "that" version for an 8-package group). The latest column
+  // then says what a click would actually do: pull the missing ones, or refresh the outdated ones.
+  const currentVersion = `${installedCount}/${total}`
   if (missing === 0 && registryDown)
-    return { ...base, currentVersion: `${statuses.length}`, error: m('upd.registryUnreachable') }
-  const currentVersion = missing ? `${statuses.length - missing}/${statuses.length}` : statuses[0]?.version
+    return { ...base, currentVersion, error: m('upd.registryUnreachable') }
   return {
     ...base,
     ok: true,
     currentVersion,
-    hasUpdate: missing > 0 || outdated !== null,
-    latestVersion: missing ? m('upd.mcpMissingCount', { n: missing }) : outdated ? `${m('upd.mcpOutdatedPrefix')} ${outdated}` : undefined
+    hasUpdate: missing > 0 || outdatedCount > 0,
+    latestVersion:
+      missing > 0
+        ? m('upd.mcpMissingCount', { n: missing })
+        : outdatedCount > 0
+          ? m('upd.mcpUpdatableCount', { n: outdatedCount })
+          : undefined
   }
 }
 
@@ -593,6 +696,11 @@ async function runUpdate(
     case 'apply-asar':
       return applyAsarUpdate(target.name, onProgress)
     case 'reprovision':
+      // An imported npm CLI capability re-provisions its own userData/capabilities/<id> store
+      // (npm install -g --prefix), ahead of the fixed dsh/openclaw/mcp targets it otherwise shares
+      // this action with. Its row carries capabilityId + packageName + the capability dir in `dir`.
+      if (target.capabilityId && target.packageName && target.dir)
+        return updateCapability(target.packageName, target.dir, target.name, undefined, onProgress)
       // Stream npm's own output as an indeterminate row, keyed by this row's name so both the
       // panel's inline bar and the window top bar light up for a built-in runtime update.
       return target.packageName === MCP_PKG_GROUP

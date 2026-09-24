@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import type { McpCallEvent } from '../src/shared/types'
 
 // mcp-hub imports the events/logger chain (electron app) at module level; stub it the
 // same way pages.lifecycle.test.ts does so the pure helpers can be imported in node.
@@ -48,7 +49,10 @@ import {
   lockedMcpSpecs,
   listServers,
   removeServer,
-  saveServer
+  saveServer,
+  callTool,
+  getCalls,
+  hubEvents
 } from '../src/main/runtime/mcp-hub'
 
 describe('curated MCP servers (one locked + seeded editable defaults)', () => {
@@ -222,5 +226,42 @@ describe('flattenToolContent', () => {
 describe('mcpToolKey', () => {
   it('namespaces a tool by its server', () => {
     expect(mcpToolKey('fs', 'read_file')).toBe('fs/read_file')
+  })
+})
+
+describe('call feed (hub-forwarded tool-call ring buffer)', () => {
+  it('records every hub call — a failed one lands as ok:false with the error text', async () => {
+    const before = getCalls().length
+    const res = await callTool({ serverId: 'no-such-server', tool: 'ping' })
+    expect(res.ok).toBe(false)
+    const after = getCalls()
+    expect(after).toHaveLength(before + 1)
+    const last: McpCallEvent = after[after.length - 1]
+    expect(last).toMatchObject({ serverId: 'no-such-server', tool: 'ping', ok: false })
+    expect(typeof last.err).toBe('string')
+    expect(last.at).toBeTypeOf('number')
+  })
+
+  it('emits the whole buffered feed on the calls channel for the window broadcast', async () => {
+    const seen: McpCallEvent[][] = []
+    const listener = (calls: McpCallEvent[]): void => {
+      seen.push(calls)
+    }
+    hubEvents.on('calls', listener)
+    try {
+      await callTool({ serverId: 'no-such-server', tool: 'x' })
+    } finally {
+      hubEvents.off('calls', listener)
+    }
+    expect(seen).toHaveLength(1)
+    expect(seen[0][seen[0].length - 1].tool).toBe('x')
+  })
+
+  it('keeps the buffer bounded to the newest 200 entries', async () => {
+    for (let i = 0; i < 250; i++) await callTool({ serverId: 'no-such-server', tool: `t${i}` })
+    const buf = getCalls()
+    expect(buf.length).toBeLessThanOrEqual(200)
+    // the oldest were dropped: the last recorded call is the newest
+    expect(buf[buf.length - 1].tool).toBe('t249')
   })
 })

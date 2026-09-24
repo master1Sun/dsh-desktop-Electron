@@ -21,8 +21,9 @@ const pages = [
   { id: 'plain', name: '普通页', kind: 'page', status: 'stopped' }
 ] as unknown as PageState[]
 
-function factory(current: string | null): VueWrapper {
+function factory(current: string | null, attachTo?: HTMLElement): VueWrapper {
   return mount(QQShell, {
+    ...(attachTo ? { attachTo } : {}),
     props: {
       pages,
       current,
@@ -79,5 +80,68 @@ describe('QQShell (IM layout)', () => {
     const w = factory('settings')
     expect(w.find('.qq-pop').exists()).toBe(true)
     expect(w.findComponent({ name: 'MenuPanelContent' }).props('panel')).toBe('settings')
+  })
+
+  it('centers the palette-only 看板 card with a ✕ header and no rail caret', async () => {
+    const w = factory('board')
+    const wrap = w.find('.qq-pop-wrap')
+    expect(wrap.classes()).toContain('is-centered')
+    // No inline top/height (the CSS centers it) and no caret pointing at a nonexistent icon.
+    expect(wrap.attributes('style') ?? '').not.toContain('top:')
+    expect(w.find('.qq-caret').exists()).toBe(false)
+    // An explicit close button lives in the header (there is no active rail icon to re-click).
+    expect(w.find('.qq-pop-head').exists()).toBe(true)
+    expect(w.findComponent({ name: 'MenuPanelContent' }).props('panel')).toBe('board')
+    await w.find('.qq-pop-close').trigger('click')
+    expect(w.emitted('open-panel')?.at(-1)).toEqual([null])
+  })
+
+  it('a rail-anchored group stays non-centered with a caret and no header', () => {
+    const w = factory('settings')
+    expect(w.find('.qq-pop-wrap').classes()).not.toContain('is-centered')
+    expect(w.find('.qq-caret').exists()).toBe(true)
+    expect(w.find('.qq-pop-head').exists()).toBe(false)
+  })
+
+  it('dismisses on a blank-area click, but not on the card or a rail button', async () => {
+    // attachTo so the document-level capture listener actually sits in the event path.
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const w = factory('pages', host)
+    const away = (el: Element): void => {
+      el.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    }
+    // Inside the card → stays open.
+    away(w.find('.qq-pop').element)
+    await w.vm.$nextTick()
+    expect(w.emitted('open-panel')).toBeUndefined()
+    // A rail button owns its own toggle → click-away ignores it.
+    away(w.findAll('.rail-btn')[1].element)
+    await w.vm.$nextTick()
+    expect(w.emitted('open-panel')).toBeUndefined()
+    // A blank surface outside both → collapses.
+    away(document.body)
+    await w.vm.$nextTick()
+    expect(w.emitted('open-panel')?.at(-1)).toEqual([null])
+    w.unmount()
+    host.remove()
+  })
+
+  it('does NOT dismiss the 看板 card on a blank-area click (modal: ✕ / Esc only)', async () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const w = factory('board', host)
+    const away = (el: Element): void => {
+      el.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    }
+    away(document.body)
+    away(host)
+    await w.vm.$nextTick()
+    expect(w.emitted('open-panel')).toBeUndefined()
+    // …but the explicit ✕ still closes it.
+    await w.find('.qq-pop-close').trigger('click')
+    expect(w.emitted('open-panel')?.at(-1)).toEqual([null])
+    w.unmount()
+    host.remove()
   })
 })

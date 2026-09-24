@@ -63,7 +63,7 @@ function spec(over: Partial<McpServerSpec> & { id: string }): McpServerSpec {
 const fsServer = { spec: spec({ id: 'fs', autoStart: true, args: ['-y', 'server-fs', 'D:\\a b'] }), status: 'connected' as const }
 const memServer = { spec: spec({ id: 'mem', autoStart: true, env: { K: 'v' } }), status: 'stopped' as const }
 const offServer = { spec: spec({ id: 'off', autoStart: true, enabled: false }), status: 'stopped' as const }
-// enabled but NOT auto-start: a panel-only row that must never reach an agent
+// enabled but NOT auto-start: injection now follows `enabled` alone, so this row reaches agents too
 const lazyServer = { spec: spec({ id: 'lazy', autoStart: false }), status: 'connected' as const }
 const tools: McpToolInfo[] = [
   { serverId: 'fs', name: 'read_file', description: 'read', inputSchema: { type: 'object' } },
@@ -72,12 +72,14 @@ const tools: McpToolInfo[] = [
 ]
 
 describe('buildCatalog', () => {
-  it('keeps only auto-start+enabled specs and attaches each server its own tools', () => {
+  it('keeps every enabled spec (auto-start no longer gates injection) and attaches each server its own tools', () => {
     const cat = buildCatalog([fsServer, memServer, offServer, lazyServer], tools)
-    expect(cat.servers.map((s) => s.id)).toEqual(['fs', 'mem'])
+    // 'off' is disabled → excluded; 'lazy' is enabled-but-not-auto-start → now included.
+    expect(cat.servers.map((s) => s.id)).toEqual(['fs', 'mem', 'lazy'])
     expect(cat.servers[0].tools.map((t) => t.name)).toEqual(['read_file', 'list'])
     expect(cat.servers[0].tools[0].inputSchema).toEqual({ type: 'object' })
     expect(cat.servers[1].tools).toEqual([])
+    expect(cat.servers[2].tools).toEqual([])
   })
 })
 

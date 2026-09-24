@@ -260,6 +260,55 @@ function verifyRuntime(nodeExe: string, want: string): void {
 }
 
 /**
+ * Best-effort reclaim of parked override dirs (`<dir>.old` and `<dir>.old-<ts>` siblings).
+ * A still-running child keeps node.exe open inside them, so Windows refuses the unlink; that
+ * must never fail an update, hence every throw is swallowed and simply retried on a later run.
+ */
+function sweepStaleOverrides(dir: string): void {
+  const parent = join(dir, '..')
+  const base = `${dir.split(/[\\/]/).pop()}.old`
+  let names: string[]
+  try {
+    names = readdirSync(parent)
+  } catch {
+    return
+  }
+  for (const n of names) {
+    if (n !== base && !n.startsWith(`${base}-`)) continue
+    try {
+      rmSync(join(parent, n), { recursive: true, force: true })
+    } catch {
+      /* still held open by a running child — next run retries */
+    }
+  }
+}
+
+/**
+ * Move the current override aside so the freshly verified runtime can take its place. Tries the
+ * stable `<dir>.old` name first; when a locked leftover from an earlier run occupies it (Windows
+ * won't unlink its node.exe, and won't rename onto a still-present dir), parks under a unique
+ * timestamped slot instead. Only a lock on the *current* override — which genuinely blocks the
+ * swap — is surfaced as an error, so a stale parked dir can never strand a good install.
+ */
+function parkOverride(dir: string): void {
+  let lastErr: Error | undefined
+  for (const target of [`${dir}.old`, `${dir}.old-${Date.now()}`]) {
+    try {
+      rmSync(target, { recursive: true, force: true })
+    } catch {
+      /* slot held open by a locked leftover; the rename below fails and we try the next one */
+    }
+    try {
+      renameSync(dir, target)
+      return
+    } catch (err) {
+      lastErr = err as Error
+    }
+  }
+  throw new Error(m('node.locked', { err: lastErr?.message ?? 'override dir is in use' }))
+}
+
+/**
  * Install `version` (e.g. "v24.22.0") as the effective bundled runtime.
  * Streams UpdateProgress {name:'Node'}; resolves with the refreshed runtime info.
  */
@@ -300,41 +349,41 @@ export async function updateNodeRuntime(
   }
   verifyRuntime(join(staging, 'node.exe'), want)
 
-  // Swap: the previous override (if any) is parked as <dir>.old — renaming beats
-  // deleting when a page's process still holds handles inside it.
+  // Reclaim disk from earlier parked overrides before making a new one, then swap the verified
+  // runtime in. The previous override is parked by renaming (see parkOverride) — renaming beats
+  // deleting when a running page still holds node.exe open inside it.
   const dir = overrideNodeDir()
-  const old = `${dir}.old`
-  if (existsSync(dir)) {
-    rmSync(old, { recursive: true, force: true })
-    try {
-      renameSync(dir, old)
-    } catch (err) {
-      throw new Error(m('node.locked', { err: (err as Error).message }))
-    }
-  }
+  sweepStaleOverrides(dir)
+  if (existsSync(dir)) parkOverride(dir)
   renameSync(staging, dir)
 
   invalidateNodeRuntimeCache()
-  rmSync(zip, { force: true })
-  rmSync(extracted, { recursive: true, force: true })
-  rmSync(old, { recursive: true, force: true }) // best effort — may still be locked
+  // The swap committed the new runtime, so report success before any cleanup can throw.
   onProgress({ name: 'Node', phase: 'done', message: m('node.done', { v: want }) })
+  // Best-effort tidy-up. On Windows a running page keeps node.exe handles open inside the parked
+  // override (the reason we rename instead of delete), so rmSync throws EPERM/EBUSY there —
+  // swallowing it is what stops a *successful* install from surfacing as a red error toast.
+  // Whatever survives is reclaimed by the next run's sweep.
+  try {
+    rmSync(zip, { force: true })
+    rmSync(extracted, { recursive: true, force: true })
+  } catch {
+    /* download temps busy — next run clears them up front */
+  }
+  sweepStaleOverrides(dir)
   return getNodeRuntimeInfo(true)
 }
 
 /** Remove the override so the installer-shipped bundled runtime wins again. */
 export async function restoreBundledNode(): Promise<NodeRuntimeInfo> {
   const dir = overrideNodeDir()
-  if (existsSync(dir)) {
-    const old = `${dir}.old`
-    rmSync(old, { recursive: true, force: true })
-    try {
-      renameSync(dir, old)
-      rmSync(old, { recursive: true, force: true })
-    } catch (err) {
-      throw new Error(m('node.locked', { err: (err as Error).message }))
-    }
-  }
+  sweepStaleOverrides(dir)
+  // Park the override out of the way (renaming reliably beats deleting while a running page
+  // holds node.exe open inside it) so the shipped runtime wins again. Then try to reclaim it —
+  // a locked parked dir is left for a later sweep rather than surfacing as a restore error.
+  if (existsSync(dir)) parkOverride(dir)
   invalidateNodeRuntimeCache()
-  return getNodeRuntimeInfo(true)
+  const info = await getNodeRuntimeInfo(true)
+  sweepStaleOverrides(dir)
+  return info
 }

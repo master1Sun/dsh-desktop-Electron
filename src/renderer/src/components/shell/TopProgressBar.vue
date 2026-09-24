@@ -4,7 +4,8 @@ import { Loading } from '@element-plus/icons-vue'
 import { useTasksStore } from '@renderer/stores/tasks'
 
 /**
- * Window-level progress widget, centered on the menu bar.
+ * Window-level progress widget, docked on the right of the menu bar (just left of the window
+ * chrome).
  *
  * It reads the app-lifetime {@link useTasksStore} roll-up, so a download/install keeps
  * counting even after the panel that started it is closed. Collapsed it shows only a
@@ -34,7 +35,7 @@ const aggPercent = computed<number | null>(() => {
     @mouseenter="hover = true"
     @mouseleave="hover = false"
   >
-    <!-- Collapsed: just a slim aggregate bar in a chip, centered on the bar. Hover for detail. -->
+    <!-- Collapsed: just a slim aggregate bar in a chip, docked on the right. Hover for detail. -->
     <div class="tb-bar-wrap">
       <el-progress
         class="tb-bar"
@@ -73,12 +74,11 @@ const aggPercent = computed<number | null>(() => {
 
 <style scoped>
 .topbar-progress {
-  /* Truly centered on the menu bar (which is position:relative), lifted out of the flex
-     flow so it never nudges the left nav groups or the right-side controls. */
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  /* Docked on the right of the menu row: it flows right after the flex spacer (see MenuBar),
+     sitting just left of the terminal/双屏 controls and the window chrome. Kept in the flex
+     flow (not absolute-centered) so it hugs the right edge as intended. */
+  position: relative;
+  flex: none;
   /* Docked on the draggable menu row: keep it hoverable/clickable. */
   -webkit-app-region: no-drag;
   width: 150px;
@@ -105,12 +105,12 @@ const aggPercent = computed<number | null>(() => {
   width: 100%;
 }
 
-/* Hover detail card: frosted, centered under the bar, one bordered card per task. */
+/* Hover detail card: frosted, anchored to the widget's right edge (it lives near the window's
+   right side, so it expands leftward instead of overflowing), one bordered card per task. */
 .tb-drop {
   position: absolute;
   top: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
+  right: 0;
   min-width: 240px;
   max-width: 320px;
   background: color-mix(in srgb, var(--surface) 92%, transparent);
@@ -128,11 +128,11 @@ const aggPercent = computed<number | null>(() => {
 @keyframes tb-reveal {
   from {
     opacity: 0;
-    transform: translate(-50%, -4px);
+    transform: translateY(-4px);
   }
   to {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: translateY(0);
   }
 }
 

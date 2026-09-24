@@ -19,6 +19,7 @@ export type PanelKind =
   | 'openclaw'
   | 'mcp'
   | 'workspace'
+  | 'board'
   | 'settings'
   | 'help'
   | 'apps'
@@ -185,6 +186,8 @@ const childPanelLabels = computed<Record<string, string>>(() => ({
   openclaw: t('menu.appOpenclaw'),
   mcp: t('menu.appMcp'),
   workspace: t('menu.workspace'),
+  // Palette-only page (Ctrl+K 「看板」), reached through no top-level group.
+  board: t('menu.board'),
   external: t('menu.externalAddress'),
   // Reached through the 系统 drop list, so these panels are "children" too.
   settings: t('menu.settings'),
@@ -357,6 +360,10 @@ onBeforeUnmount(() => {
     <div class="brand">
       <img class="logo" :src="whaleIcon" alt="" draggable="false" />
       <span class="title">{{ t('app.title') }}</span>
+      <!-- Live ↓/↑ network rates with a hover detail card (local link, latency, totals,
+           online ports), fed by the main process's shared sample loop. Docked inside the brand,
+           just left of the running-count badge, so it reads as part of the desktop-console identity. -->
+      <NetIndicator />
       <span
         class="running-badge"
         :title="t('menu.runningBadge', { running: switcherGreenCount, total: switcherTotalCount })"
@@ -435,23 +442,24 @@ onBeforeUnmount(() => {
 
     <div class="spacer" />
 
-    <!-- Live ↓/↑ network rates with a hover detail card (local link, latency, totals,
-         online ports), fed by the main process's shared sample loop. -->
-    <NetIndicator />
-
     <!-- Persistent install/update progress, docked on the right of the menu row (just left of
          the window chrome). Width-capped; several tasks fold into a hover dropdown. -->
     <TopProgressBar />
 
     <div v-if="props.terminalMode" class="webview-actions">
-      <button
-        class="act-btn"
-        :title="t('menu.restartTerminal')"
-        :aria-label="t('menu.restartTerminal')"
-        @click="emit('restart-terminal')"
+      <el-tooltip
+        :content="t('menu.restartTerminal')"
+        placement="bottom"
+        popper-class="dsh-tip-popper"
       >
-        <el-icon><Refresh /></el-icon>
-      </button>
+        <button
+          class="act-btn"
+          :aria-label="t('menu.restartTerminal')"
+          @click="emit('restart-terminal')"
+        >
+          <el-icon><Refresh /></el-icon>
+        </button>
+      </el-tooltip>
     </div>
 
     <!-- 双屏模式 controls: docked on the menu row, just left of the window chrome, so they
@@ -460,198 +468,228 @@ onBeforeUnmount(() => {
       <!-- C2: pop the page on screen out into its own window (shared session). Hidden when nothing
            is on screen, and disabled in 双屏模式 — the panes already are the split, and pulling one
            out of a layout the user just assembled is not what the button should mean there. -->
-      <button
+      <el-tooltip
         v-if="popoutTarget"
-        class="dual-btn"
-        type="button"
-        :disabled="dualStore.on"
-        :title="
+        :content="
           dualStore.on
             ? t('pageMgr.popoutInDual')
             : t('palette.cmdPopoutPage', { name: popoutTarget.name })
         "
-        :aria-label="t('palette.cmdPopoutPage', { name: popoutTarget.name })"
-        @click="emit('popout-page', popoutTarget.id)"
+        placement="bottom"
+        popper-class="dsh-tip-popper"
       >
-        <!-- A window in front of the one it came away from: the detach glyph from the switcher rows. -->
-        <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-          <path
-            d="M2.5 5.5 h6.5 v7.5 H2.5 Z M9 2.5 h4.5 v6.5"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-      </button>
-      <button
-        class="dual-btn"
-        type="button"
-        :class="{ 'is-active': dualStore.on }"
-        :title="dualStore.on ? t('dual.exit') : t('dual.enter')"
-        :aria-label="dualStore.on ? t('dual.exit') : t('dual.enter')"
-        @click="dualStore.toggle()"
+        <button
+          class="dual-btn"
+          type="button"
+          :disabled="dualStore.on"
+          :aria-label="t('palette.cmdPopoutPage', { name: popoutTarget.name })"
+          @click="emit('popout-page', popoutTarget.id)"
+        >
+          <!-- A window in front of the one it came away from: the detach glyph from the switcher rows. -->
+          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M2.5 5.5 h6.5 v7.5 H2.5 Z M9 2.5 h4.5 v6.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </el-tooltip>
+      <el-tooltip
+        :content="dualStore.on ? t('dual.exit') : t('dual.enter')"
+        placement="bottom"
+        popper-class="dsh-tip-popper"
       >
-        <!-- off: split-pane frame (enter 双屏) -->
-        <svg v-if="!dualStore.on" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-          <rect
-            x="2"
-            y="3"
-            width="12"
-            height="10"
-            rx="1.5"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-          />
-          <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
-        </svg>
-        <!-- on: exit / logout (arrow leaving a panel) -->
-        <svg v-else width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-          <path
-            d="M9 2.5 H3.5 A1 1 0 0 0 2.5 3.5 V12.5 A1 1 0 0 0 3.5 13.5 H9"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-          <path
-            d="M11.5 8 H6 M9.5 5.5 L12 8 L9.5 10.5"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          />
-        </svg>
-      </button>
+        <button
+          class="dual-btn"
+          type="button"
+          :class="{ 'is-active': dualStore.on }"
+          :aria-label="dualStore.on ? t('dual.exit') : t('dual.enter')"
+          @click="dualStore.toggle()"
+        >
+          <!-- off: split-pane frame (enter 双屏) -->
+          <svg v-if="!dualStore.on" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+            <rect
+              x="2"
+              y="3"
+              width="12"
+              height="10"
+              rx="1.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+            />
+            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+          </svg>
+          <!-- on: exit / logout (arrow leaving a panel) -->
+          <svg v-else width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M9 2.5 H3.5 A1 1 0 0 0 2.5 3.5 V12.5 A1 1 0 0 0 3.5 13.5 H9"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M11.5 8 H6 M9.5 5.5 L12 8 L9.5 10.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+      </el-tooltip>
       <template v-if="dualStore.on">
-        <button
+        <el-tooltip
           v-if="dualStore.collapsed === 'none'"
-          class="dual-btn"
-          type="button"
-          :title="t('dual.hideMain')"
-          :aria-label="t('dual.hideMain')"
-          @click="dualStore.collapse('main')"
+          :content="t('dual.hideMain')"
+          placement="bottom"
+          popper-class="dsh-tip-popper"
         >
-          <!-- collapse main (left pane folds left) -->
-          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-            <rect
-              x="2"
-              y="3"
-              width="12"
-              height="10"
-              rx="1.5"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-            />
-            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
-            <path
-              d="M6 6 L4 8 L6 10"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </button>
-        <button
+          <button
+            class="dual-btn"
+            type="button"
+            :aria-label="t('dual.hideMain')"
+            @click="dualStore.collapse('main')"
+          >
+            <!-- collapse main (left pane folds left) -->
+            <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+              <rect
+                x="2"
+                y="3"
+                width="12"
+                height="10"
+                rx="1.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+              />
+              <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+              <path
+                d="M6 6 L4 8 L6 10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </el-tooltip>
+        <el-tooltip
           v-else-if="dualStore.collapsed === 'main'"
-          class="dual-btn"
-          type="button"
-          :title="t('dual.restoreMain')"
-          :aria-label="t('dual.restoreMain')"
-          @click="dualStore.collapse('main')"
+          :content="t('dual.restoreMain')"
+          placement="bottom"
+          popper-class="dsh-tip-popper"
         >
-          <!-- restore main (left pane unfolds right) -->
-          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-            <rect
-              x="2"
-              y="3"
-              width="12"
-              height="10"
-              rx="1.5"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-            />
-            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
-            <path
-              d="M4 6 L6 8 L4 10"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </button>
-        <button
+          <button
+            class="dual-btn"
+            type="button"
+            :aria-label="t('dual.restoreMain')"
+            @click="dualStore.collapse('main')"
+          >
+            <!-- restore main (left pane unfolds right) -->
+            <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+              <rect
+                x="2"
+                y="3"
+                width="12"
+                height="10"
+                rx="1.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+              />
+              <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+              <path
+                d="M4 6 L6 8 L4 10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </el-tooltip>
+        <el-tooltip
           v-if="dualStore.collapsed === 'none'"
-          class="dual-btn"
-          type="button"
-          :title="t('dual.hideSecondary')"
-          :aria-label="t('dual.hideSecondary')"
-          @click="dualStore.collapse('secondary')"
+          :content="t('dual.hideSecondary')"
+          placement="bottom"
+          popper-class="dsh-tip-popper"
         >
-          <!-- collapse secondary (right pane folds right) -->
-          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-            <rect
-              x="2"
-              y="3"
-              width="12"
-              height="10"
-              rx="1.5"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-            />
-            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
-            <path
-              d="M10 6 L12 8 L10 10"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </button>
-        <button
+          <button
+            class="dual-btn"
+            type="button"
+            :aria-label="t('dual.hideSecondary')"
+            @click="dualStore.collapse('secondary')"
+          >
+            <!-- collapse secondary (right pane folds right) -->
+            <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+              <rect
+                x="2"
+                y="3"
+                width="12"
+                height="10"
+                rx="1.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+              />
+              <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+              <path
+                d="M10 6 L12 8 L10 10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </el-tooltip>
+        <el-tooltip
           v-else-if="dualStore.collapsed === 'secondary'"
-          class="dual-btn"
-          type="button"
-          :title="t('dual.restoreSecondary')"
-          :aria-label="t('dual.restoreSecondary')"
-          @click="dualStore.collapse('secondary')"
+          :content="t('dual.restoreSecondary')"
+          placement="bottom"
+          popper-class="dsh-tip-popper"
         >
-          <!-- restore secondary (right pane unfolds left) -->
-          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-            <rect
-              x="2"
-              y="3"
-              width="12"
-              height="10"
-              rx="1.5"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-            />
-            <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
-            <path
-              d="M12 6 L10 8 L12 10"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </button>
+          <button
+            class="dual-btn"
+            type="button"
+            :aria-label="t('dual.restoreSecondary')"
+            @click="dualStore.collapse('secondary')"
+          >
+            <!-- restore secondary (right pane unfolds left) -->
+            <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+              <rect
+                x="2"
+                y="3"
+                width="12"
+                height="10"
+                rx="1.5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+              />
+              <line x1="8" y1="3" x2="8" y2="13" stroke="currentColor" stroke-width="1.2" />
+              <path
+                d="M12 6 L10 8 L12 10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </el-tooltip>
         <el-select
           v-if="dualStore.showSecondary"
           v-model="dualStore.secId"
@@ -688,14 +726,15 @@ onBeforeUnmount(() => {
       <div class="panel-card" role="dialog" aria-modal="false" :aria-label="panelLabel">
         <div class="panel-head">
           <span class="panel-title">{{ panelLabel }}</span>
-          <button
-            class="panel-close"
-            :title="t('menu.closeEsc')"
-            :aria-label="t('menu.closeEsc')"
-            @click="emit('open', null)"
+          <el-tooltip
+            :content="t('menu.closeEsc')"
+            placement="bottom"
+            popper-class="dsh-tip-popper"
           >
-            ✕
-          </button>
+            <button class="panel-close" :aria-label="t('menu.closeEsc')" @click="emit('open', null)">
+              ✕
+            </button>
+          </el-tooltip>
         </div>
         <div class="panel-body">
           <template v-if="parseAppPanel(props.current)">
@@ -707,6 +746,7 @@ onBeforeUnmount(() => {
           <slot v-else-if="props.current === 'openclaw'" name="openclaw" />
           <slot v-else-if="props.current === 'mcp'" name="mcp" />
           <slot v-else-if="props.current === 'workspace'" name="workspace" />
+          <slot v-else-if="props.current === 'board'" name="board" />
           <slot v-else-if="props.current === 'settings'" name="settings" />
           <slot v-else-if="props.current === 'help'" name="help" />
         </div>

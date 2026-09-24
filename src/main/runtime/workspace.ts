@@ -22,7 +22,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getSettings, resolveWorkspaceDir } from '../shell/store'
-import type { WorkspaceContext, WorkspaceInfo, WorkspaceNote } from '../../shared/types'
+import type {
+  WorkspaceContext,
+  WorkspaceInfo,
+  WorkspaceNote,
+  WorkspaceTask,
+  WorkspaceTaskStatus
+} from '../../shared/types'
 
 /* ---- paths ---- */
 
@@ -53,6 +59,50 @@ function newNoteId(): string {
   return `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
 }
 
+const TASK_STATUSES: WorkspaceTaskStatus[] = ['todo', 'doing', 'done']
+
+/**
+ * Coerce unknown JSON into a trustworthy task queue without ever throwing — the same contract
+ * notes have, because any agent (or hand edit) may have written anything into `tasks`. Blank
+ * titles and duplicate ids are dropped; an unknown status collapses to 'todo'.
+ */
+export function normalizeTasks(raw: unknown): WorkspaceTask[] {
+  const seen = new Set<string>()
+  return (Array.isArray(raw) ? raw : [])
+    .map((t): WorkspaceTask | null => {
+      if (!t || typeof t !== 'object') return null
+      const r = t as Record<string, unknown>
+      const title = typeof r.title === 'string' ? r.title : ''
+      if (!title.trim()) return null
+      const id = typeof r.id === 'string' && r.id ? r.id : newTaskId()
+      if (seen.has(id)) return null
+      seen.add(id)
+      const deps = (Array.isArray(r.deps) ? r.deps : []).filter(
+        (d): d is string => typeof d === 'string' && !!d
+      )
+      return {
+        id,
+        title,
+        status: TASK_STATUSES.includes(r.status as WorkspaceTaskStatus)
+          ? (r.status as WorkspaceTaskStatus)
+          : 'todo',
+        ...(typeof r.owner === 'string' && r.owner ? { owner: r.owner } : {}),
+        ...(deps.length ? { deps } : {}),
+        ...(typeof r.result === 'string' && r.result ? { result: r.result } : {}),
+        at: typeof r.at === 'number' ? r.at : Date.now(),
+        // #1 autopilot bookkeeping must survive every normalize, or a task would forget it was
+        // already dispatched / how many tries it spent and get re-run in a loop.
+        ...(typeof r.dispatchedAt === 'number' ? { dispatchedAt: r.dispatchedAt } : {}),
+        ...(typeof r.attempts === 'number' ? { attempts: r.attempts } : {})
+      }
+    })
+    .filter((t): t is WorkspaceTask => t !== null)
+}
+
+function newTaskId(): string {
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+}
+
 /**
  * Coerce unknown JSON into a trustworthy context without ever throwing: an agent (or a hand
  * edit) may have written anything into `context.json`, and a spawn path must not die on it.
@@ -81,11 +131,34 @@ export function normalizeContext(raw: unknown): WorkspaceContext {
     revision: typeof o.revision === 'number' && o.revision >= 0 ? o.revision : 0,
     ...(typeof o.broadcastAt === 'string' ? { broadcastAt: o.broadcastAt } : {}),
     task: typeof o.task === 'string' ? o.task : '',
-    notes
+    notes,
+    // Absent stays absent so a pre-queue document round-trips unchanged on disk.
+    ...(Array.isArray(o.tasks) ? { tasks: normalizeTasks(o.tasks) } : {})
   }
 }
 
 /* ---- IO ---- */
+
+/**
+ * #1 autopilot: listeners notified whenever a *write* actually changed the task queue. The
+ * dispatcher subscribes here to react to a fresh submit/complete immediately (event-driven) rather
+ * than only on its fallback poll. Kept inside workspace so the dependency stays one-way
+ * (dispatcher → workspace); workspace never imports the dispatcher.
+ */
+const taskListeners = new Set<(ctx: WorkspaceContext) => void>()
+export function onWorkspaceTasksChanged(fn: (ctx: WorkspaceContext) => void): () => void {
+  taskListeners.add(fn)
+  return () => taskListeners.delete(fn)
+}
+function notifyTasksChanged(ctx: WorkspaceContext): void {
+  for (const fn of [...taskListeners]) {
+    try {
+      fn(ctx)
+    } catch {
+      /* one bad listener must not break the write or the others */
+    }
+  }
+}
 
 /** Read the on-disk context, degrading to an empty one when it is missing or unparseable. */
 export function readWorkspace(): WorkspaceContext {
@@ -125,26 +198,33 @@ export function ensureWorkspace(): WorkspaceContext {
 /**
  * Merge a partial edit into the live context and persist it, stamping a fresh `updatedAt`.
  * A note list coming from the UI is re-normalized so a bad row cannot poison the shared doc.
+ * A *changed* task queue bumps `revision` too — task transitions are exactly what a polling
+ * agent watches the counter for; a plain task/notes edit still only moves `updatedAt`.
  * Returns the stored document so the caller reflects exactly what landed on disk.
  */
 export function writeWorkspace(
-  patch: { task?: string; notes?: WorkspaceNote[] }
+  patch: { task?: string; notes?: WorkspaceNote[]; tasks?: WorkspaceTask[] }
 ): WorkspaceContext {
   const cur = ensureWorkspace()
+  const nextTasks = patch.tasks !== undefined ? normalizeTasks(patch.tasks) : cur.tasks
+  const tasksChanged = JSON.stringify(nextTasks ?? null) !== JSON.stringify(cur.tasks ?? null)
   const next: WorkspaceContext = {
     version: 1,
     updatedAt: new Date().toISOString(),
-    // A plain edit keeps the broadcast signal; only broadcastWorkspace moves it forward.
-    revision: cur.revision,
+    // A plain edit keeps the broadcast signal; broadcasts and task changes move it forward.
+    revision: cur.revision + (tasksChanged ? 1 : 0),
     ...(cur.broadcastAt ? { broadcastAt: cur.broadcastAt } : {}),
     task: patch.task !== undefined ? patch.task : cur.task,
-    notes: patch.notes !== undefined ? normalizeContext({ notes: patch.notes }).notes : cur.notes
+    notes: patch.notes !== undefined ? normalizeContext({ notes: patch.notes }).notes : cur.notes,
+    ...(nextTasks !== undefined ? { tasks: nextTasks } : {})
   }
   try {
     writeFileSync(workspaceFile(), JSON.stringify(next, null, 2), 'utf8')
   } catch {
     /* keep returning the intended doc so the UI stays coherent; the next read re-syncs */
   }
+  // #1: a real queue transition wakes the autopilot dispatcher immediately, not just on its poll.
+  if (tasksChanged) notifyTasksChanged(next)
   return next
 }
 
@@ -167,7 +247,8 @@ export function broadcastWorkspace(): WorkspaceContext {
     revision: (Number.isFinite(cur.revision) ? cur.revision : 0) + 1,
     broadcastAt: now.toISOString(),
     task: cur.task,
-    notes
+    notes,
+    ...(cur.tasks !== undefined ? { tasks: cur.tasks } : {})
   }
   try {
     writeFileSync(workspaceFile(), JSON.stringify(next, null, 2), 'utf8')

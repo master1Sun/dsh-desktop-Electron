@@ -1,29 +1,74 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import '@xterm/xterm/css/xterm.css'
-import { Close, Cpu, Minus, Plus, Refresh } from '@element-plus/icons-vue'
-import { useTerminalStore, type TerminalSession } from '@renderer/stores/terminal'
+import type { Terminal } from '@xterm/xterm'
+import {
+  Close,
+  Cpu,
+  DCaret,
+  FullScreen,
+  Minus,
+  Operation,
+  Plus,
+  Search
+} from '@element-plus/icons-vue'
+import {
+  useTerminalStore,
+  type TerminalSession
+} from '@renderer/stores/terminal'
 import { useSettingsStore } from '@renderer/stores/settings'
-import { useIsLight } from '@renderer/composables/useTheme'
+import type { PtyShellInfo } from '@shared/types'
+import SplitNode from './SplitNode.vue'
+import TerminalSearchBar from './TerminalSearchBar.vue'
 import { t } from '@renderer/i18n'
 
 /**
- * 内嵌终端面板：默认停靠在窗口底部（拖上边缘可调高度，双击复位）；最小化后收成一个
- * 可拖动的小图标，松手时横向吸附到窗口右缘，点图标即展开回底部面板。
+ * 终端面板，两种展示模式（右上角全屏图标切换，持久化到 settings.terminalMode）：
+ * - 内嵌（默认）：作为页面区的流子元素停靠在底部，拖上边缘调高度会顶起 webview；不提供最小化。
+ * - 浮窗：fixed 到窗口底部的覆盖层，不顶起内容；可最小化成一个可拖动小图标，松手横向吸附右缘。
+ * 顶部标签 = 终端分组，每个分组内部是一棵可嵌套的分屏树（SplitNode → TerminalPane）。
  */
 const store = useTerminalStore()
 const settingsStore = useSettingsStore()
-const containerEl = ref<HTMLElement | null>(null)
 const fabEl = ref<HTMLElement | null>(null)
-let term: Terminal | null = null
-let fit: FitAddon | null = null
-let disposeData: (() => void) | null = null
-let resizeObserver: ResizeObserver | null = null
+const searchEl = ref<InstanceType<typeof TerminalSearchBar> | null>(null)
+
+/* The search bar reaches whichever pane currently has keyboard focus; panes register their term
+   through this injected setter (see TerminalPane). MUST be a shallowRef: a plain ref() would
+   deep-wrap the xterm Terminal instance in a Vue reactive Proxy, and handing that Proxy to
+   term.loadAddon()/addon internals breaks xterm (private fields / `this` binding) and stalls the
+   whole drawer's re-render (add/delete stop taking effect). */
+const activeTerm = shallowRef<Terminal | null>(null)
+provide('term:setActive', (term: Terminal | null): void => {
+  activeTerm.value = term
+})
+// Clear the reference only when it still points at the pane being torn down: a group switch that
+// has already mounted the next pane must not get clobbered, and a disposed term is never left
+// dangling as `activeTerm` (which would make the search bar call findNext on a dead terminal).
+provide('term:clearActive', (term: Terminal): void => {
+  if (activeTerm.value === term) activeTerm.value = null
+})
+// Explicit accessor (rather than an inline `() => activeTerm` in the template) so the search bar is
+// guaranteed to receive the raw Terminal instance, never a Ref wrapper or a reactive Proxy.
+function getActiveTerm(): Terminal | null {
+  return activeTerm.value
+}
+
+/* ---- shell picker: candidate shells fetched once from the main process (default first) ---- */
+const shells = ref<PtyShellInfo[]>([])
+async function loadShells(): Promise<void> {
+  try {
+    const res = await window.container.ptyShells?.()
+    if (res?.ok) shells.value = (res.data as PtyShellInfo[]) || []
+  } catch {
+    /* picker just shows the default action only */
+  }
+}
 
 const minimized = ref(false)
+/** 展示模式：false = 内嵌（占页面容器流空间，不可最小化）；true = 浮窗（fixed 覆盖层，可最小化）。
+ *  真值源是 settingsStore.settings.terminalMode，这里只做响应式镜像（见下方 watch）。 */
+const floating = ref(false)
 /** 折叠面板高度（px）：与主进程 container-settings 的 terminalHeight 默认值保持一致。 */
 const DEFAULT_H = 320
 const MIN_H = 160
@@ -157,7 +202,7 @@ function closeOne(id: string): void {
 /** 从列表新建终端：沿用当前会话目录，创建后直接展开显示。 */
 async function newFromList(): Promise<void> {
   const target = store.activeSession?.target ?? 'container'
-  const title = store.activeSession?.title ?? t('terminal.rootTitle')
+  const title = store.activeSession?.title ?? t('terminal.title')
   try {
     await store.start(target, title)
   } catch {
@@ -187,8 +232,6 @@ watch([miniOpen, menuOpen], ([a, b]) => {
 /* ---- bottom-dock height resize via the panel's top edge ---- */
 const resizing = ref(false)
 let resizeStart = { py: 0, h: 0 }
-/** 待执行的 fit 帧号，0 = 无待执行。 */
-let fitRaf = 0
 
 function onResizeDown(e: PointerEvent): void {
   resizing.value = true
@@ -209,14 +252,12 @@ function onResizeUp(): void {
   resizing.value = false
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeUp)
-  fitActive()
   saveHeight()
 }
 
 /** 双击上边缘：回到默认高度。 */
 function resetHeight(): void {
   size.value.h = clampH(DEFAULT_H)
-  fitActive()
   saveHeight()
 }
 
@@ -227,160 +268,92 @@ function saveHeight(): void {
 
 // 高度与设置双向同步：启动时（设置是异步加载的）恢复上次高度，运行中在设置面板里改
 // 也立即生效。拖动本身会写回同一个 key，所以回包时 next === 本地高度，不会自打循环；
-// 拖动过程中忽略回包，免得把上一次保存的旧值盖到刚拖到一半的高度上。
+// 拖动过程中忽略回包，免得把上一次保存的旧值盖到刚拖到一半的高度上。pane 自带 ResizeObserver，改高后自动重算。
 watch(
   () => [settingsStore.loaded, settingsStore.settings.terminalHeight] as const,
   ([loaded, h]) => {
     if (!loaded || resizing.value) return
     const next = clampH(typeof h === 'number' && h > 0 ? h : DEFAULT_H)
-    if (next !== size.value.h) {
-      size.value.h = next
-      fitActive()
-    }
+    if (next !== size.value.h) size.value.h = next
   },
   { immediate: true }
 )
 
+/* ---- display mode: embedded (in-flow, no minimize) ⇄ floating (fixed overlay, minimizable) ----
+   terminalMode is the single source of truth (persisted). Mirror it into `floating` so template can
+   branch on a boolean; leaving floating back to embedded must drop any minimized state, else the
+   dock would hide itself with no FAB to bring it back (the FAB only exists in floating mode). */
+watch(
+  () => settingsStore.settings.terminalMode,
+  (mode) => {
+    const f = mode === 'floating'
+    if (f === floating.value) return
+    floating.value = f
+    if (!f) minimized.value = false
+  },
+  { immediate: true }
+)
+function toggleMode(): void {
+  settingsStore
+    .patch({ terminalMode: floating.value ? 'embedded' : 'floating' })
+    .catch(() => undefined)
+}
+
 /** 窗口缩小/最大化时重新夹高度，别让面板超出可视区。 */
 function onWindowResize(): void {
   const next = clampH(size.value.h)
-  if (next !== size.value.h) {
-    size.value.h = next
-    fitActive()
-  }
+  if (next !== size.value.h) size.value.h = next
 }
 
-// isLight 是 html.light 类的响应式镜像：watch DOM 属性本身永远不会触发，
-// 主题切换靠它驱动下面的重新上色。
-const { isLight } = useIsLight()
-function themeColors(): { bg: string; fg: string } {
-  return isLight.value ? { bg: '#ffffff', fg: '#1f2328' } : { bg: '#000000', fg: '#e8ecf3' }
+/* ---- per-pane terminals live in <SplitNode>/<TerminalPane>; the drawer only tracks focus ---- */
+watch(minimized, (m) => {
+  if (!m) closePopups()
+})
+
+/** 新开一个终端分组：沿用当前会话的目标目录，没有会话时退回容器根目录；标题统一叫「终端」。 */
+function newTerminal(shellId?: string): void {
+  const target = store.activeSession?.target ?? 'container'
+  store.start(target, t('terminal.title'), shellId).catch(() => undefined)
 }
 
-function ensureTerm(): void {
-  if (term || !containerEl.value) return
-  const c = themeColors()
-  term = new Terminal({
-    convertEol: true,
-    cursorBlink: true,
-    fontFamily: 'Consolas, Menlo, "Cascadia Code", monospace',
-    fontSize: 13,
-    scrollback: 5000,
-    theme: { background: c.bg, foreground: c.fg }
-  })
-  fit = new FitAddon()
-  term.loadAddon(fit)
-  term.open(containerEl.value)
-  term.onData((data) => {
-    if (store.activeId) window.container.ptyWrite(store.activeId, data).catch(() => undefined)
-  })
-  // Only forward the active session's bytes into the single shared terminal surface.
-  disposeData = window.container.onPtyData(({ id, data }) => {
-    store.feed(id, data)
-    if (id === store.activeId) term?.write(data)
-  })
-  resizeObserver = new ResizeObserver(() => scheduleFit())
-  resizeObserver.observe(containerEl.value)
+/** 在活动分组里加一个 pane（向右 = 并排 h / 向下 = 堆叠 v）。 */
+function splitActive(direction: 'h' | 'v'): void {
+  const id = store.activeSession?.id
+  if (id) store.split(id, direction).catch(() => undefined)
 }
 
 /**
- * 重算 xterm 尺寸（fit）+ 同步给 PTY，用 rAF 合并同一帧内的多次尺寸变化：
- * 拖动中每帧 fit 一次保证内容区跟手，而 ptyResize（IPC + shell 重排）留到松手再发。
+ * 右侧列表的一行 = 一个终端 pane：分屏里的每个 pane 都单列一行（对齐 VSCode，拆分也算一个终端）。
+ * 按分组顺序展开，组内第一个 pane 顶格、其余（拆分出来的）缩进，形成截图里的树形层级。
  */
-function fitSurface(): void {
-  fitRaf = 0
-  if (!term || !fit || minimized.value) return
-  try {
-    fit.fit()
-  } catch {
-    return /* container not laid out yet */
-  }
-  if (!resizing.value) syncPtySize()
+interface TermRow {
+  session: TerminalSession
+  nested: boolean
 }
-
-function syncPtySize(): void {
-  if (!term || !fit || minimized.value) return
-  if (store.activeId)
-    window.container.ptyResize(store.activeId, term.cols, term.rows).catch(() => undefined)
-}
-
-/** 尺寸变化统一入口：交给下一帧的 fitSurface，避免 ResizeObserver 回调风暴。 */
-function scheduleFit(): void {
-  if (fitRaf) return
-  fitRaf = requestAnimationFrame(fitSurface)
-}
-
-/** 不等下一帧，立刻重算尺寸并同步 PTY（fitSurface 内含同步）：切页 / 展开 / 松手 / 复位时用。 */
-function fitActive(): void {
-  if (fitRaf) {
-    cancelAnimationFrame(fitRaf)
-    fitRaf = 0
+const termRows = computed<TermRow[]>(() => {
+  const rows: TermRow[] = []
+  for (const g of store.groups) {
+    store.collectLeaves(g.root).forEach((id, i) => {
+      const s = store.sessionById(id)
+      if (s) rows.push({ session: s, nested: i > 0 })
+    })
   }
-  fitSurface()
-}
-
-/** Repaint the shared surface with the active tab's buffered scrollback. */
-function loadActive(): void {
-  if (!term) return
-  term.reset()
-  fitActive()
-  const s = store.activeId ? store.sessionById(store.activeId) : null
-  if (s?.buffer) term.write(s.buffer)
-  term.focus()
-}
-
-watch(
-  () => store.activeId,
-  async () => {
-    if (!store.open) return
-    await nextTick()
-    ensureTerm()
-    loadActive()
-  }
-)
-
-watch(
-  () => store.open,
-  async (isOpen) => {
-    if (!isOpen) return
-    minimized.value = false
-    await nextTick()
-    ensureTerm()
-    loadActive()
-  }
-)
-
-watch(minimized, async (m) => {
-  if (!m) {
-    closePopups()
-    await nextTick()
-    fitActive()
-    term?.focus()
-  }
+  return rows
 })
 
-// Re-apply colors when the shell chrome flips between light/dark.
-watch(isLight, () => {
-  if (!term) return
-  const c = themeColors()
-  term.options.theme = { ...term.options.theme, background: c.bg, foreground: c.fg }
-})
-
-function onClose(id: string): void {
-  store.close(id)
+/** 列表里对某个 pane 向右拆分。 */
+function splitSession(id: string): void {
+  store.split(id, 'h').catch(() => undefined)
 }
 
-function relaunchActive(): void {
-  const s = store.activeSession
-  if (!s) return
-  store.close(s.id)
-  store.start(s.target, s.title).catch(() => undefined)
-}
-
-/** 新开一个终端 Tab：沿用当前会话的目标目录，没有会话时退回容器根目录。 */
-function newTerminal(): void {
-  const target = store.activeSession?.target ?? 'container'
-  store.start(target, store.activeSession?.title ?? t('terminal.rootTitle')).catch(() => undefined)
+/**
+ * 右侧列表按终端类型展示名称：优先取该会话所选 shell 的 label（PowerShell / Git Bash /…）；
+ * 未指定 shell 的（默认新建、Ctrl+K 唤起）归到主进程返回的默认 shell（listShells 首项）。
+ * shell 列表尚未加载完时回退到会话标题 / 「终端」。
+ */
+function shellName(s: TerminalSession): string {
+  const id = s.shell ?? shells.value[0]?.id
+  return shells.value.find((x) => x.id === id)?.label || s.title || t('terminal.title')
 }
 
 /**
@@ -404,67 +377,151 @@ async function closeAll(): Promise<void> {
 
 onMounted(() => {
   window.addEventListener('resize', onWindowResize)
+  void loadShells()
 })
 
 onBeforeUnmount(() => {
-  if (fitRaf) cancelAnimationFrame(fitRaf)
   window.removeEventListener('resize', onWindowResize)
   window.removeEventListener('pointermove', onResizeMove)
   window.removeEventListener('pointerup', onResizeUp)
   window.removeEventListener('pointermove', onFabMove)
   window.removeEventListener('pointerup', onFabUp)
   document.removeEventListener('pointerdown', onDocDown, true)
-  disposeData?.()
-  resizeObserver?.disconnect()
-  term?.dispose()
-  term = null
 })
 </script>
 
 <template>
-  <!-- Bottom-docked full-width terminal strip; height follows the dragged size. -->
+  <!-- Bottom-docked terminal strip; embedded flow sibling by default, fixed overlay in floating mode. -->
   <section
     v-show="store.open && !minimized"
     class="term-dock"
-    :class="{ resizing }"
+    :class="{ resizing, 'is-floating': floating }"
     :style="{ height: `${size.h}px` }"
   >
     <header class="term-bar">
-      <div class="tabs">
-        <button
-          v-for="s in store.sessions"
-          :key="s.id"
-          class="tab"
-          :class="{ active: s.id === store.activeId, exited: s.status === 'exited' }"
-          :title="s.cwd"
-          @click="store.focus(s.id)"
-        >
-          <span class="dot" :class="s.status" />
-          {{ s.title }}
-          <el-icon class="tab-close" size="12" @click.stop="onClose(s.id)"><Close /></el-icon>
-        </button>
-        <button class="tab tab-new" :title="t('terminal.newTab')" @click.stop="newTerminal">
-          <el-icon size="12"><Plus /></el-icon>
-        </button>
-      </div>
+      <span class="term-bar__title">{{ t('terminal.title') }}</span>
+      <el-tooltip
+        :content="t('terminal.search')"
+        placement="bottom"
+        popper-class="dsh-tip-popper"
+      >
+        <el-button size="small" text @click.stop="searchEl?.toggle()">
+          <el-icon><Search /></el-icon>
+        </el-button>
+      </el-tooltip>
+      <TerminalSearchBar ref="searchEl" :get-term="getActiveTerm" class="term-bar__search" />
       <div class="bar-actions">
-        <span class="cwd">{{ store.activeSession?.cwd }}</span>
-        <el-button size="small" text :title="t('terminal.restart')" @click.stop="relaunchActive">
-          <el-icon><Refresh /></el-icon>
-        </el-button>
-        <el-button size="small" text :title="t('terminal.minimize')" @click.stop="minimized = true">
-          <el-icon><Minus /></el-icon>
-        </el-button>
-        <el-button size="small" text :title="t('terminal.closeAll')" @click.stop="closeAll">
-          <el-icon><Close /></el-icon>
-        </el-button>
+        <el-tooltip
+          :content="t('terminal.newTab')"
+          placement="bottom"
+          popper-class="dsh-tip-popper"
+        >
+          <el-button size="small" text @click.stop="newTerminal()">
+            <el-icon><Plus /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <el-dropdown v-if="shells.length" trigger="click" @command="newTerminal">
+          <el-button size="small" text :title="t('terminal.newWithShell')">
+            <el-icon><DCaret /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="s in shells" :key="s.id" :command="s.id">
+                {{ s.label }}
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-dropdown trigger="click" @command="(d) => splitActive(d === 'v' ? 'v' : 'h')">
+          <el-button size="small" text :title="t('terminal.split')">
+            <el-icon><Operation /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="h">{{ t('terminal.splitRight') }}</el-dropdown-item>
+              <el-dropdown-item command="v">{{ t('terminal.splitDown') }}</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <!-- Right-edge cluster: the drawer sits flush to the window's right border, so a centered
+             `bottom` tip would spill past the viewport and raise a horizontal scrollbar. `bottom-end`
+             pins the bubble's right edge to the button and grows it leftward, keeping it on-screen. -->
+        <el-tooltip
+          :content="floating ? t('terminal.toEmbedded') : t('terminal.toFloating')"
+          placement="bottom-end"
+          popper-class="dsh-tip-popper"
+        >
+          <el-button size="small" text @click.stop="toggleMode">
+            <el-icon><FullScreen /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <!-- 最小化只在浮窗模式提供：内嵌模式下面板占实际布局空间，收起后无 FAB 可回。 -->
+        <el-tooltip
+          v-if="floating"
+          :content="t('terminal.minimize')"
+          placement="bottom-end"
+          popper-class="dsh-tip-popper"
+        >
+          <el-button size="small" text @click.stop="minimized = true">
+            <el-icon><Minus /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip
+          :content="t('terminal.closeAll')"
+          placement="bottom-end"
+          popper-class="dsh-tip-popper"
+        >
+          <el-button size="small" text @click.stop="closeAll">
+            <el-icon><Close /></el-icon>
+          </el-button>
+        </el-tooltip>
       </div>
     </header>
 
-    <div ref="containerEl" class="term-surface">
-      <div v-if="!store.sessions.length" class="term-empty">
-        <el-icon size="18"><Cpu /></el-icon> {{ t('terminal.emptyHint') }}
+    <div class="term-body">
+      <div class="term-surface">
+        <SplitNode
+          v-if="store.activeGroup"
+          :key="store.activeGroup.id"
+          :node="store.activeGroup.root"
+          :group-id="store.activeGroup.id"
+        />
+        <div v-else class="term-empty">
+          <el-icon size="18"><Cpu /></el-icon> {{ t('terminal.emptyHint') }}
+        </div>
       </div>
+      <!-- VSCode-style right rail: one row per terminal pane (splits count too); shows once ≥2. -->
+      <aside v-if="store.sessions.length > 1" class="term-side">
+        <div
+          v-for="row in termRows"
+          :key="row.session.id"
+          class="term-side__item"
+          :class="{
+            active: row.session.id === store.activeSession?.id,
+            exited: row.session.status === 'exited',
+            nested: row.nested
+          }"
+          :title="shellName(row.session)"
+          @click="store.focusSession(row.session.id)"
+        >
+          <span class="dot" :class="row.session.status" />
+          <span class="term-side__name">{{ shellName(row.session) }}</span>
+          <el-icon
+            class="term-side__act"
+            :size="13"
+            :title="t('terminal.split')"
+            @click.stop="splitSession(row.session.id)"
+            ><Operation
+          /></el-icon>
+          <el-icon
+            class="term-side__act"
+            :size="13"
+            :title="t('terminal.close')"
+            @click.stop="store.close(row.session.id)"
+            ><Close
+          /></el-icon>
+        </div>
+      </aside>
     </div>
 
     <!-- top-edge resize handle: 拖动改高度，双击复位 -->
@@ -485,19 +542,24 @@ onBeforeUnmount(() => {
 
   <!-- Minimized: a draggable icon that hugs the right edge. Left-click → mini-window list,
        right-click → context menu. -->
-  <button
+  <el-tooltip
     v-if="store.open && minimized"
-    ref="fabEl"
-    class="term-fab"
-    :class="{ dragging: fabDragging }"
-    :style="fabStyle"
-    :title="t('terminal.minimizedTitle')"
-    @pointerdown="onFabDown"
-    @contextmenu.prevent="onFabContext"
+    :content="t('terminal.minimizedTitle')"
+    placement="left"
+    popper-class="dsh-tip-popper"
   >
-    <span class="term-glyph fab-glyph">&gt;_</span>
-    <span v-if="store.sessions.length" class="fab-badge">{{ store.sessions.length }}</span>
-  </button>
+    <button
+      ref="fabEl"
+      class="term-fab"
+      :class="{ dragging: fabDragging }"
+      :style="fabStyle"
+      @pointerdown="onFabDown"
+      @contextmenu.prevent="onFabContext"
+    >
+      <span class="term-glyph fab-glyph">&gt;_</span>
+      <span v-if="store.sessions.length" class="fab-badge">{{ store.sessions.length }}</span>
+    </button>
+  </el-tooltip>
 
   <!-- Left-click: minimized-terminal mini-window list (Huawei-style floating windows). -->
   <div v-if="miniOpen && store.sessions.length" ref="listEl" class="term-mini" :style="anchorStyle">
@@ -538,23 +600,25 @@ onBeforeUnmount(() => {
     :style="anchorStyle"
     @contextmenu.prevent
   >
-    <button
+    <el-tooltip
       v-for="s in store.sessions"
       :key="s.id"
-      class="term-menu__row"
-      :title="t('terminal.restoreTip')"
-      @click="restore(s.id)"
+      :content="t('terminal.restoreTip')"
+      placement="left"
+      popper-class="dsh-tip-popper"
     >
-      <span class="term-glyph term-menu__ico">&gt;_</span>
-      <span class="term-menu__name">{{ s.title }}</span>
-      <el-icon
-        class="term-menu__x"
-        :size="14"
-        :title="t('terminal.close')"
-        @click.stop="closeOne(s.id)"
-        ><Close
-      /></el-icon>
-    </button>
+      <button class="term-menu__row" @click="restore(s.id)">
+        <span class="term-glyph term-menu__ico">&gt;_</span>
+        <span class="term-menu__name">{{ s.title }}</span>
+        <el-icon
+          class="term-menu__x"
+          :size="14"
+          :title="t('terminal.close')"
+          @click.stop="closeOne(s.id)"
+          ><Close
+        /></el-icon>
+      </button>
+    </el-tooltip>
     <div class="term-menu__sep" />
     <button class="term-menu__row term-menu__row--danger" @click="closeAllFromMenu">
       <el-icon class="term-menu__ico"><Close /></el-icon>
@@ -565,11 +629,11 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .term-dock {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 2000;
+  /* Embedded flow sibling of the page area (see App.vue .content): it takes its dragged
+     height and pushes the webview up, instead of the old window-wide `position: fixed` strip. */
+  position: relative;
+  flex: none;
+  width: 100%;
   display: flex;
   flex-direction: column;
   /* frosted dock so the page behind bleeds through; opacity follows --glass-tint-a */
@@ -577,11 +641,23 @@ onBeforeUnmount(() => {
   border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
   -webkit-backdrop-filter: blur(var(--glass-blur, 30px)) saturate(135%);
   backdrop-filter: blur(var(--glass-blur, 30px)) saturate(135%);
-  border-radius: 10px 10px 0 0;
   box-shadow:
     0 -12px 40px rgba(0, 0, 0, 0.35),
     0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset;
   overflow: hidden;
+}
+
+/* Floating mode: escape the page area and pin to the window bottom as an overlay (the dock is a
+   child of .content, but no ancestor establishes a containing block for `position: fixed`, same as
+   the FAB), so it floats over the webview instead of pushing it up — and can minimize to the FAB. */
+.term-dock.is-floating {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: auto;
+  z-index: 2000;
+  border-radius: 10px 10px 0 0;
 }
 
 .term-bar {
@@ -589,6 +665,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  /* Fixed height so the search pill appearing/disappearing never grows the bar (no title jitter). */
+  min-height: 32px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
@@ -596,39 +674,17 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
-.tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  overflow-x: auto;
-  min-width: 0;
+.term-bar__title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
+  user-select: none;
 }
 
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 12px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.tab:hover {
-  background: var(--surface);
-  color: var(--text);
-}
-.tab.active {
-  background: var(--surface);
-  border-color: var(--border);
-  color: var(--text);
-}
-.tab.exited .dot {
-  background: var(--err);
+/* Search pill sits right after the title; it is the only thing that moves when search toggles. */
+.term-bar__search {
+  flex: none;
 }
 
 .dot {
@@ -639,35 +695,88 @@ onBeforeUnmount(() => {
   flex: none;
 }
 
-.tab-close {
-  opacity: 0.6;
-}
-.tab-close:hover {
-  opacity: 1;
-  color: var(--err);
-}
-
 .bar-actions {
   display: flex;
   align-items: center;
   gap: 2px;
   flex: none;
+  margin-left: auto;
 }
-.cwd {
-  font-size: 11.5px;
-  color: var(--text-dim);
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-right: 4px;
+
+/* Body row: the split surface fills the width, with an optional VSCode-style tab rail on the right. */
+.term-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }
 
 .term-surface {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   position: relative;
   padding: 4px 6px;
+}
+
+/* ---- right tab rail (VSCode `terminal.integrated.tabs.location: right`) ---- */
+.term-side {
+  flex: none;
+  width: 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.term-side__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.term-side__item:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.term-side__item.active {
+  background: var(--surface);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--text);
+}
+/* Split panes indent one level under their group's first terminal (VSCode tree look). */
+.term-side__item.nested {
+  margin-left: 14px;
+}
+.term-side__item.exited .dot {
+  background: var(--err);
+}
+.term-side__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.term-side__act {
+  flex: none;
+  color: var(--text-dim);
+  opacity: 0;
+  cursor: pointer;
+}
+.term-side__item:hover .term-side__act,
+.term-side__item.active .term-side__act {
+  opacity: 1;
+}
+.term-side__act:hover {
+  color: var(--accent);
 }
 
 .term-empty {

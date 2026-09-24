@@ -20,6 +20,8 @@ const IPC = {
   /** restore a builtin page's userData copy from the bundled seed (user broke its files) */
   ResetBuiltinPage: "container:reset-builtin-page",
   SetPagePort: "container:set-page-port",
+  /** #4: override a page's container.json dependsOn (pageDeps map) without editing its file */
+  SetPageDeps: "container:set-page-deps",
   OpenPageExternal: "container:open-page-external",
   GetSettings: "container:get-settings",
   UpdateSettings: "container:update-settings",
@@ -80,6 +82,7 @@ const IPC = {
   GetIsMaximized: "container:get-is-maximized",
   OnMaximizedChanged: "container:maximized-changed",
   PtyStart: "container:pty-start",
+  PtyShells: "container:pty-shells",
   PageRunSpec: "container:page-run-spec",
   PtyWrite: "container:pty-write",
   PtyResize: "container:pty-resize",
@@ -126,6 +129,10 @@ const IPC = {
   GetWebData: "container:get-web-data",
   /** #26: wipe cache / cookies (optionally one domain) / storage / everything (WebDataClearArgs) */
   ClearWebData: "container:clear-web-data",
+  /** #8: recursive disk-usage breakdown of userData/pages/envRoot/logs/workspace/… → DiskReport */
+  GetDiskReport: "container:get-disk-report",
+  /** #8: wipe one allowlisted disk scope ('webcache' | 'logs') → DiskReport */
+  ClearDiskScope: "container:clear-disk-scope",
   /** activity timeline: read filtered events from logs/events.jsonl (ListEventsArgs → ContainerEvent[]) */
   ListEvents: "container:list-events",
   /** broadcast: one new activity-timeline event (ContainerEvent) */
@@ -155,8 +162,14 @@ const IPC = {
   McpCallTool: "container:mcp-call-tool",
   /** broadcast: hub server states changed (McpServerState[]) */
   OnMcpStateChanged: "container:mcp-state-changed",
+  /** broadcast: the hub's recent tool-call feed changed (McpCallEvent[], newest last) */
+  OnMcpCalls: "container:mcp-calls",
+  /** MCP hub: cold-read the buffered tool-call feed → McpCallEvent[] */
+  GetMcpCalls: "container:mcp-get-calls",
   /** MCP bridge: where the agent-facing catalog/config exports live → McpBridgeInfo */
   McpBridgeInfo: "container:mcp-bridge-info",
+  /** #11: connection info for the container's OWN MCP server (gated) → ContainerMcpInfo */
+  GetContainerMcpInfo: "container:get-container-mcp-info",
   /** MCP built-in packages: on-disk provisioning state of userData/mcp → McpPkgStatus[] */
   McpPackagesStatus: "container:mcp-packages-status",
   /** shared workspace: read the container-owned context + its locations → WorkspaceInfo */
@@ -164,7 +177,13 @@ const IPC = {
   /** shared workspace: persist a partial edit ({ task?, notes? }) → WorkspaceContext */
   WorkspaceSave: "container:workspace-save",
   /** shared workspace: push the current task to running agents (bump revision + log a note) → WorkspaceContext */
-  WorkspaceBroadcast: "container:workspace-broadcast"
+  WorkspaceBroadcast: "container:workspace-broadcast",
+  /**
+   * route one renderer toast to the OS notification center (ToastLevel + text). The renderer
+   * suppresses its in-app corner toast and calls this only while `systemNotifications` is on;
+   * resolves false when the platform can't notify, so the renderer falls back to the toast.
+   */
+  ShowSystemToast: "container:show-system-toast"
 };
 const api = {
   getNodeInfo: () => ipcRenderer.invoke(IPC.GetNodeInfo),
@@ -192,8 +211,13 @@ const api = {
   setPageDisabled: (id, disabled) => ipcRenderer.invoke(IPC.SetPageDisabled, id, disabled),
   resetBuiltinPage: (id) => ipcRenderer.invoke(IPC.ResetBuiltinPage, id),
   setPagePort: (id, port) => ipcRenderer.invoke(IPC.SetPagePort, id, port),
+  // #4: override a page's dependency list (container-side, keeps its container.json untouched)
+  setPageDeps: (id, deps) => ipcRenderer.invoke(IPC.SetPageDeps, id, deps),
   openExternal: (url) => ipcRenderer.invoke(IPC.OpenPageExternal, url),
   getSettings: () => ipcRenderer.invoke(IPC.GetSettings),
+  // forward one renderer toast to the OS notification center; resolves whether it showed,
+  // so the caller can fall back to the in-app corner toast when notifications are unavailable
+  showSystemToast: (level, text) => ipcRenderer.invoke(IPC.ShowSystemToast, { level, text }),
   updateSettings: (partial) => ipcRenderer.invoke(IPC.UpdateSettings, partial),
   getEnvRoot: () => ipcRenderer.invoke(IPC.EnvRoot),
   getDownloadDir: () => ipcRenderer.invoke(IPC.DownloadDir),
@@ -211,6 +235,9 @@ const api = {
   // #26: embedded-webview data (cookies per domain + cache/storage bytes) and its wipe buttons.
   getWebData: () => ipcRenderer.invoke(IPC.GetWebData),
   clearWebData: (args) => ipcRenderer.invoke(IPC.ClearWebData, args),
+  // #8: disk-usage dashboard (Settings ▸ 存储) + its two allowlisted wipe scopes.
+  getDiskReport: () => ipcRenderer.invoke(IPC.GetDiskReport),
+  clearDiskScope: (scope) => ipcRenderer.invoke(IPC.ClearDiskScope, scope),
   getSystemInfo: () => ipcRenderer.invoke(IPC.GetSystemInfo),
   getNetworkStats: () => ipcRenderer.invoke(IPC.GetNetworkStats),
   getUpdateHistory: () => ipcRenderer.invoke(IPC.GetUpdateHistory),
@@ -295,6 +322,7 @@ const api = {
     return () => ipcRenderer.removeListener(IPC.OpenTerminalPage, listener);
   },
   ptyStart: (target, opts) => ipcRenderer.invoke(IPC.PtyStart, target, opts),
+  ptyShells: () => ipcRenderer.invoke(IPC.PtyShells),
   ptyWrite: (id, data) => ipcRenderer.invoke(IPC.PtyWrite, id, data),
   ptyResize: (id, cols, rows) => ipcRenderer.invoke(IPC.PtyResize, id, cols, rows),
   ptyKill: (id) => ipcRenderer.invoke(IPC.PtyKill, id),
@@ -356,7 +384,10 @@ const api = {
   mcpDisconnect: (id) => ipcRenderer.invoke(IPC.McpDisconnect, id),
   mcpListTools: (serverId) => ipcRenderer.invoke(IPC.McpListTools, serverId),
   mcpCallTool: (args) => ipcRenderer.invoke(IPC.McpCallTool, args),
+  getMcpCalls: () => ipcRenderer.invoke(IPC.GetMcpCalls),
   mcpBridgeInfo: () => ipcRenderer.invoke(IPC.McpBridgeInfo),
+  // #11: state + connection info of the container's OWN MCP server (gated, default off)
+  getContainerMcpInfo: () => ipcRenderer.invoke(IPC.GetContainerMcpInfo),
   mcpPackagesStatus: () => ipcRenderer.invoke(IPC.McpPackagesStatus),
   // shared workspace: the one container-owned context every hosted agent reads/writes
   workspaceGet: () => ipcRenderer.invoke(IPC.WorkspaceGet),
@@ -366,6 +397,11 @@ const api = {
     const listener = (_e, states) => cb(states);
     ipcRenderer.on(IPC.OnMcpStateChanged, listener);
     return () => ipcRenderer.removeListener(IPC.OnMcpStateChanged, listener);
+  },
+  onMcpCalls: (cb) => {
+    const listener = (_e, calls) => cb(calls);
+    ipcRenderer.on(IPC.OnMcpCalls, listener);
+    return () => ipcRenderer.removeListener(IPC.OnMcpCalls, listener);
   }
 };
 if (process.contextIsolated) {

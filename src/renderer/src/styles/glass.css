@@ -264,16 +264,23 @@ html.light .aurora .blob {
 html.dark .win-edge {
   display: block;
 }
+/* Settings ▸ 外观 can turn the decorative ring off; `.no-marquee` (painted on <html> by App.vue)
+   hides the window frame. Kept as a separate rule so the dark-only `display: block` above stays
+   the single source for "when the frame exists". */
+html.no-marquee .win-edge {
+  display: none;
+}
 @keyframes we-run {
   to {
     stroke-dashoffset: -100;
   }
 }
-/* Every floating popup gets the same travelling ring along its own border. */
-html.dark .qq-pop::after,
-html.dark .panel-card::after,
-html.dark .palette::after,
-html.dark .el-dialog::after {
+/* Every floating popup gets the same travelling ring along its own border. Suppressed when the
+   user turns the border marquee off (Settings ▸ 外观 → 边框流光; `.no-marquee` on <html>). */
+html.dark:not(.no-marquee) .qq-pop::after,
+html.dark:not(.no-marquee) .panel-card::after,
+html.dark:not(.no-marquee) .palette::after,
+html.dark:not(.no-marquee) .el-dialog::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -492,6 +499,22 @@ html.dark .el-dialog .el-dialog__title {
 }
 .dsh-tip-popper .el-popper__arrow {
   display: none;
+}
+/* Proximity: the default popper offset (~12px) leaves the bubble a little far from the cursor.
+   The popper engine stamps `data-popper-placement` on `.el-popper`, so a per-side negative margin
+   pulls the tip back toward the trigger on whichever edge it opens — tightening the gap everywhere
+   without re-editing every component that opts into `dsh-tip-popper`. */
+.dsh-tip-popper.el-popper[data-popper-placement^="top"] {
+  margin-bottom: -8px;
+}
+.dsh-tip-popper.el-popper[data-popper-placement^="bottom"] {
+  margin-top: -8px;
+}
+.dsh-tip-popper.el-popper[data-popper-placement^="left"] {
+  margin-right: -8px;
+}
+.dsh-tip-popper.el-popper[data-popper-placement^="right"] {
+  margin-left: -8px;
 }
 
 /* Table cell overflow tooltips (el-table `show-overflow-tooltip` with popperClass

@@ -14,6 +14,7 @@
 // with 更新通道 = beta follows. One push writes exactly one branch: a beta release never touches
 // what stable users get, and the two branches can hold different versions at the same time.
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -115,14 +116,19 @@ try {
   run('tar', ['-a', '-c', '-f', zipOut, '-C', resources, ...entries])
   console.log(`[publish] packed app.zip (${Math.round(statSync(zipOut).size / 1024 / 1024)} MB)`)
   writeFileSync(join(stage, 'version.txt'), `${pkg.version}\n${git(['rev-parse', 'HEAD'])}\n`)
+  // Content integrity: clients stream-verify app.zip against this hash before staging (a missing
+  // file on an old release falls back to the size-only check — see asar-updates.ts downloadAsar).
+  const zipHash = createHash('sha512').update(readFileSync(zipOut)).digest('hex')
+  writeFileSync(join(stage, 'sha512.txt'), `${zipHash}\n`)
+  console.log(`[publish] sha512(app.zip) = ${zipHash.slice(0, 16)}…`)
 
   rmSync(idx, { force: true })
   // GIT_QUARANTINE_PATH would make hooks reject the push; keep the env minimal and explicit.
   const env = { ...process.env, GIT_INDEX_FILE: idx, GIT_DIR: join(root, '.git'), GIT_WORK_TREE: stage }
   delete env.GIT_QUARANTINE_PATH
   const out = (args) => execFileSync('git', args, { cwd: stage, encoding: 'utf-8', env }).trim()
-  // app.zip + version.txt live under the git-ignored dist-release/ — force-add them.
-  out(['add', '-f', 'app.zip', 'version.txt'])
+  // app.zip + version.txt + sha512.txt live under the git-ignored dist-release/ — force-add them.
+  out(['add', '-f', 'app.zip', 'version.txt', 'sha512.txt'])
   const tree = out(['write-tree'])
   const baseTree = base ? git(['rev-parse', `${base}^{tree}`]) : null
   if (base && tree === baseTree) {

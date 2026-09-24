@@ -24,7 +24,20 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app } from 'electron'
 import { expandHome } from '../shell/store'
+import { getContainerEndpoint } from './container-endpoint'
 import type { McpServerSpec, McpToolInfo } from '../../shared/types'
+
+/* ---- #11: the container's own HTTP MCP server, folded into every downstream export ----
+   When the container MCP server is running, hosted agents should be able to drive the container
+   back through it — so its loopback URL + bearer token are appended to the same bridge files the
+   hub's stdio servers land in. Read through the container-endpoint leaf (no cycle); when the
+   server is off this returns null and every export below is byte-for-byte the pre-#11 output. */
+const CONTAINER_BRIDGE_ID = 'dsh-container'
+function containerHttpEntry(): { id: string; url: string; headers: Record<string, string> } | null {
+  const ep = getContainerEndpoint()
+  if (!ep) return null
+  return { id: CONTAINER_BRIDGE_ID, url: ep.url, headers: { authorization: `Bearer ${ep.bearerToken}` } }
+}
 
 /* ---- paths ---- */
 
@@ -55,13 +68,13 @@ export interface McpBridgeCatalog {
 }
 
 /**
- * Snapshot the hub into a standalone document. Only `autoStart` (and enabled) specs
- * travel to agents: 自动启动 is the user's opt-in that "this server is ready for agents
- * to use", so an enabled-but-not-auto-started row stays a panel-only entry and never
- * reaches the codex/openclaw/dsh configs or the exported files. A stopped server still
- * contributes its command line (agents spawn their own children). Tool lists ride only
- * on connected rows — a catalog that handed out a stopped server's tools would advertise
- * calls that cannot land.
+ * Snapshot the hub into a standalone document. Every `enabled` spec travels to agents —
+ * enabling a row is the user's statement that "this server is for agents to use", so an
+ * enabled-but-not-auto-started row is injected too. `autoStart` now only governs whether the
+ * hub proactively connects the row at boot (see mcp-hub.autoStartAll), not what agents see.
+ * A stopped/disconnected row still contributes its command line (agents spawn their own
+ * children). Tool lists ride only on connected rows — a catalog that handed out a stopped
+ * server's tools would advertise calls that cannot land.
  */
 export function buildCatalog(
   servers: Array<{ spec: McpServerSpec; status: string }>,
@@ -71,7 +84,7 @@ export function buildCatalog(
     version: 1,
     generatedAt: new Date().toISOString(),
     servers: servers
-      .filter((s) => s.spec.enabled !== false && s.spec.autoStart === true)
+      .filter((s) => s.spec.enabled !== false)
       .map((s) => ({
         ...s.spec,
         status: s.status,
@@ -87,11 +100,21 @@ export function buildCatalog(
   }
 }
 
-/** The `--mcp-config` JSON: hub id → command/args/env/cwd, nothing else. */
+/** The `--mcp-config` JSON: hub id → command/args/env/cwd; plus the container's own HTTP row. */
+export interface McpServersJsonEntry {
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  cwd?: string
+  /** Streamable HTTP target (only the appended container row uses this shape). */
+  url?: string
+  headers?: Record<string, string>
+}
+
 export function buildMcpServersJson(
   servers: McpBridgeCatalog['servers']
-): { mcpServers: Record<string, { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }> } {
-  const out: Record<string, { command: string; args?: string[]; env?: Record<string, string>; cwd?: string }> = {}
+): { mcpServers: Record<string, McpServersJsonEntry> } {
+  const out: Record<string, McpServersJsonEntry> = {}
   for (const s of servers) {
     out[s.id] = {
       command: s.command,
@@ -100,6 +123,8 @@ export function buildMcpServersJson(
       ...(s.cwd ? { cwd: s.cwd } : {})
     }
   }
+  const c = containerHttpEntry()
+  if (c) out[c.id] = { url: c.url, headers: c.headers }
   return { mcpServers: out }
 }
 
@@ -122,6 +147,15 @@ export function renderCodexBlock(servers: McpBridgeCatalog['servers']): string {
       lines.push(`[mcp_servers.${s.id}.env]`)
       for (const [k, v] of Object.entries(s.env)) lines.push(`${k} = ${JSON.stringify(v)}`)
     }
+    lines.push('')
+  }
+  // #11: the container's own Streamable-HTTP server, when it is running (codex reads `url`).
+  const c = containerHttpEntry()
+  if (c) {
+    lines.push(`[mcp_servers.${c.id}]`)
+    lines.push(`url = ${JSON.stringify(c.url)}`)
+    lines.push(`[mcp_servers.${c.id}.headers]`)
+    for (const [k, v] of Object.entries(c.headers)) lines.push(`${k} = ${JSON.stringify(v)}`)
     lines.push('')
   }
   lines.push(BRIDGE_END)
@@ -254,6 +288,9 @@ export function mergeOpenclawMcpConfig(
       enabled: true
     }
   }
+  // #11: the container's own HTTP server row (openclaw connects a `url` server directly).
+  const c = containerHttpEntry()
+  if (c) out[openclawServerKey(c.id)] = { url: c.url, headers: c.headers, enabled: true }
   return { ...cfg, mcp: { ...mcp, servers: out } }
 }
 
@@ -308,7 +345,7 @@ function dshServerName(id: string): string {
  * at the tree root). The document is a JSON array, which is also valid YAML.
  */
 export function renderDshMcpPatch(servers: McpBridgeCatalog['servers']): unknown[] {
-  const entries = servers.map((s) => ({
+  const entries: unknown[] = servers.map((s) => ({
     id: `dsh-mcp-${mcpNamespaceSlug(s.id)}`,
     name: '@deepseek-ai/dsh-mcp-client',
     config: {
@@ -320,6 +357,15 @@ export function renderDshMcpPatch(servers: McpBridgeCatalog['servers']): unknown
       ...(s.env && Object.keys(s.env).length ? { env: s.env } : {})
     }
   }))
+  // #11: an http-transport row for the container's own server, when it is running.
+  const c = containerHttpEntry()
+  if (c) {
+    entries.push({
+      id: `dsh-mcp-${mcpNamespaceSlug(c.id)}`,
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: { serverName: dshServerName(c.id), transport: 'http', url: c.url, headers: c.headers }
+    })
+  }
   return entries.length ? [{ insert: entries }] : []
 }
 

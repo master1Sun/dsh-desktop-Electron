@@ -61,12 +61,23 @@ const POP_MARGIN = 10
 /**
  * The bubble keeps a *fixed* height and an anchored top so it never re-flows as panel content
  * loads — a content-sized card that re-centres on every async render was the source of the jitter.
- * Both are recomputed only when the group changes or the window resizes: the top tracks the active
- * icon (centred on it, clamped inside the shell) and a caret offset points the bubble back at it.
+ * Both are recomputed only when the group changes or the window resizes: vertical alignment is by
+ * ROW (top-row groups pin the bubble to the top-left, bottom-row 帮助/设置 pin it to the bottom-left)
+ * and a caret offset still points the bubble back at whichever icon is active.
  */
 const popHeight = ref(600)
 const popTop = ref(0)
 const caretTop = ref(0)
+
+/**
+ * The 看板 page is palette-only (Ctrl+K) — it has no rail icon, so the rail-anchored bubble would
+ * fall back to a stale top with a caret pointing at nothing. Center it as a modal-like card and
+ * give it an explicit ✕ (there is no active icon to click again to dismiss it).
+ */
+const isBoard = computed(() => props.current === 'board')
+const wrapStyle = computed<Record<string, string> | null>(() =>
+  isBoard.value ? null : { top: `${popTop.value}px`, height: `${popHeight.value}px` }
+)
 
 function layoutPop(): void {
   const shell = shellRef.value
@@ -76,67 +87,109 @@ function layoutPop(): void {
   // (a content-driven height was what made the anchored card jitter as async content landed).
   popHeight.value = Math.max(240, Math.min(420, avail - 24))
   if (!props.current) return
-  const btn = shell.querySelector<HTMLElement>('.rail-btn.active, .foot-btn.active')
+  // Vertical alignment is by ROW, not by icon: a top-row group icon pins its bubble to the
+  // top-left, a bottom-row pinned icon (帮助/设置) pins theirs to the bottom-left. The caret still
+  // points back at whichever icon is active.
+  const footBtn = shell.querySelector<HTMLElement>('.foot-btn.active')
+  const btn = footBtn || shell.querySelector<HTMLElement>('.rail-btn.active')
   if (!btn) return
   const shellRect = shell.getBoundingClientRect()
   const btnRect = btn.getBoundingClientRect()
   const center = btnRect.top - shellRect.top + btnRect.height / 2
   const maxTop = Math.max(POP_MARGIN, shellRect.height - popHeight.value - POP_MARGIN)
-  const top = Math.min(Math.max(center - popHeight.value / 2, POP_MARGIN), maxTop)
-  popTop.value = top
-  caretTop.value = Math.min(Math.max(center - top, 16), popHeight.value - 16)
+  popTop.value = footBtn ? maxTop : POP_MARGIN
+  caretTop.value = Math.min(Math.max(center - popTop.value, 16), popHeight.value - 16)
 }
 
 watch(
   () => [props.current, groups.value.length],
   () => nextTick(layoutPop)
 )
+
+// Click-away dismiss: a bubble opened from the rail should close when the user clicks any blank
+// surface outside it, matching the classic floating panels (the rail popup used to linger until
+// its icon was clicked again). Rail buttons own their own toggle/switch and Element Plus teleports
+// its dropdowns / dialogs / message boxes into <body> *outside* the card, so both are excluded — a
+// click on them must never read as "clicked away". pointerdown (not click) so an in-card drag that
+// ends outside (an el-slider thumb) doesn't dismiss it.
+function onDocPointerDown(e: PointerEvent): void {
+  // The 看板 page is a deliberate, palette-only modal: a stray blank-area click must NOT dismiss
+  // it (there is no rail icon to re-click either). Only its ✕ / Esc close it.
+  if (isBoard.value) return
+  const el = e.target as HTMLElement | null
+  if (!el) return
+  if (el.closest('.qq-pop, .qq-rail')) return
+  if (el.closest('.el-popper, .el-overlay, .el-dialog, .el-message-box')) return
+  emit('open-panel', null)
+}
+
+watch(
+  () => props.current,
+  (cur) => {
+    if (cur) document.addEventListener('pointerdown', onDocPointerDown, true)
+    else document.removeEventListener('pointerdown', onDocPointerDown, true)
+  }
+)
 onMounted(() => {
   layoutPop()
   window.addEventListener('resize', layoutPop)
+  if (props.current) document.addEventListener('pointerdown', onDocPointerDown, true)
 })
-onBeforeUnmount(() => window.removeEventListener('resize', layoutPop))
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', layoutPop)
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
+})
 </script>
 
 <template>
   <div ref="shellRef" class="qq-shell">
     <nav class="qq-rail" aria-label="IM navigation">
       <div class="rail-scroll">
-        <button
+        <el-tooltip
           v-for="g in groups"
           :key="g.group"
-          class="rail-btn"
-          :class="{ active: current === g.group }"
-          type="button"
-          :title="groupLabel(g)"
-          :aria-label="groupLabel(g)"
-          :aria-pressed="current === g.group"
-          @click="onIconClick(g)"
+          :content="groupLabel(g)"
+          placement="right"
+          popper-class="dsh-tip-popper"
         >
-          <el-icon class="rail-ico"><component :is="g.icon" /></el-icon>
-          <span v-if="g.badgeFromOutdated && outdatedCount" class="rail-badge">{{
-            outdatedCount
-          }}</span>
-        </button>
+          <button
+            class="rail-btn"
+            :class="{ active: current === g.group }"
+            type="button"
+            :aria-label="groupLabel(g)"
+            :aria-pressed="current === g.group"
+            @click="onIconClick(g)"
+          >
+            <el-icon class="rail-ico"><component :is="g.icon" /></el-icon>
+            <span v-if="g.badgeFromOutdated && outdatedCount" class="rail-badge">{{
+              outdatedCount
+            }}</span>
+          </button>
+        </el-tooltip>
       </div>
 
       <div class="rail-foot">
-        <button
+        <el-tooltip
           v-for="g in pinned"
           :key="g.group"
-          class="foot-btn"
-          :class="{ active: current === g.group }"
-          type="button"
-          :title="t(g.labelKey)"
-          :aria-label="t(g.labelKey)"
-          :aria-pressed="current === g.group"
-          @click="onIconClick(g)"
+          :content="t(g.labelKey)"
+          placement="right"
+          popper-class="dsh-tip-popper"
         >
-          <el-icon><component :is="g.icon" /></el-icon>
-          <span v-if="g.badgeFromOutdated && outdatedCount" class="foot-badge">{{
-            outdatedCount
-          }}</span>
-        </button>
+          <button
+            class="foot-btn"
+            :class="{ active: current === g.group }"
+            type="button"
+            :aria-label="t(g.labelKey)"
+            :aria-pressed="current === g.group"
+            @click="onIconClick(g)"
+          >
+            <el-icon><component :is="g.icon" /></el-icon>
+            <span v-if="g.badgeFromOutdated && outdatedCount" class="foot-badge">{{
+              outdatedCount
+            }}</span>
+          </button>
+        </el-tooltip>
       </div>
     </nav>
 
@@ -144,10 +197,28 @@ onBeforeUnmount(() => window.removeEventListener('resize', layoutPop))
     <div
       v-if="current"
       class="qq-pop-wrap"
-      :style="{ top: popTop + 'px', height: popHeight + 'px' }"
+      :class="{ 'is-centered': isBoard }"
+      :style="wrapStyle"
     >
       <section class="qq-pop glass" role="dialog" aria-modal="false">
-        <span class="qq-caret" :style="{ top: caretTop + 'px' }" aria-hidden="true" />
+        <span v-if="!isBoard" class="qq-caret" :style="{ top: caretTop + 'px' }" aria-hidden="true" />
+        <header v-if="isBoard" class="qq-pop-head">
+          <span class="qq-pop-title">{{ t('menu.board') }}</span>
+          <el-tooltip
+            :content="t('menu.closeEsc')"
+            placement="bottom"
+            popper-class="dsh-tip-popper"
+          >
+            <button
+              type="button"
+              class="qq-pop-close"
+              :aria-label="t('menu.closeEsc')"
+              @click="emit('open-panel', null)"
+            >
+              ✕
+            </button>
+          </el-tooltip>
+        </header>
         <div class="qq-pop-body">
           <MenuPanelContent
             :panel="current"
@@ -452,6 +523,72 @@ onBeforeUnmount(() => window.removeEventListener('resize', layoutPop))
   to {
     opacity: 1;
     transform: translateX(0);
+  }
+}
+
+/* ---- centered 看板 card, positioned like the classic floating panel (top-center) ---- */
+/* The classic card drops in at `top:100%` of the menu bar with `margin:4px auto` — i.e. horizontally
+   centred across the window, hugging the top under the bar. `.qq-shell` already starts below the
+   title bar, so `top:4px` there reproduces that offset; but the shell is only the 48px rail wide,
+   so we span `width:100vw` (its left edge is the window's) and top-align + centre to mirror classic
+   rather than floating the card in the vertical middle. */
+.qq-pop-wrap.is-centered {
+  position: absolute;
+  top: 4px;
+  bottom: 8px;
+  left: 0;
+  width: 100vw;
+  align-items: flex-start;
+  justify-content: center;
+}
+.qq-pop-wrap.is-centered .qq-pop {
+  margin-left: 0;
+  height: auto;
+  max-height: 100%;
+  width: min(860px, calc(100vw - 24px));
+  animation: qq-pop-center-in 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+.qq-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+}
+.qq-pop-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.qq-pop-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.qq-pop-close:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+@keyframes qq-pop-center-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 </style>

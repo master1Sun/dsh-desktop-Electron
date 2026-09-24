@@ -4,6 +4,7 @@ import { createPinia } from 'pinia'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 import App from '../../src/renderer/src/App.vue'
 import { useSettingsStore } from '../../src/renderer/src/stores/settings'
+import { localeDictReady } from '../../src/renderer/src/i18n'
 import '../../src/renderer/src/assets/main.css'
 
 /** Minimal stand-in for the preload bridge so the real stores/App can boot in jsdom. */
@@ -15,6 +16,9 @@ const persistedSettings: Record<string, unknown> = {
   lastExternalUrls: [],
   externalSites: [],
   theme: 'auto',
+  // This suite exercises the classic top menu bar (.group-trigger / drop list / centered panel),
+  // which only renders in classic layout — the shell now defaults to the IM/效率 rail (qq-shell.test).
+  layoutMode: 'classic',
   dshHome: '',
   openclawHome: ''
 }
@@ -108,6 +112,7 @@ function makeContainerMock(): Record<string, unknown> {
 }
 
 let pinia: ReturnType<typeof createPinia>
+let currentApp: ReturnType<typeof createApp> | null = null
 
 async function mountApp(): Promise<HTMLElement> {
   const host = document.createElement('div')
@@ -117,6 +122,7 @@ async function mountApp(): Promise<HTMLElement> {
   const app = createApp(App)
   app.use(pinia).use(ElementPlus)
   app.mount(host)
+  currentApp = app
   await nextTick()
   await new Promise((r) => setTimeout(r, 60))
   await nextTick()
@@ -131,6 +137,11 @@ const click = async (el: Element | null): Promise<void> => {
 }
 
 beforeEach(() => {
+  // Tear down the previous app before each test: the terminal drawer mounts el-dropdowns whose
+  // teleported poppers / document-level listeners survive a bare `body.innerHTML = ''`. Unmounting
+  // releases them so no leftover surface can interfere with the next test's menu clicks.
+  currentApp?.unmount()
+  currentApp = null
   document.documentElement.className = ''
   document.body.innerHTML = ''
   persistedSettings.theme = 'auto'
@@ -193,9 +204,10 @@ describe('shell chrome theme + layout', () => {
     await new Promise((r) => setTimeout(r, 60))
     expect(document.querySelector('.panel-card')).not.toBeNull()
     expect(document.querySelector('.installed')).not.toBeNull()
-    // Row actions are glyphs only — the label lives in the tooltip, so English can't overflow the
-    // fixed-width action column. Locate the entry point by that tooltip instead of by text.
-    const cfgBtn = document.querySelector('.installed .el-button[title="配置"]')
+    // Row actions are glyphs only — the label lives in the themed tooltip + aria-label, so
+    // English can't overflow the fixed-width action column. Locate the entry point by that
+    // accessible name instead of by visible text.
+    const cfgBtn = document.querySelector('.installed .el-button[aria-label="配置"]')
     expect(cfgBtn).not.toBeNull()
     await click(cfgBtn ?? null)
     await new Promise((r) => setTimeout(r, 80))
@@ -265,8 +277,9 @@ describe('shell chrome theme + layout', () => {
     expect(zhLabels.some((x) => x?.includes('视图'))).toBe(true)
     const store = useSettingsStore(pinia)
     await store.patch({ locale: 'en' })
+    await nextTick() // let the settings watch call setLocale (arms the lazy import)
+    await localeDictReady() // the en dictionary is lazy-loaded on first switch
     await nextTick()
-    await new Promise((r) => setTimeout(r, 30))
     const enLabels = [...document.querySelectorAll('.menubar .group-trigger')].map((b) =>
       b.textContent?.trim()
     )

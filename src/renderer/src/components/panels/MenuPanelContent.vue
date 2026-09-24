@@ -7,6 +7,7 @@ import DshManager from '@renderer/components/panels/DshManager.vue'
 import OpenclawManager from '@renderer/components/panels/OpenclawManager.vue'
 import McpManager from '@renderer/components/panels/McpManager.vue'
 import WorkspaceContext from '@renderer/components/panels/WorkspaceContext.vue'
+import TaskBoard from '@renderer/components/panels/TaskBoard.vue'
 import ExternalSitesManager from '@renderer/components/panels/ExternalSitesManager.vue'
 import SettingsPanel from '@renderer/components/panels/SettingsPanel.vue'
 import AppManager from '@renderer/components/panels/AppManager.vue'
@@ -16,6 +17,7 @@ import { usePagesStore } from '@renderer/stores/pages'
 import { useUpdatesStore } from '@renderer/stores/updates'
 import { useTasksStore } from '@renderer/stores/tasks'
 import { useSettingsStore } from '@renderer/stores/settings'
+import { useStaleCache } from '@renderer/composables/useStaleCache'
 import type {
   BuiltinKind,
   ContainerEvent,
@@ -202,7 +204,7 @@ async function resetBuiltinRow(row: UpdateCheckResult): Promise<void> {
 /* ---- bundled-Node runtime upgrade (关于与更新) ----
    Dropdown over the official dist index (main-process fetched); installing swaps
    in a userData override, so running pages keep the old exe until they restart. */
-const nodeVersions = ref<NodeVersionInfo[]>([])
+const nodeVersions = useStaleCache<NodeVersionInfo[]>('panel.nodeVersions', [])
 const nodeSel = ref('')
 /** Reveal releases outside the hosted runtimes' engines range (tagged `usable:false`), so a
     user can deliberately install an off-support Node; off by default to keep the common path safe. */
@@ -571,7 +573,7 @@ const progressIndeterminate = (p: UpdateProgress): boolean =>
 /* ---- #17 container OTA version history ----
    Small read-only table distilled from update-meta.json: what's running now, the
    staged (pending-restart) asar, the one-level rollback backup, and the last rollback. */
-const history = ref<UpdateHistory | null>(null)
+const history = useStaleCache<UpdateHistory | null>('panel.updateHistory', null)
 async function loadHistory(): Promise<void> {
   try {
     const res = (await window.container.getUpdateHistory?.()) as IpcResult | null
@@ -596,7 +598,7 @@ const historyRows = computed(() => {
    Runs the main-process probe (loopback / GitHub / npm / mirror / proxy) and lists
    each hop so the user sees exactly where the chain breaks. */
 const netProbing = ref(false)
-const netResult = ref<NetProbeResult | null>(null)
+const netResult = useStaleCache<NetProbeResult | null>('panel.netProbe', null)
 const netStepLabel = (id: string): string =>
   ({
     gateway: t('panel.netStepGateway'),
@@ -621,8 +623,10 @@ async function runNetProbe(): Promise<void> {
 
 /* ---- Help 关于与运行: system / runtime overview ----
    A one-shot snapshot pulled when the help panel mounts and re-fetched by its 刷新 button. */
-const sysInfo = ref<SystemInfo | null>(null)
+const sysInfo = useStaleCache<SystemInfo | null>('panel.sysInfo', null)
 const sysLoading = ref(false)
+/* Copyright footer year — computed once so the About ▸ 版权 line never shows a stale year. */
+const copyrightYear = new Date().getFullYear()
 async function loadSystemInfo(): Promise<void> {
   if (sysLoading.value) return
   sysLoading.value = true
@@ -663,12 +667,18 @@ function fmtDuration(sec: number): string {
 
 /* ---- Help 网络与工具: live network interfaces + throughput ----
    Polled every 2s while the diagnose tab is open; the byte counters are cumulative since
-   boot, so the rate is the delta between two samples over the elapsed wall-clock. */
-const netStats = ref<NetworkStats | null>(null)
-const netRxRate = ref(0)
-const netTxRate = ref(0)
+   boot, so the rate is the delta between two samples over the elapsed wall-clock. The interface
+   list and last rate persist across open/close, so re-opening paints the previous reading at once
+   instead of an empty block until the first PowerShell sample returns. */
+const netStats = useStaleCache<NetworkStats | null>('panel.netStats', null)
+const netRxRate = useStaleCache<number>('panel.netRxRate', 0)
+const netTxRate = useStaleCache<number>('panel.netTxRate', 0)
 let netTimer: number | undefined
 let netSampling = false
+/** Baseline for the rate delta. Reset whenever the poll restarts so the first live tick re-baselines
+ *  against a fresh sample instead of diffing an hours-old cached counter (which would smear the
+ *  average over the whole gap); until then the cached rate stays on screen. */
+let netPrev: NetworkStats | null = null
 async function sampleNet(): Promise<void> {
   if (netSampling) return
   netSampling = true
@@ -676,18 +686,17 @@ async function sampleNet(): Promise<void> {
     const res = (await window.container.getNetworkStats?.()) as IpcResult | null
     if (!res?.ok) return
     const cur = res.data as NetworkStats
-    const prev = netStats.value
+    const prev = netPrev
+    netPrev = cur
+    netStats.value = cur
     if (prev?.counters && cur.counters) {
       const dt = (cur.sampleAt - prev.sampleAt) / 1000
       if (dt > 0) {
         netRxRate.value = Math.max(0, (cur.counters.rxBytes - prev.counters.rxBytes) / dt)
         netTxRate.value = Math.max(0, (cur.counters.txBytes - prev.counters.txBytes) / dt)
       }
-    } else {
-      netRxRate.value = 0
-      netTxRate.value = 0
     }
-    netStats.value = cur
+    // No prev yet (first tick after (re)start): keep the cached rate showing; the next tick sets it.
   } catch {
     /* a failed tick is skipped; the next one retries */
   } finally {
@@ -702,6 +711,7 @@ function stopNetPoll(): void {
 }
 function startNetPoll(): void {
   stopNetPoll()
+  netPrev = null
   void sampleNet()
   netTimer = window.setInterval(sampleNet, 2000)
 }
@@ -778,6 +788,7 @@ async function doImportSnapshot(): Promise<void> {
     <SettingsPanel
       v-if="props.panel === 'settings'"
       :tab-position="tabPosition"
+      :initial-tab="props.initialTab"
       @apply-theme="emit('apply-theme', $event)"
       @preview-site="emit('preview-site', $event)"
     />
@@ -811,6 +822,11 @@ async function doImportSnapshot(): Promise<void> {
 
     <section v-else-if="props.panel === 'workspace'" class="sec">
       <WorkspaceContext />
+    </section>
+
+    <!-- 看板: palette-only page; TaskBoard owns the board / dependency-topology / call-feed tabs. -->
+    <section v-else-if="props.panel === 'board'" class="sec">
+      <TaskBoard :tab-position="tabPosition" />
     </section>
 
     <!-- Help: 关于 + 更新 + 诊断 + 日志 merged into one panel, split by a vertical tab rail. -->
@@ -859,16 +875,21 @@ async function doImportSnapshot(): Promise<void> {
               >
                 {{ props.runtime.ok ? t('panel.nodeUpdateBtn') : t('panel.installBtn') }}
               </el-button>
-              <el-button
+              <el-tooltip
                 v-if="props.runtime.override"
-                size="small"
-                text
-                :title="t('panel.nodeRestoreTip')"
-                :disabled="updates.nodeBusy"
-                @click="doNodeRestore"
+                :content="t('panel.nodeRestoreTip')"
+                placement="top"
+                popper-class="dsh-tip-popper"
               >
-                {{ t('panel.nodeRestoreBtn') }}
-              </el-button>
+                <el-button
+                  size="small"
+                  text
+                  :disabled="updates.nodeBusy"
+                  @click="doNodeRestore"
+                >
+                  {{ t('panel.nodeRestoreBtn') }}
+                </el-button>
+              </el-tooltip>
               <label class="node-incompat-toggle" :title="t('panel.nodeShowIncompatibleTip')">
                 <el-switch
                   v-model="showIncompatible"
@@ -984,6 +1005,13 @@ async function doImportSnapshot(): Promise<void> {
               <span>{{ t('panel.sysInstallDir') }}</span>
               <code>{{ sysInfo.installDir }}</code>
             </div>
+          </div>
+
+          <!-- Copyright footer sits outside the v-if sys-grid so it shows even before the
+               system snapshot has loaded. -->
+          <div class="line" />
+          <div class="about-copyright">
+            {{ t('panel.copyright', { year: copyrightYear }) }}
           </div>
         </el-tab-pane>
 
@@ -1714,6 +1742,15 @@ async function doImportSnapshot(): Promise<void> {
 .sys-row.sys-wide code {
   white-space: normal;
   word-break: break-all;
+}
+
+/* About ▸ copyright footer: a quiet, centered legal line under the system grid. */
+.about-copyright {
+  padding: 2px 0 6px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: 0.2px;
 }
 
 /* 网络与工具 — live throughput + interface list. */

@@ -76,6 +76,7 @@ const zh: Dict = {
   'download.doneBody': '{name} 已保存到 {dir}',
 
   'ipc.portRange': '端口需为 1-65535 的整数',
+  'ipc.depsCycle': '依赖存在循环：{chain}',
   'ipc.notTerminal': '{id} 不是终端类项目',
   'ipc.unknownTarget': '未知的目标: {target}',
   'ipc.containerRoot': '容器根目录',
@@ -127,6 +128,7 @@ const zh: Dict = {
   'notify.updateReadyBody': '桌面控制台 v{version} 已下载完成，重启后生效',
   'log.mainLabel': '主进程日志',
   'update.noRollback': '当前没有可回退的上一版本备份（仅在完成过一次在线更新后可用）',
+  'update.hashMismatch': '更新包内容校验失败（SHA-512 不匹配），已丢弃本次下载，请重试',
   'update.rollbackFailed': '回退调度失败，请查看日志',
   'update.relaunchDev':
     '当前处于开发模式（npm run dev），自我重启会连带关闭开发服务器并留下黑屏窗口，已取消本次重启。主进程改动会由 electron-vite 自动重建并重启；如需完全重启，请手动停止并重新运行 npm run dev',
@@ -241,7 +243,7 @@ const zh: Dict = {
   'upd.openclawUpToDate': 'OpenClaw 已是最新（{after}）',
   'upd.mcpName': 'MCP 内置组件',
   'upd.mcpMissingCount': '{n} 个待下载',
-  'upd.mcpOutdatedPrefix': '可更新',
+  'upd.mcpUpdatableCount': '{n} 个可更新',
   'upd.mcpRootMissing': '未确定 MCP 组件目录',
   'upd.mcpReady': 'MCP 内置组件已就绪',
   'upd.mcpAlreadyReady': 'MCP 内置组件已是最新（{after}）',
@@ -324,6 +326,7 @@ const en: Dict = {
   'download.doneBody': '{name} saved to {dir}',
 
   'ipc.portRange': 'Port must be an integer from 1 to 65535',
+  'ipc.depsCycle': 'Dependency cycle: {chain}',
   'ipc.notTerminal': '{id} is not a terminal project',
   'ipc.unknownTarget': 'Unknown target: {target}',
   'ipc.containerRoot': 'Container root',
@@ -383,6 +386,8 @@ const en: Dict = {
   'log.mainLabel': 'Main process log',
   'update.noRollback':
     'No previous-version backup is available to roll back to (only offered after one OTA update has completed)',
+  'update.hashMismatch':
+    'The update package failed its SHA-512 content check; the download was discarded — please retry',
   'update.rollbackFailed': 'Failed to schedule the rollback — check the logs',
   'update.relaunchDev':
     'Running in dev mode (npm run dev): a self-relaunch would tear down the renderer dev server and leave a black window, so this relaunch was cancelled. electron-vite already rebuilds and restarts the app for main-process edits — to fully restart, stop and re-run npm run dev manually',
@@ -504,7 +509,7 @@ const en: Dict = {
   'upd.openclawUpToDate': 'OpenClaw is up to date ({after})',
   'upd.mcpName': 'MCP built-in components',
   'upd.mcpMissingCount': '{n} to download',
-  'upd.mcpOutdatedPrefix': 'update available',
+  'upd.mcpUpdatableCount': '{n} updatable',
   'upd.mcpRootMissing': 'MCP components directory not resolved',
   'upd.mcpReady': 'MCP built-in components are ready',
   'upd.mcpAlreadyReady': 'MCP built-in components are up to date ({after})',

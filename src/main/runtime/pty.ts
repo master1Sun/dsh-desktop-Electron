@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import * as os from 'node:os'
 import * as pty from 'node-pty'
 import { getNodeExePath } from './node-runtime'
 import { pnpmBinDirs } from './dsh'
 import { m } from '../shell/i18n'
+import type { PtyShellInfo } from '../../shared/types'
 
 export interface PtySessionInfo {
   id: string
@@ -118,10 +119,86 @@ async function terminalEnv(): Promise<NodeJS.ProcessEnv> {
   return env
 }
 
-function defaultShell(): { shell: string; args: string[] } {
-  // Windows PowerShell always ships and reads the startup PATH cleanly via ConPTY.
-  if (process.platform === 'win32') return { shell: 'powershell.exe', args: ['-NoLogo'] }
-  return { shell: process.env.SHELL || '/bin/bash', args: ['-l'] }
+/* ---- shell registry: what the picker offers + how to launch each ----
+   Detection is cheap (a handful of existsSync/PATH probes) and memoized: installed shells don't
+   change while the app runs. Probing is best-effort — a shell we can't find simply isn't offered,
+   so a missing Git Bash / WSL never surfaces as a broken terminal entry. */
+let shellCache: PtyShellInfo[] | null = null
+
+function detectShells(): PtyShellInfo[] {
+  if (shellCache) return shellCache
+  const out: PtyShellInfo[] = []
+  if (process.platform === 'win32') {
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows'
+    // PowerShell 5.1 and cmd.exe always ship with Windows.
+    out.push({ id: 'powershell', label: 'PowerShell', path: 'powershell.exe', args: ['-NoLogo'] })
+    out.push({ id: 'cmd', label: 'Command Prompt', path: 'cmd.exe', args: [] })
+    const pwsh = whichOnPath('pwsh.exe', process.env)
+    if (pwsh) out.push({ id: 'pwsh', label: 'PowerShell 7', path: pwsh, args: ['-NoLogo'] })
+    // Git Bash: probe the usual install roots, then fall back to deriving from git.exe's location
+    // (<Git>\cmd\git.exe -> <Git>\bin\bash.exe).
+    const bases = [
+      process.env['ProgramFiles'],
+      process.env['ProgramFiles(x86)'],
+      process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs') : ''
+    ].filter(Boolean) as string[]
+    let bash = ''
+    for (const base of bases) {
+      const c = join(base, 'Git', 'bin', 'bash.exe')
+      if (existsSync(c)) {
+        bash = c
+        break
+      }
+    }
+    if (!bash) {
+      const git = whichOnPath('git.exe', process.env)
+      if (git) {
+        const c = join(dirname(dirname(dirname(git))), 'bin', 'bash.exe')
+        if (existsSync(c)) bash = c
+      }
+    }
+    if (bash) out.push({ id: 'gitbash', label: 'Git Bash', path: bash, args: ['-l'] })
+    const wsl = join(sysRoot, 'System32', 'wsl.exe')
+    if (existsSync(wsl)) out.push({ id: 'wsl', label: 'Ubuntu (WSL)', path: wsl, args: [] })
+  } else {
+    const seen = new Set<string>()
+    const add = (id: string, label: string, path: string | undefined): void => {
+      if (path && existsSync(path) && !seen.has(path)) {
+        seen.add(path)
+        out.push({ id, label, path, args: ['-l'] })
+      }
+    }
+    const shell = process.env.SHELL
+    add('login', shell ? basename(shell) : 'Shell', shell)
+    add('bash', 'bash', '/bin/bash')
+    add('zsh', 'zsh', '/bin/zsh')
+  }
+  shellCache = out
+  return out
+}
+
+/** The id used when the renderer doesn't pick one: PowerShell on Windows, the login shell else. */
+function defaultShellId(): string {
+  if (process.platform === 'win32') return 'powershell'
+  return detectShells().some((s) => s.id === 'login') ? 'login' : 'bash'
+}
+
+/** Available shells for the picker, the default one first. */
+export function listShells(): PtyShellInfo[] {
+  const def = defaultShellId()
+  return [...detectShells()].sort((a, b) => (a.id === def ? -1 : b.id === def ? 1 : 0))
+}
+
+/** Resolve a picker id (or the default) to a launch command; an unknown id falls back to default. */
+function resolveShell(id?: string): { shell: string; args: string[] } {
+  const list = detectShells()
+  const hit =
+    (id && list.find((s) => s.id === id)) ||
+    list.find((s) => s.id === defaultShellId()) ||
+    list[0]
+  return hit
+    ? { shell: hit.path, args: hit.args }
+    : { shell: 'powershell.exe', args: ['-NoLogo'] }
 }
 
 let counter = 0
@@ -138,12 +215,18 @@ const WINPTY_BACKEND: { useConpty?: false } =
 /** Registry of embedded shells shared by every window. */
 export class PtyManager {
   /** Start a shell rooted at `cwd`, titled `title`; returns its session descriptor.
-      With `run`, the session executes that command line instead of an interactive shell. */
-  async start(cwd: string, title: string, run?: RunCommandSpec): Promise<PtySessionInfo> {
+      With `run`, the session executes that command line instead of an interactive shell; else it
+      launches the picker's `shell` id (or the default when unset). */
+  async start(
+    cwd: string,
+    title: string,
+    opts?: { run?: RunCommandSpec; shell?: string }
+  ): Promise<PtySessionInfo> {
     const id = `pty-${Date.now().toString(36)}-${++counter}`
     let shell: string
     let args: string[]
     let env = await terminalEnv()
+    const run = opts?.run
     if (run?.command.trim()) {
       const [cmd, ...rest] = expandTilde(run.command.trim()).split(/\s+/)
       env = { ...env, ...(run.env || {}) }
@@ -156,7 +239,7 @@ export class PtyManager {
         throw new Error(m('pty.commandNotFound', { cmd }))
       }
     } else {
-      ;({ shell, args } = defaultShell())
+      ;({ shell, args } = resolveShell(opts?.shell))
     }
     const session = new PtySession(id, title, cwd, shell, args, env)
     session.on('exit', () => sessions.delete(id))

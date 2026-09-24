@@ -5,7 +5,7 @@ import { Refresh, Plus, Edit, Delete, Link, CircleClose, ArrowRight } from '@ele
 import EmptyState from '@renderer/components/base/EmptyState.vue'
 import { t } from '@renderer/i18n'
 import { useTasksStore } from '@renderer/stores/tasks'
-import { mcpToolKey, type McpBridgeInfo, type McpPkgStatus, type McpServerSpec, type McpServerState, type McpToolInfo } from '@shared/types'
+import { mcpToolKey, type ContainerMcpInfo, type McpBridgeInfo, type McpPkgStatus, type McpServerSpec, type McpServerState, type McpToolInfo } from '@shared/types'
 import { copyToClipboard } from '@renderer/askAi'
 
 /**
@@ -29,6 +29,25 @@ const tools = ref<McpToolInfo[]>([])
 const toolsLoading = ref(false)
 // Where the main process mirrors the registry for hosted agents (mcp-bridge exports).
 const bridge = ref<McpBridgeInfo | null>(null)
+// #11: the container's OWN MCP server (reverse bridge) — live connection info for external agents.
+const containerMcp = ref<ContainerMcpInfo | null>(null)
+
+async function loadContainerMcp(): Promise<void> {
+  try {
+    const r = await window.container.getContainerMcpInfo?.()
+    if (r?.ok) containerMcp.value = r.data ?? null
+  } catch {
+    /* a missing info read just hides the card */
+  }
+}
+
+async function copyContainerMcp(kind: 'url' | 'token'): Promise<void> {
+  const value = kind === 'url' ? containerMcp.value?.url : containerMcp.value?.tokenFile
+  if (!value) return
+  const err = await copyToClipboard(value)
+  if (err) ElMessage.error(t('mcpMgr.msgCopyFail'))
+  else ElMessage.success(t('mcpMgr.msgCopied'))
+}
 
 /* ---- curated package provisioning (userData/mcp, downloaded on demand) ----
    A curated row (locked `filesystem` or a seeded default) that still runs its stock
@@ -332,6 +351,7 @@ let unsubscribe: (() => void) | null = null
 onMounted(async () => {
   await load()
   void loadPkgStatus()
+  void loadContainerMcp()
   window.container
     .mcpBridgeInfo?.()
     .then((r: McpResult<McpBridgeInfo>) => {
@@ -342,7 +362,9 @@ onMounted(async () => {
     servers.value = states as McpServerState[]
   })
 })
-onBeforeUnmount(() => unsubscribe?.())
+onBeforeUnmount(() => {
+  unsubscribe?.()
+})
 </script>
 
 <template>
@@ -371,6 +393,29 @@ onBeforeUnmount(() => unsubscribe?.())
       </el-button>
     </div>
 
+    <!-- #11: the container's own reverse MCP server — show how an external agent reaches it. -->
+    <div v-if="containerMcp?.running" class="container-mcp-card">
+      <div class="cm-head">
+        <span class="cm-title">{{ t('mcpMgr.containerMcpTitle') }}</span>
+        <el-tag size="small" type="success" effect="dark" round>{{ t('mcpMgr.containerMcpRunning') }}</el-tag>
+      </div>
+      <div class="cm-row">
+        <span class="cm-label">{{ t('mcpMgr.containerMcpUrl') }}</span>
+        <code>{{ containerMcp.url }}</code>
+        <el-button size="small" text type="primary" @click="copyContainerMcp('url')">
+          {{ t('mcpMgr.copyPath') }}
+        </el-button>
+      </div>
+      <div class="cm-row">
+        <span class="cm-label">{{ t('mcpMgr.containerMcpToken') }}</span>
+        <code class="cm-token">{{ containerMcp.tokenFile }}</code>
+        <el-button size="small" text type="primary" @click="copyContainerMcp('token')">
+          {{ t('mcpMgr.copyPath') }}
+        </el-button>
+      </div>
+      <div class="cm-hint">{{ t('mcpMgr.containerMcpHint') }}</div>
+    </div>
+
     <EmptyState
       v-if="!loading && !servers.length"
       :description="t('mcpMgr.empty')"
@@ -391,24 +436,43 @@ onBeforeUnmount(() => unsubscribe?.())
           <el-tag v-if="s.spec.enabled === false" size="small" type="info" round>{{ t('mcpMgr.disabled') }}</el-tag>
           <span v-if="s.toolCount" class="tool-count">{{ t('mcpMgr.toolsN', { n: s.toolCount }) }}</span>
           <span class="spacer" />
-          <el-button
-            size="small"
-            text
-            :loading="busy[s.spec.id]"
-            :title="s.status === 'connected' ? t('mcpMgr.disconnect') : t('mcpMgr.connect')"
-            :disabled="s.spec.enabled === false"
-            @click.stop="toggleConnect(s)"
+          <el-tooltip
+            :content="s.status === 'connected' ? t('mcpMgr.disconnect') : t('mcpMgr.connect')"
+            placement="top"
+            popper-class="dsh-tip-popper"
           >
-            <el-icon><component :is="s.status === 'connected' ? CircleClose : Link" /></el-icon>
-          </el-button>
+            <el-button
+              size="small"
+              text
+              :loading="busy[s.spec.id]"
+              :disabled="s.spec.enabled === false"
+              @click.stop="toggleConnect(s)"
+            >
+              <el-icon><component :is="s.status === 'connected' ? CircleClose : Link" /></el-icon>
+            </el-button>
+          </el-tooltip>
           <!-- Built-in rows are code-owned: no edit/delete affordance at all (the main
                process guards both paths too), leaving connect + tool browsing. -->
-          <el-button v-if="!s.spec.builtin" size="small" text :title="t('mcpMgr.edit')" @click.stop="openEdit(s)">
-            <el-icon><Edit /></el-icon>
-          </el-button>
-          <el-button v-if="!s.spec.builtin" size="small" text :title="t('common.delete')" @click.stop="removeServer(s)">
-            <el-icon><Delete /></el-icon>
-          </el-button>
+          <el-tooltip
+            v-if="!s.spec.builtin"
+            :content="t('mcpMgr.edit')"
+            placement="top"
+            popper-class="dsh-tip-popper"
+          >
+            <el-button size="small" text @click.stop="openEdit(s)">
+              <el-icon><Edit /></el-icon>
+            </el-button>
+          </el-tooltip>
+          <el-tooltip
+            v-if="!s.spec.builtin"
+            :content="t('common.delete')"
+            placement="top"
+            popper-class="dsh-tip-popper"
+          >
+            <el-button size="small" text @click.stop="removeServer(s)">
+              <el-icon><Delete /></el-icon>
+            </el-button>
+          </el-tooltip>
           <el-icon class="caret" :class="{ open: expanded === s.spec.id }"><ArrowRight /></el-icon>
         </div>
         <div v-if="s.lastError" class="row-error">{{ s.lastError }}</div>
@@ -555,6 +619,46 @@ onBeforeUnmount(() => unsubscribe?.())
 .bridge-hint code {
   font-size: 11px;
   word-break: break-all;
+}
+
+.container-mcp-card {
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.container-mcp-card .cm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.container-mcp-card .cm-title {
+  font-weight: 600;
+}
+.container-mcp-card .cm-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.container-mcp-card .cm-label {
+  min-width: 92px;
+  opacity: 0.75;
+}
+.container-mcp-card code {
+  font-size: 11px;
+  word-break: break-all;
+}
+.container-mcp-card .cm-token {
+  opacity: 0.85;
+}
+.container-mcp-card .cm-hint {
+  opacity: 0.7;
+  line-height: 1.5;
 }
 
 .builtin-tag {

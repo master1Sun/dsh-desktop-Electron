@@ -268,3 +268,32 @@ describe('stale dsh writer-lock reclaim', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe('dsh plugin semver comparison (isNewerVersion)', () => {
+  const { isNewerVersion } = dsh
+
+  it('detects a same-patch prerelease bump (the git-tag regression)', () => {
+    // The coarse major/minor/patch test read every one of these as equal → "no update".
+    expect(isNewerVersion('0.1.6-alpha.2', '0.1.6-alpha.3')).toBe(true)
+    expect(isNewerVersion('0.1.6-alpha.3', '0.1.6-alpha.2')).toBe(false)
+    expect(isNewerVersion('0.1.6-alpha.2', '0.1.6')).toBe(true) // alpha → release is an upgrade
+    expect(isNewerVersion('0.1.6', '0.1.6-alpha.2')).toBe(false) // release → alpha is a downgrade
+    expect(isNewerVersion('1.0.0-alpha', '1.0.0-alpha.1')).toBe(true) // fewer fields sort lower
+    expect(isNewerVersion('1.0.0-alpha.10', '1.0.0-alpha.2')).toBe(false) // numeric, not lexical
+    expect(isNewerVersion('1.0.0-alpha.2', '1.0.0-beta.1')).toBe(true) // alphanumeric ordering
+  })
+
+  it('keeps the coarse ordering for plain versions', () => {
+    expect(isNewerVersion('1.2.3', '1.2.4')).toBe(true)
+    expect(isNewerVersion('1.2.3', '1.3.0')).toBe(true)
+    expect(isNewerVersion('1.2.3', '2.0.0')).toBe(true)
+    expect(isNewerVersion('1.2.3', '1.2.3')).toBe(false)
+    expect(isNewerVersion('^1.2.3', '1.2.4')).toBe(true) // leading range operator stripped
+    expect(isNewerVersion('v1.2.3', 'v1.2.4')).toBe(true) // leading v stripped
+  })
+
+  it('does not flag non-semver refs (branch / sha) as comparable', () => {
+    expect(isNewerVersion('main', '0.1.6')).toBe(false)
+    expect(isNewerVersion('a1b2c3d', '0.1.6')).toBe(false)
+  })
+})

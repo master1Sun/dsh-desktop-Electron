@@ -46,6 +46,7 @@ vi.mock('electron-store', () => ({
 import { updateSettings } from '../src/main/shell/store'
 import {
   normalizeContext,
+  normalizeTasks,
   workspaceDir,
   workspaceFile,
   workspaceEnvVars,
@@ -56,6 +57,7 @@ import {
   isSharedWorkspaceEnabled,
   workspaceInfo
 } from '../src/main/runtime/workspace'
+import type { WorkspaceTask } from '../src/shared/types'
 
 /**
  * Priority ① — the shared workspace / context layer. The container owns one directory + one
@@ -98,6 +100,27 @@ describe('normalizeContext', () => {
   })
 })
 
+describe('normalizeTasks', () => {
+  it('drops garbage rows and blank titles, fills defaults, keeps one of a duplicate id', () => {
+    const tasks = normalizeTasks([
+      null,
+      'nope',
+      { title: '  ', status: 'todo' },
+      { id: 't1', title: 'a' },
+      { id: 't1', title: 'dup' },
+      { id: 't2', title: 'b', status: 'weird', deps: ['t1', '', 7] }
+    ])
+    expect(tasks).toHaveLength(2)
+    expect(tasks[0]).toMatchObject({ id: 't1', title: 'a', status: 'todo' })
+    // an unknown status collapses to todo; non-string deps are dropped
+    expect(tasks[1]).toMatchObject({ id: 't2', status: 'todo', deps: ['t1'] })
+    expect(tasks[1].at).toBeTypeOf('number')
+    // anything non-array degrades to an empty queue rather than throwing
+    expect(normalizeTasks(undefined)).toEqual([])
+    expect(normalizeTasks({})).toEqual([])
+  })
+})
+
 describe('workspace paths', () => {
   it('defaults under userData and honors a workspaceRoot override', () => {
     expect(workspaceDir()).toBe(join(scratch, 'workspace'))
@@ -129,6 +152,23 @@ describe('read / write round-trip', () => {
     const next = writeWorkspace({ task: 'changed' })
     expect(next.task).toBe('changed')
     expect(next.notes).toHaveLength(1)
+  })
+
+  it('a pre-queue document keeps tasks absent until the first queue write', () => {
+    writeWorkspace({ task: 'legacy' })
+    expect(readWorkspace().tasks).toBeUndefined()
+    const seeded = writeWorkspace({ tasks: [{ id: 't1', title: 'a', status: 'todo', at: 1 }] })
+    expect(seeded.tasks).toHaveLength(1)
+  })
+
+  it('a changed task queue bumps the revision; an identical re-save does not', () => {
+    const before = writeWorkspace({ task: 't' })
+    const t1: WorkspaceTask = { id: 't1', title: 'a', status: 'todo', at: 1 }
+    const after = writeWorkspace({ tasks: [t1] })
+    expect(after.revision).toBe(before.revision + 1)
+    expect(after.tasks?.[0].id).toBe('t1')
+    expect(writeWorkspace({ tasks: [{ ...t1 }] }).revision).toBe(after.revision)
+    expect(writeWorkspace({ task: 'renamed' }).revision).toBe(after.revision)
   })
 
   it('appendWorkspaceNote trims, ignores blanks, and attributes the container', () => {
@@ -178,6 +218,13 @@ describe('broadcast', () => {
     const after = writeWorkspace({ task: 'retitled' })
     expect(after.revision).toBe(b1.revision)
     expect(after.broadcastAt).toBe(b1.broadcastAt)
+  })
+
+  it('carries the task queue through untouched', () => {
+    writeWorkspace({ tasks: [{ id: 't1', title: 'a', status: 'doing', owner: 'codex', at: 1 }] })
+    const before = readWorkspace()
+    const after = broadcastWorkspace()
+    expect(after.tasks).toEqual(before.tasks)
   })
 })
 

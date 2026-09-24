@@ -27,6 +27,7 @@ import { WORKSPACE_MCP_ID, workspaceMcpSpec } from './workspace-mcp'
 import type {
   McpCallToolArgs,
   McpCallToolResult,
+  McpCallEvent,
   McpServerSpec,
   McpServerState,
   McpServerStatus,
@@ -142,6 +143,24 @@ let shuttingDown = false
 /** Emitted whenever any row's live state changed; ipc.ts broadcasts to all windows. */
 export const hubEvents = new EventEmitter()
 
+/* ---- call feed: a small ring of hub-forwarded tool calls, surfaced in the panel ----
+ * Only calls made *through the hub* are observed (the panel's McpCallTool); an agent that
+ * spawns its own third-party stdio server never routes here, so this is the container's own
+ * call activity, not global MCP traffic. Ring bounded so memory is flat across a long session. */
+const CALL_BUFFER_CAP = 200
+const callEvents: McpCallEvent[] = []
+
+function recordCall(evt: McpCallEvent): void {
+  callEvents.push(evt)
+  if (callEvents.length > CALL_BUFFER_CAP) callEvents.shift()
+  hubEvents.emit('calls', getCalls())
+}
+
+/** Cold read of the buffered call feed, oldest→newest (a fresh window catches up in one shot). */
+export function getCalls(): McpCallEvent[] {
+  return [...callEvents]
+}
+
 function snapshot(): McpServerState[] {
   return [...entries.values()].map((e) => ({
     spec: e.spec,
@@ -172,6 +191,15 @@ function scheduleBridgeExport(): void {
       console.warn('[mcp-hub] bridge export failed:', (err as Error).message)
     }
   }, BRIDGE_DEBOUNCE_MS)
+}
+
+/**
+ * #11: force a debounced re-export of the agent-facing bridge files. The container's own MCP
+ * server calls this on start/stop so the appended HTTP row (its URL + bearer token) shows up in
+ * — or is pruned from — every agent's config without waiting for the next hub state change.
+ */
+export function refreshBridge(): void {
+  scheduleBridgeExport()
 }
 
 function loadSpecs(): McpServerSpec[] {
@@ -501,10 +529,24 @@ export function listTools(serverId?: string): McpToolInfo[] {
 
 export async function callTool(args: McpCallToolArgs): Promise<McpCallToolResult> {
   const startedAt = Date.now()
+  const finish = (r: McpCallToolResult): McpCallToolResult => {
+    // Record every hub-forwarded call — success or failure — so the panel's feed + success
+    // rate reflect the real distribution, not just the happy path.
+    recordCall({
+      serverId: args.serverId,
+      tool: args.tool,
+      ms: r.durationMs,
+      ok: r.ok,
+      ...(r.error ? { err: r.error } : {}),
+      at: Date.now()
+    })
+    return r
+  }
   const e = entries.get(args.serverId)
-  if (!e) return { ok: false, text: '', isError: true, error: m('mcp.errUnknown', { id: args.serverId }), durationMs: 0 }
+  if (!e)
+    return finish({ ok: false, text: '', isError: true, error: m('mcp.errUnknown', { id: args.serverId }), durationMs: 0 })
   if (!e.client || e.status !== 'connected') {
-    return { ok: false, text: '', isError: true, error: m('mcp.errNotConnected', { id: e.spec.id }), durationMs: 0 }
+    return finish({ ok: false, text: '', isError: true, error: m('mcp.errNotConnected', { id: e.spec.id }), durationMs: 0 })
   }
   try {
     const res = await withTimeout(
@@ -518,9 +560,9 @@ export async function callTool(args: McpCallToolArgs): Promise<McpCallToolResult
     )
     const text = flattenToolContent((res as { content?: unknown }).content)
     const isError = Boolean((res as { isError?: boolean }).isError)
-    return { ok: !isError, text, isError, durationMs: Date.now() - startedAt }
+    return finish({ ok: !isError, text, isError, durationMs: Date.now() - startedAt })
   } catch (err) {
-    return { ok: false, text: '', isError: true, error: (err as Error).message, durationMs: Date.now() - startedAt }
+    return finish({ ok: false, text: '', isError: true, error: (err as Error).message, durationMs: Date.now() - startedAt })
   }
 }
 

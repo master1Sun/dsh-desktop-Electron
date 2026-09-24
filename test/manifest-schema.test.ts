@@ -122,6 +122,32 @@ describe('manifest v1 additions', () => {
     makePage('unnamed', { port: 3003, startCommand: 'node server.js' })
     expect(read('unnamed').name).toBe('unnamed')
   })
+
+  it("carries an imported npm CLI capability's package + dir into PageMeta", () => {
+    makePage('capx', {
+      kind: 'terminal',
+      startCommand: 'node "/abs/capabilities/capx/node_modules/@openai/codex/bin/codex.js"',
+      npmPackage: '@openai/codex',
+      capabilityDir: join(scratch, 'capabilities', 'capx')
+    })
+    const meta = read('capx')
+    expect(meta.npmPackage).toBe('@openai/codex')
+    expect(meta.capabilityDir).toBe(join(scratch, 'capabilities', 'capx'))
+    // Both keys are known, so the capability page loads with no manifest warning.
+    expect(meta.manifestWarnings).toBeUndefined()
+  })
+
+  it('treats a blank npmPackage/capabilityDir as unset rather than an empty string', () => {
+    makePage('capblank', {
+      kind: 'terminal',
+      startCommand: 'node server.js',
+      npmPackage: '   ',
+      capabilityDir: ''
+    })
+    const meta = read('capblank')
+    expect(meta.npmPackage).toBeUndefined()
+    expect(meta.capabilityDir).toBeUndefined()
+  })
 })
 
 describe('tolerant validation', () => {

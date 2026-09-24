@@ -25,8 +25,9 @@ import { useTerminalStore } from './stores/terminal'
 import { useUpdatesStore } from './stores/updates'
 import { useRuntimesStore } from './stores/runtimes'
 import { ElConfigProvider } from 'element-plus'
-import { locale as i18nLocale, t, epLocale } from './i18n'
+import { setLocale, t, epLocale } from './i18n'
 import { askAiWith, registerAskAiJump, unregisterAskAiJump } from './askAi'
+import { setToastSystemRouting } from './toast'
 
 const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
@@ -40,12 +41,14 @@ const dualStore = useDualStore()
 const activePanel = ref<string | null>(null)
 
 /* ---- shell layout mode -------------------------------------------------------------
-   'classic' (default) keeps the top menu bar + centered floating panels; 'im' swaps the
-   menu bar for a compact title bar and moves the panels into a QQ-like left rail + docked
-   sidebar (QQShell). It is a layout switch only — the frosted surfaces, theme and aurora
-   are untouched. Driven off the reactive settings so the 设置 ▸ 界面视图 radio and the
-   Ctrl+K command flip it live; popout windows always render classic. */
-const isIm = computed(() => !isPopout.value && settingsStore.settings.layoutMode === 'im')
+   'im' (default, 效率) uses a compact title bar and moves the panels into a QQ-like left rail +
+   docked sidebar (QQShell); 'classic' keeps the top menu bar + centered floating panels. It is a
+   layout switch only — the frosted surfaces, theme and aurora are untouched. Driven off the
+   reactive settings so the 设置 ▸ 布局 radio and the Ctrl+K command flip it live; an unset
+   (pre-setting) install defaults to 效率, and popout windows always render classic. */
+const isIm = computed(
+  () => !isPopout.value && (settingsStore.settings.layoutMode ?? 'im') === 'im'
+)
 
 /**
  * Vertical tab a panel should open on, set by a palette command (「查看事件动态」→ help/events).
@@ -53,7 +56,9 @@ const isIm = computed(() => !isPopout.value && settingsStore.settings.layoutMode
  */
 const panelTab = ref<string | null>(null)
 watch(activePanel, (panel) => {
-  if (panel !== 'help') panelTab.value = null
+  // help + settings both honor a palette deep-link tab; every other panel clears it so the next
+  // ordinary menu click lands on its default tab.
+  if (panel !== 'help' && panel !== 'settings') panelTab.value = null
 })
 
 /* ---- C2: detached page window ----
@@ -126,7 +131,7 @@ function restartPage(id: string): void {
  * otherwise start a root shell (which itself opens the drawer). */
 function openTerminalDrawer(): void {
   if (store.sessions.length) store.open = true
-  else void store.start('container', t('terminal.rootTitle')).catch(() => undefined)
+  else void store.start('container', t('terminal.title')).catch(() => undefined)
 }
 
 /* Store i18n KEYS, not resolved labels: `t()` here would run once at module load and freeze
@@ -139,6 +144,7 @@ const PANEL_COMMANDS: { kind: PanelKind; key: string }[] = [
   { kind: 'openclaw', key: 'palette.panelOpenclaw' },
   { kind: 'mcp', key: 'palette.panelMcp' },
   { kind: 'workspace', key: 'palette.panelWorkspace' },
+  { kind: 'board', key: 'palette.panelBoard' },
   { kind: 'settings', key: 'palette.panelSettings' },
   { kind: 'help', key: 'palette.panelHelp' }
 ]
@@ -350,6 +356,103 @@ const commands = computed<Command[]>(() => {
   }
   return list
 })
+
+/** Open (or focus) the settings panel on a given vertical tab (a palette deep link). */
+function openSettingsTab(tab: string): void {
+  panelTab.value = tab
+  activePanel.value = 'settings'
+}
+
+/* ---- #5: command-palette deep search -------------------------------------------
+   The static `commands` list covers pages, panels, actions and app entries. This adds
+   three lazy sources that are too costly (or too dynamic) to keep in that computed: a
+   keyword-mapped settings index, the live MCP tool catalog, and a log-line grep. Each
+   returns {@link Command}s the palette merges + scores alongside the static ones. */
+
+/** Settings rows reachable by keyword → the tab that hosts them + a match-only keyword set. */
+const SETTINGS_SEARCH_INDEX: { tab: string; labelKey: string; kw: string }[] = [
+  { tab: 'view', labelKey: 'settings.tabView', kw: 'theme 主题 language 语言 layout 布局 accent 配色' },
+  { tab: 'behavior', labelKey: 'settings.tabBehavior', kw: 'startup 启动 autostart 自启 tray 托盘 crash 崩溃 terminal 终端' },
+  { tab: 'alerts', labelKey: 'settings.tabAlerts', kw: 'notify 通知 memory 内存 warn 告警' },
+  { tab: 'keys', labelKey: 'settings.tabKeys', kw: 'shortcut 快捷键 keybind 绑定' },
+  { tab: 'download', labelKey: 'settings.tabDownload', kw: 'download 下载 dir 目录' },
+  { tab: 'network', labelKey: 'settings.tabNetwork', kw: 'registry 镜像 npm network 网络' },
+  { tab: 'privacy', labelKey: 'settings.tabPrivacy', kw: 'privacy 隐私 cookie 缓存 clear 清理' },
+  { tab: 'storage', labelKey: 'settings.tabStorage', kw: 'disk 磁盘 storage 存储 space 占用 clean 清理' }
+]
+
+/** One fuzzy token match: does the query appear in the label text or the keyword bag? */
+function matches(hay: string, q: string): boolean {
+  return hay.toLowerCase().includes(q.toLowerCase())
+}
+
+async function deepSearch(q: string): Promise<Command[]> {
+  const out: Command[] = []
+  const query = q.trim()
+  if (!query) return out
+
+  // 1) settings index — synchronous, cheap.
+  for (const row of SETTINGS_SEARCH_INDEX) {
+    const label = t(row.labelKey)
+    if (matches(label, query) || matches(row.kw, query)) {
+      out.push({
+        id: `set-${row.tab}`,
+        title: t('palette.cmdSettingItem', { name: label }),
+        group: t('palette.groupSettings'),
+        keywords: row.kw,
+        run: () => openSettingsTab(row.tab)
+      })
+    }
+  }
+
+  // 2) live MCP tool catalog (only connected servers report tools).
+  try {
+    const res = await window.container.mcpListTools?.()
+    const tools = (res?.ok ? (res.data as { name: string; serverId: string; description?: string }[]) : []) || []
+    for (const tool of tools) {
+      if (!matches(`${tool.name} ${tool.description ?? ''}`, query)) continue
+      out.push({
+        id: `mcp-tool-${tool.serverId}-${tool.name}`,
+        title: t('palette.cmdMcpTool', { tool: tool.name }),
+        hint: tool.serverId,
+        group: t('palette.groupTools'),
+        keywords: tool.description,
+        run: () => (activePanel.value = 'mcp')
+      })
+      if (out.length > 40) break
+    }
+  } catch {
+    /* a catalog that won't answer just means no tool hits */
+  }
+
+  // 3) log-line grep across the readable files, capped so one keystroke stays cheap.
+  try {
+    const filesRes = await window.container.listLogFiles?.()
+    const files = (filesRes?.ok ? (filesRes.data as { key: string; label: string }[]) : []) || []
+    let hits = 0
+    for (const file of files.slice(0, 8)) {
+      const readRes = await window.container.readLogs?.({ key: file.key, tail: 200, filter: query })
+      const lines = (readRes?.ok ? (readRes.data as { lines: string[] }).lines : []) || []
+      for (const line of lines.slice(-3)) {
+        const text = line.trim().slice(0, 90)
+        if (!text) continue
+        out.push({
+          id: `log-${file.key}-${hits}`,
+          title: t('palette.cmdLogHit', { file: file.label, line: text }),
+          group: t('palette.groupLogs'),
+          run: () => openHelpTab('logs')
+        })
+        hits++
+        if (hits >= 12) break
+      }
+      if (hits >= 12) break
+    }
+  } catch {
+    /* unreadable logs simply yield no rows */
+  }
+
+  return out.slice(0, 30)
+}
 
 /* ---- selected page + view toolbar live in the chrome so HomeView is content-only ---- */
 const activePageId = ref<string | null>(null)
@@ -862,6 +965,13 @@ watchEffect(() => {
 watchEffect(() => {
   applyReduceMotion(settingsStore.settings.reduceMotion)
 })
+
+// The dark-mode flowing-light border (see glass.css `.win-edge` / popup ::after). Off paints a
+// `.no-marquee` class on <html> that every ring's selector keys `:not(.no-marquee)` off of, so
+// disabling it needs no JS touching the SVG — the CSS just stops matching. Default (undefined) is on.
+watchEffect(() => {
+  document.documentElement.classList.toggle('no-marquee', settingsStore.settings.marqueeBorder === false)
+})
 /** #26: the OS query whose change we follow while the setting is 'auto'; torn down with the view. */
 let osMotionMq: MediaQueryList | null = null
 function onOsMotionChange(): void {
@@ -890,7 +1000,16 @@ const currentEpLocale = computed(() => epLocale())
  */
 const messageConfig = { placement: 'bottom-right', offset: 16, grouping: true, showClose: true }
 watchEffect(() => {
-  if (settingsStore.loaded) i18nLocale.value = settingsStore.settings.locale || 'zh'
+  // setLocale (not a bare locale.value write) so switching to en for the first time arms the
+  // lazy dictionary load.
+  if (settingsStore.loaded) setLocale(settingsStore.settings.locale || 'zh')
+})
+
+// Mirror the 系统通知 switch into the toast router (see toast.ts): on → every ElMessage is
+// forwarded to the OS notification center instead of the corner toast. Held off until settings
+// load so an early toast still renders in-app rather than vanishing into an unrouted forward.
+watchEffect(() => {
+  setToastSystemRouting(settingsStore.loaded && settingsStore.settings.systemNotifications !== false)
 })
 
 // Keep the OS window/taskbar caption in the active language (index.html holds the zh default
@@ -909,9 +1028,10 @@ function quickThemeToggle(): void {
   settingsStore.patch({ theme: next }).catch(() => undefined)
 }
 
-/** Flip the shell layout (classic ⇄ IM) and persist it; the change is instant and reversible. */
+/** Flip the shell layout (classic ⇄ 效率) and persist it; the change is instant and reversible. */
 function toggleLayoutMode(): void {
-  const next = settingsStore.settings.layoutMode === 'im' ? 'classic' : 'im'
+  const current = settingsStore.settings.layoutMode ?? 'im'
+  const next = current === 'im' ? 'classic' : 'im'
   activePanel.value = null
   settingsStore.patch({ layoutMode: next }).catch(() => undefined)
 }
@@ -1330,6 +1450,7 @@ const showNav = computed(() =>
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
             :total-count="pageContainerCount"
+            :initial-tab="panelTab ?? undefined"
             @apply-theme="applyTheme"
             @preview-site="previewExternalUrl"
           />
@@ -1390,6 +1511,15 @@ const showNav = computed(() =>
             :total-count="pageContainerCount"
           />
         </template>
+        <template #board>
+          <MenuPanelContent
+            v-if="activePanel === 'board'"
+            panel="board"
+            :runtime="pagesStore.nodeInfo"
+            :running-count="runningCount"
+            :total-count="pageContainerCount"
+          />
+        </template>
         <template #app="{ pageId }">
           <MenuPanelContent
             v-if="pageId && activePanel === appPanelKey(pageId)"
@@ -1424,58 +1554,71 @@ const showNav = computed(() =>
         <button v-if="popoutStartable" class="popout-btn" @click="startPopoutPage">
           {{ t('app.popoutStart') }}
         </button>
-        <!-- Right-end window controls: same frameless contract as the main shell's title bar. -->
+        <!-- Right-end window controls: same frameless contract as the main shell's title bar. They
+             hug the popout's right edge, so `bottom-end` grows each tip leftward instead of spilling
+             past the viewport (which would raise a horizontal scrollbar). -->
         <div class="popout-win">
-          <button
-            class="popout-win-btn"
-            :title="t('app.popoutMinimize')"
-            :aria-label="t('app.popoutMinimize')"
-            @click="minimizePopout"
+          <el-tooltip
+            :content="t('app.popoutMinimize')"
+            placement="bottom-end"
+            popper-class="dsh-tip-popper"
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-              <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.2" />
-            </svg>
-          </button>
-          <button
-            class="popout-win-btn"
-            :title="isMaximized ? t('app.popoutRestore') : t('app.popoutMaximize')"
-            :aria-label="isMaximized ? t('app.popoutRestore') : t('app.popoutMaximize')"
-            @click="toggleMaximizePopout"
+            <button class="popout-win-btn" :aria-label="t('app.popoutMinimize')" @click="minimizePopout">
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.2" />
+              </svg>
+            </button>
+          </el-tooltip>
+          <el-tooltip
+            :content="isMaximized ? t('app.popoutRestore') : t('app.popoutMaximize')"
+            placement="bottom-end"
+            popper-class="dsh-tip-popper"
           >
-            <svg v-if="!isMaximized" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-              <rect
-                x="1.5"
-                y="1.5"
-                width="7"
-                height="7"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.2"
-              />
-            </svg>
-            <svg v-else width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-              <rect
-                x="1"
-                y="3"
-                width="6"
-                height="6"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.2"
-              />
-              <path d="M3 3 V1 H9 V7 H7" fill="none" stroke="currentColor" stroke-width="1.2" />
-            </svg>
-          </button>
-          <button
-            class="popout-win-btn popout-win-close"
-            :title="t('app.popoutClose')"
-            :aria-label="t('app.popoutClose')"
-            @click="closePopout"
+            <button
+              class="popout-win-btn"
+              :aria-label="isMaximized ? t('app.popoutRestore') : t('app.popoutMaximize')"
+              @click="toggleMaximizePopout"
+            >
+              <svg v-if="!isMaximized" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <rect
+                  x="1.5"
+                  y="1.5"
+                  width="7"
+                  height="7"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.2"
+                />
+              </svg>
+              <svg v-else width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <rect
+                  x="1"
+                  y="3"
+                  width="6"
+                  height="6"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.2"
+                />
+                <path d="M3 3 V1 H9 V7 H7" fill="none" stroke="currentColor" stroke-width="1.2" />
+              </svg>
+            </button>
+          </el-tooltip>
+          <el-tooltip
+            :content="t('app.popoutClose')"
+            placement="bottom-end"
+            popper-class="dsh-tip-popper"
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-              <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" stroke-width="1.2" />
-            </svg>
-          </button>
+            <button
+              class="popout-win-btn popout-win-close"
+              :aria-label="t('app.popoutClose')"
+              @click="closePopout"
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" stroke-width="1.2" />
+              </svg>
+            </button>
+          </el-tooltip>
         </div>
       </div>
 
@@ -1504,42 +1647,56 @@ const showNav = computed(() =>
           @close="activePanel = null"
         />
         <main class="content">
-          <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
-          <CliTerminalView
-            v-if="activeTerminalPage"
-            ref="cliTermRef"
-            :page="activeTerminalPage"
-            @exit="backToWorkbench"
-          />
-          <HomeView
-            ref="homeRef"
-            :sessions="webviewSessions"
-            :active-id="activeSessionId"
-            :loading="webviewLoading"
-            :repaint-hosted-first="settingsStore.settings.persistentServices === true"
-            :starting-text="startingText"
-            :phase-text="bootPhaseText"
-            :logs="bootLogs"
-            :slow="bootSlow"
-            :elapsed-text="bootElapsedText"
-            :market-active="!isPopout && !webviewActive && !activeTerminalPage"
-            :external-view="externalView"
-            :secondary-choices="secondaryChoices"
-            @nav-state="onNavState"
-            @guest-stop-loading="webviewLoading = false"
-            @install-pages="activePanel = 'pages'"
-            @open-panel="(k: string) => (activePanel = k)"
-            @cancel-start="cancelStart"
-          />
+          <div class="content-main">
+            <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
+            <CliTerminalView
+              v-if="activeTerminalPage"
+              ref="cliTermRef"
+              :page="activeTerminalPage"
+              @exit="backToWorkbench"
+            />
+            <HomeView
+              ref="homeRef"
+              :sessions="webviewSessions"
+              :active-id="activeSessionId"
+              :loading="webviewLoading"
+              :repaint-hosted-first="settingsStore.settings.persistentServices === true"
+              :starting-text="startingText"
+              :phase-text="bootPhaseText"
+              :logs="bootLogs"
+              :slow="bootSlow"
+              :elapsed-text="bootElapsedText"
+              :market-active="!isPopout && !webviewActive && !activeTerminalPage"
+              :external-view="externalView"
+              :secondary-choices="secondaryChoices"
+              @nav-state="onNavState"
+              @guest-stop-loading="webviewLoading = false"
+              @install-pages="activePanel = 'pages'"
+              @open-panel="(k: string) => (activePanel = k)"
+              @cancel-start="cancelStart"
+            />
+            <!-- IM click-away catcher (see .qq-clickaway): a page is an out-of-process <webview>
+                 that swallows host pointerdown, so once it fills the content area a click there
+                 never reaches QQShell's document listener and the rail bubble lingers. This
+                 transparent host layer, sitting above the webview but below the bubble, turns a
+                 content click into a dismiss; it stops at .content-main so the rail, title bar
+                 and window controls stay clickable. -->
+            <div
+              v-if="isIm && activePanel && activePanel !== 'board'"
+              class="qq-clickaway"
+              @pointerdown="activePanel = null"
+            />
+          </div>
+          <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
+               v-show, not v-if: unmounting drops the global onPtyData subscription, which
+               would silently kill output for every embedded shell terminal tab.
+               Embedded in .content (a flow sibling of .content-main), NOT a window-wide fixed
+               overlay: the terminal now shares the page container and pushes the webview up. -->
+          <TerminalDrawer v-if="hasBridge && !isPopout" v-show="store.open" />
         </main>
       </div>
 
-      <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
-         v-show, not v-if: unmounting drops the global onPtyData subscription, which
-         would silently kill output for every embedded shell terminal tab. -->
-      <TerminalDrawer v-if="hasBridge && !isPopout" v-show="store.open" />
-
-      <CommandPalette v-if="!isPopout" v-model="paletteOpen" :commands="commands" />
+      <CommandPalette v-if="!isPopout" v-model="paletteOpen" :commands="commands" :async-search="deepSearch" />
 
       <!-- First-run dependency gate: a blocking overlay until the built-in Node is present. -->
       <SetupGate v-if="!isPopout" />
@@ -1567,13 +1724,36 @@ const showNav = computed(() =>
 .content {
   flex: 1;
   min-height: 0;
-  /* CLI 终端页是 .content 内的绝对定位覆盖层；子层自带滚动，这里禁掉文档溢出，
+  /* Column stack: the page area (.content-main) fills, the embedded terminal dock sits
+     under it as a real flow sibling — so opening the terminal shrinks the webview instead
+     of floating over it. Previously the dock was a window-wide `position: fixed` overlay. */
+  display: flex;
+  flex-direction: column;
+  /* CLI 终端页是 .content-main 内的绝对定位覆盖层；子层自带滚动，这里禁掉文档溢出，
      避免 workbench/终端叠加时出现窗口级滚动条。 */
   overflow: hidden;
   /* Lift the webview above the fixed aurora (z-index:0) so the ambient blobs never
      tint the embedded page; glass chrome (menubar / panels) still sits above it. */
   position: relative;
   z-index: 1;
+}
+
+/* The page region inside .content: the former full-height container, now sharing the
+   column with the terminal dock. Holds the absolute CLI overlay + the workbench. */
+.content-main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* IM-mode click-away layer: transparent, above the webview / market / terminal layers (z ≤ 20)
+   but below the floating bubble (.qq-pop-wrap z 70). It only fills .content-main, so a click on
+   a full-bleed page still dismisses the rail bubble while the rail and window chrome stay live. */
+.qq-clickaway {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
 }
 
 /* Body row under the title bar. Classic mode: only .content (fills width). IM mode: the QQShell
@@ -1685,12 +1865,17 @@ const showNav = computed(() =>
   cursor: pointer;
   background: none;
   border: none;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
   /* Inside the drag strip each control must opt back out of window dragging. */
   -webkit-app-region: no-drag;
 }
+/* Mirror WindowControls: the frosted bar made `--surface-2` an almost-invisible hover for
+   minimize/maximize, so use a theme-adaptive `--text` overlay (close keeps its red below). */
 .popout-win-btn:hover {
   color: var(--text);
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--text) 14%, transparent);
 }
 .popout-win-close:hover {
   color: #fff;

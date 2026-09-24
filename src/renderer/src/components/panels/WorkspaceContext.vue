@@ -7,7 +7,7 @@ import { t } from '@renderer/i18n'
 import { copyToClipboard } from '@renderer/askAi'
 import { useSettingsStore } from '@renderer/stores/settings'
 import { usePagesStore } from '@renderer/stores/pages'
-import type { WorkspaceInfo, WorkspaceNote } from '@shared/types'
+import type { WorkspaceContext, WorkspaceInfo, WorkspaceNote } from '@shared/types'
 
 /**
  * Shared workspace / context panel: the human surface for the one container-owned context
@@ -67,7 +67,7 @@ async function persist(nextTask: string, nextNotes: WorkspaceNote[]): Promise<bo
   saving.value = true
   try {
     // contextBridge/IPC structured-clone cannot carry Vue reactive Proxies ("An object could not
-    // be cloned"), so unwrap every note back to plain data at the boundary before sending.
+    // be cloned"), so unwrap every row back to plain data at the boundary before sending.
     // The explicit [] guard also keeps a stray DOM event (from a native @click/@keyup.enter
     // listener passing itself as our argument) from ever reaching ipcRenderer.invoke.
     const source = Array.isArray(nextNotes) ? nextNotes : []
@@ -75,13 +75,12 @@ async function persist(nextTask: string, nextNotes: WorkspaceNote[]): Promise<bo
     const r = (await window.container.workspaceSave?.({
       task: nextTask,
       notes: plainNotes
-    })) as Result<{
-      task: string
-      notes: WorkspaceNote[]
-    }>
+    })) as Result<WorkspaceContext>
     if (!r?.ok || !r.data) throw new Error(r?.error || t('wsMgr.msgSaveFail'))
     task.value = r.data.task
     notes.value = [...r.data.notes]
+    if (r.data.revision !== undefined && info.value)
+      info.value = { ...info.value, context: { ...info.value.context, revision: r.data.revision } }
     return true
   } catch (err) {
     ElMessage.error((err as Error).message || t('wsMgr.msgSaveFail'))
@@ -244,9 +243,20 @@ onMounted(() => {
               <span class="note-author">{{ n.author }}</span>
               <span class="note-ts">{{ when(n.ts) }}</span>
               <span class="spacer" />
-              <el-button size="small" text :title="t('wsMgr.delete')" @click="removeNote(n.id)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
+              <el-tooltip
+                :content="t('wsMgr.delete')"
+                placement="top"
+                popper-class="dsh-tip-popper"
+              >
+                <el-button
+                  size="small"
+                  text
+                  :aria-label="t('wsMgr.delete')"
+                  @click="removeNote(n.id)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </el-tooltip>
             </div>
             <div class="note-text">{{ n.text }}</div>
           </div>

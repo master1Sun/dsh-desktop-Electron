@@ -161,6 +161,71 @@ export async function exportDiagnostics(registry: PageRegistry): Promise<string 
     })
     writeFileSync(join(stage, 'pages.json'), JSON.stringify(pages, null, 2), 'utf8')
 
+    // ---- ports.json: who actually holds each configured port right now ----
+    // "Page won't start" is usually a port conflict; without this snapshot the field
+    // report can't say whether the holder is one of our own pages or a foreign process.
+    try {
+      const { probePortBind, findPortHolder } = await import('./port-holder')
+      const portRows = await Promise.allSettled(
+        pages
+          .filter((p) => !p.external && typeof p.port === 'number' && p.port > 0)
+          .map(async (p) => ({
+            pageId: p.id,
+            port: p.port,
+            bind: await probePortBind(p.port as number),
+            holder: await findPortHolder(p.port as number)
+          }))
+      )
+      writeFileSync(
+        join(stage, 'ports.json'),
+        JSON.stringify(
+          portRows.map((r) => (r.status === 'fulfilled' ? r.value : { error: String(r.reason) })),
+          null,
+          2
+        ),
+        'utf8'
+      )
+    } catch {
+      /* probing tools can be missing (non-Windows dev boxes); bundle stands without it */
+    }
+
+    // ---- mcp.json: hub server states (spec summary only — spec.env may carry credentials) ----
+    try {
+      const { listServers } = await import('./mcp-hub')
+      const summary = listServers().map((s) => ({
+        id: s.spec.id,
+        name: s.spec.name,
+        command: s.spec.command,
+        args: s.spec.args ?? [],
+        enabled: s.spec.enabled !== false,
+        status: s.status,
+        serverInfo: s.serverInfo,
+        toolCount: s.toolCount,
+        lastError: s.lastError
+      }))
+      writeFileSync(join(stage, 'mcp.json'), JSON.stringify(summary, null, 2), 'utf8')
+    } catch {
+      /* hub not initialized yet — skip */
+    }
+
+    // ---- metrics.json: last rolling PageMetrics samples per page ----
+    // Capped at 12 samples/page so the zip stays a report, not a timeseries dump.
+    try {
+      const { getMetricsHistory } = await import('./metrics')
+      const history = getMetricsHistory()
+      writeFileSync(
+        join(stage, 'metrics.json'),
+        JSON.stringify(
+          Object.fromEntries(Object.entries(history).map(([id, samples]) => [id, samples.slice(-12)])),
+          null,
+          2
+        ),
+        'utf8'
+      )
+    } catch {
+      /* metrics loop not started yet — skip */
+    }
+
     // ---- system.txt ----
     writeFileSync(
       join(stage, 'system.txt'),

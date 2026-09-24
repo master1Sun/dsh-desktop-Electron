@@ -151,36 +151,42 @@ async function openHomeTerminal(): Promise<void> {
           token.source === 'env' ? t('openclawMgr.tokenEnv') : t('openclawMgr.tokenConfig')
         }}</el-tag>
         <code class="token-val">{{ tokenRevealed ? token.token : maskedToken }}</code>
-        <el-button
-          size="small"
-          text
-          :title="tokenRevealed ? t('openclawMgr.hide') : t('openclawMgr.show')"
-          @click="tokenRevealed = !tokenRevealed"
+        <el-tooltip
+          :content="tokenRevealed ? t('openclawMgr.hide') : t('openclawMgr.show')"
+          placement="top"
+          popper-class="dsh-tip-popper"
         >
-          <el-icon><component :is="tokenRevealed ? Hide : View" /></el-icon>
-        </el-button>
-        <el-button size="small" text :title="t('openclawMgr.copy')" @click="copyToken">
-          <el-icon><CopyDocument /></el-icon>
-        </el-button>
-        <el-button
-          size="small"
-          text
-          :loading="tokenLoading"
-          :title="t('openclawMgr.reread')"
-          @click="loadToken"
+          <el-button size="small" text @click="tokenRevealed = !tokenRevealed">
+            <el-icon><component :is="tokenRevealed ? Hide : View" /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip
+          :content="t('openclawMgr.copy')"
+          placement="top"
+          popper-class="dsh-tip-popper"
         >
-          <el-icon><Refresh /></el-icon>
-        </el-button>
-        <el-button
-          size="small"
-          text
-          type="warning"
-          :loading="initBusy"
-          :title="t('openclawMgr.regenerate')"
-          @click="initToken(true)"
+          <el-button size="small" text @click="copyToken">
+            <el-icon><CopyDocument /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip
+          :content="t('openclawMgr.reread')"
+          placement="top"
+          popper-class="dsh-tip-popper"
         >
-          {{ t('openclawMgr.regenerate') }}
-        </el-button>
+          <el-button size="small" text :loading="tokenLoading" @click="loadToken">
+            <el-icon><Refresh /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip
+          :content="t('openclawMgr.regenerate')"
+          placement="top"
+          popper-class="dsh-tip-popper"
+        >
+          <el-button size="small" text type="warning" :loading="initBusy" @click="initToken(true)">
+            {{ t('openclawMgr.regenerate') }}
+          </el-button>
+        </el-tooltip>
       </div>
       <div v-else class="sub token-hint">
         {{ t('openclawMgr.tokenNotGenerated') }}
