@@ -1078,7 +1078,6 @@ const zh: Dict = {
     disabled: '已停用',
     builtinTag: '内置',
     builtinTip: '容器内置能力，不可修改或删除；可连接后浏览和测试其工具',
-    protectedTip: '容器内置能力，可编辑其参数（如允许读取的目录），但不可删除',
     toolsN: '{n} 个工具',
     connect: '连接',
     disconnect: '断开',

@@ -50,9 +50,9 @@ async function copyContainerMcp(kind: 'url' | 'token'): Promise<void> {
 }
 
 /* ---- curated package provisioning (userData/mcp, downloaded on demand) ----
-   A curated row (locked `filesystem` or a seeded default) that still runs its stock
-   `npx -y <pkg>` spec can't connect offline until its npm package is downloaded; the row
-   then offers this in-panel download (same bundled-npm path as 帮助 ▸ 更新检测's group row).
+   A curated seed row (filesystem / playwright) that still runs its stock `npx -y <pkg>`
+   spec can't connect offline until its npm package is downloaded; the row then offers
+   this in-panel download (same bundled-npm path as 帮助 ▸ 更新检测's group row).
    A row the user edited away from that spec is theirs — we no longer claim its package. */
 const tasks = useTasksStore()
 const pkgStatus = reactive<Record<string, McpPkgStatus>>({})
@@ -431,12 +431,12 @@ onBeforeUnmount(() => {
           <code class="scmd">{{ s.spec.command }}{{ (s.spec.args || []).join(' ') ? ' …' : '' }}</code>
           <el-tag v-if="s.spec.autoStart" size="small" effect="plain" round>{{ t('mcpMgr.autoStart') }}</el-tag>
           <el-tag
-            v-if="s.spec.builtin || s.protected"
+            v-if="s.spec.builtin"
             size="small"
             effect="plain"
             round
             class="builtin-tag"
-            :title="s.spec.builtin ? t('mcpMgr.builtinTip') : t('mcpMgr.protectedTip')"
+            :title="t('mcpMgr.builtinTip')"
           >
             {{ t('mcpMgr.builtinTag') }}
           </el-tag>
@@ -458,9 +458,9 @@ onBeforeUnmount(() => {
               <el-icon><component :is="s.status === 'connected' ? CircleClose : Link" /></el-icon>
             </el-button>
           </el-tooltip>
-          <!-- Built-in rows are code-owned: no edit/delete affordance at all (the main
-               process guards both paths too), leaving connect + tool browsing. A protected
-               seed (filesystem) is editable but undeletable, so it shows edit but not delete. -->
+          <!-- Built-in rows (today: only the shared-context server) are code-owned: no
+               edit/delete affordance at all (the main process guards both paths too), leaving
+               connect + tool browsing. Curated seeds (filesystem/playwright) are ordinary rows. -->
           <el-tooltip
             v-if="!s.spec.builtin"
             :content="t('mcpMgr.edit')"
@@ -472,7 +472,7 @@ onBeforeUnmount(() => {
             </el-button>
           </el-tooltip>
           <el-tooltip
-            v-if="!s.spec.builtin && !s.protected"
+            v-if="!s.spec.builtin"
             :content="t('common.delete')"
             placement="top"
             popper-class="dsh-tip-popper"

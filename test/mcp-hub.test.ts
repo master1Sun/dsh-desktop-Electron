@@ -55,33 +55,32 @@ import {
   hubEvents
 } from '../src/main/runtime/mcp-hub'
 
-describe('curated MCP servers (a protected editable seed + ordinary seeds; nothing locked)', () => {
+describe('curated MCP servers (editable + deletable seeds; nothing locked/protected)', () => {
   it('locks no curated row anymore', () => {
     expect(lockedMcpSpecs()).toEqual([])
     expect([...LOCKED_MCP_IDS]).toEqual([])
   })
 
-  it('seeds every curated server as an ordinary (non-locked) row', () => {
+  it('seeds exactly filesystem + playwright as ordinary editable rows, not auto-started', () => {
     // ensureSeeded runs via listServers; nothing is locked, so every curated id is a seed.
     expect(CURATED_MCP_IDS.size).toBe(LOCKED_MCP_IDS.size + SEED_MCP_IDS.size)
+    expect([...SEED_MCP_IDS].sort()).toEqual(['filesystem', 'playwright'])
     const byId = new Map(listServers().map((s) => [s.spec.id, s]))
     for (const id of SEED_MCP_IDS) {
       const row = byId.get(id)
       expect(row, `seed ${id} should be listed`).toBeTruthy()
       expect(row!.spec.builtin, `seed ${id} must stay editable`).toBeFalsy()
+      // nothing auto-connects at boot unless the user switched 开机连接 on
+      expect(row!.spec.autoStart, `seed ${id} must not auto-start`).toBe(false)
     }
-    // credential-gated defaults are seeded disabled; the rest enabled
-    expect(byId.get('github')!.spec.enabled).toBe(false)
-    expect(byId.get('memory')!.spec.enabled).toBe(true)
-    // filesystem is the protected seed: an npx row carrying broad allowed-root positionals
+    // filesystem seeds as an npx row carrying broad allowed-root positionals
     const fs = byId.get('filesystem')!
     expect(fs.spec.command).toBe('npx')
     expect(fs.spec.args?.[1]).toBe('@modelcontextprotocol/server-filesystem')
     expect(fs.spec.args?.[2]).toBeTruthy()
-    expect(fs.spec.autoStart).toBe(true)
-    expect(fs.protected).toBe(true)
-    // an ordinary seed is not protected (the user can delete it)
-    expect(byId.get('memory')!.protected).toBe(false)
+    // retired curated rows are no longer seeded
+    expect(byId.has('memory')).toBe(false)
+    expect(byId.has('github')).toBe(false)
   })
 
   it('lists exactly one row per curated id (locked one wins over a colliding user row)', () => {
@@ -96,36 +95,76 @@ describe('curated MCP servers (a protected editable seed + ordinary seeds; nothi
     expect(spec?.builtin).toBeUndefined()
   })
 
-  it('lets the user edit the protected filesystem row but never delete it', async () => {
-    // deletion is refused (a distinct "protected" error, not the read-only built-in one) ...
-    await expect(removeServer('filesystem')).rejects.toThrow(/删除|remove/i)
-    // ... but editing is allowed: no "built-in cannot be modified" rejection, roots follow the edit
+  it('lets the user both edit and delete the filesystem seed', async () => {
     await saveServer({
       id: 'filesystem',
       name: 'Filesystem',
       command: 'npx',
       args: ['-y', '@modelcontextprotocol/server-filesystem', 'C:\\']
     })
-    const fs = listServers().find((s) => s.spec.id === 'filesystem')
+    let fs = listServers().find((s) => s.spec.id === 'filesystem')
     expect(fs?.spec.args).toEqual(['-y', '@modelcontextprotocol/server-filesystem', 'C:\\'])
-    expect(fs?.protected).toBe(true)
+    await removeServer('filesystem')
+    fs = listServers().find((s) => s.spec.id === 'filesystem')
+    expect(fs, 'filesystem is an ordinary seed: deleting sticks').toBeFalsy()
+    // put it back (a fresh "新增") so later tests see the curated row again
+    await saveServer({
+      id: 'filesystem',
+      name: 'Filesystem',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-filesystem', 'C:\\']
+    })
+    expect(listServers().map((s) => s.spec.id)).toContain('filesystem')
   })
 
   it('lets the user edit a seeded default outright', async () => {
-    await saveServer({ id: 'memory', name: 'My Memory', command: 'node', args: ['mine.js'] })
-    const row = listServers().find((s) => s.spec.id === 'memory')
+    await saveServer({ id: 'playwright', name: 'My Playwright', command: 'node', args: ['mine.js'] })
+    const row = listServers().find((s) => s.spec.id === 'playwright')
     expect(row?.spec.command).toBe('node')
     expect(row?.spec.args).toEqual(['mine.js'])
   })
 
   it('never resurrects a deleted seed (tombstone)', async () => {
-    await removeServer('everything')
-    expect(listServers().map((s) => s.spec.id)).not.toContain('everything')
+    await removeServer('playwright')
+    expect(listServers().map((s) => s.spec.id)).not.toContain('playwright')
     // a later reconcile (any listServers call) must not re-add a dismissed seed
-    expect(listServers().map((s) => s.spec.id)).not.toContain('everything')
+    expect(listServers().map((s) => s.spec.id)).not.toContain('playwright')
   })
 
-  it('persists user rows and keeps the protected filesystem seed', async () => {
+  it('prunes curated seeds retired by this version, once and permanently', async () => {
+    // simulate a store an older version seeded (untouched `npx -y <old pkg>` rows)
+    await saveServer({
+      id: 'memory',
+      name: 'Memory',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-memory']
+    })
+    await saveServer({
+      id: 'github',
+      name: 'GitHub',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github']
+    })
+    const ids = listServers().map((s) => s.spec.id)
+    expect(ids).not.toContain('memory')
+    expect(ids).not.toContain('github')
+    // a hand-added row reusing a retired id survives: prune only touches the untouched
+    // seeded `npx -y <old package>` shape, an ordinary `node` row is user-owned
+    await saveServer({ id: 'memory', name: 'Mine', command: 'node', args: ['s.js'] })
+    expect(listServers().map((s) => s.spec.id)).toContain('memory')
+    // an npx row in the old default shape (even just re-saved) is retired on the next reconcile
+    await saveServer({
+      id: 'memory',
+      name: 'Memory',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-memory']
+    })
+    expect(listServers().map((s) => s.spec.id)).not.toContain('memory')
+    // and the seeds the panel still owns are untouched
+    expect(listServers().map((s) => s.spec.id)).toContain('filesystem')
+  })
+
+  it('persists user rows across add/remove', async () => {
     await saveServer({ id: 'user-own', name: 'Mine', command: 'node', args: ['s.js'] })
     expect(listServers().map((s) => s.spec.id)).toContain('user-own')
     await removeServer('user-own')

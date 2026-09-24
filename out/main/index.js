@@ -11911,7 +11911,6 @@ const zh = {
   "mcp.errClosed": "MCP 服务进程已退出（异常终止或被外部结束）",
   "mcp.errBuiltinEdit": "内置 MCP 服务不可修改",
   "mcp.errBuiltinRemove": "内置 MCP 服务不可删除",
-  "mcp.errProtectedRemove": "该内置 MCP 服务可编辑参数，但不可删除",
   "mcp.errPkgMissing": "「{name}」的组件尚未下载，请点击行下方的下载按钮获取",
   "mcp.builtin.sequential-thinking.name": "分步推理 Sequential Thinking",
   "mcp.builtin.memory.name": "知识图谱记忆 Memory",
@@ -12134,7 +12133,6 @@ const en = {
   "mcp.errClosed": "MCP server process exited (crashed or killed externally)",
   "mcp.errBuiltinEdit": "built-in MCP servers cannot be modified",
   "mcp.errBuiltinRemove": "built-in MCP servers cannot be removed",
-  "mcp.errProtectedRemove": "this built-in MCP server can be edited but not removed",
   "mcp.errPkgMissing": "the component for '{name}' has not been downloaded yet — use the download button under the row to fetch it",
   "mcp.builtin.sequential-thinking.name": "Sequential Thinking",
   "mcp.builtin.memory.name": "Knowledge-graph Memory",
@@ -13243,16 +13241,18 @@ function workspaceEnvVars() {
   };
 }
 const BUILTIN_MCP_PKG = {
+  filesystem: "@modelcontextprotocol/server-filesystem",
+  playwright: "@playwright/mcp"
+};
+const RETIRED_MCP_PKG = {
   "sequential-thinking": "@modelcontextprotocol/server-sequential-thinking",
   memory: "@modelcontextprotocol/server-memory",
   everything: "@modelcontextprotocol/server-everything",
-  filesystem: "@modelcontextprotocol/server-filesystem",
   context7: "@upstash/context7-mcp",
-  playwright: "@playwright/mcp",
-  github: "@modelcontextprotocol/server-github",
-  "brave-search": "@modelcontextprotocol/server-brave-search",
   fetch: "@kazuph/mcp-fetch",
-  "open-websearch": "open-websearch"
+  "open-websearch": "open-websearch",
+  github: "@modelcontextprotocol/server-github",
+  "brave-search": "@modelcontextprotocol/server-brave-search"
 };
 const MCP_PKG_GROUP = "@modelcontextprotocol/server-*";
 let root = null;
@@ -13420,8 +13420,7 @@ function snapshot() {
     status: e.status,
     serverInfo: e.serverInfo,
     toolCount: e.tools.length,
-    lastError: e.lastError,
-    protected: PROTECTED_MCP_IDS.has(e.spec.id)
+    lastError: e.lastError
   }));
 }
 function emitChanged() {
@@ -13453,21 +13452,12 @@ function persistSpecs(list) {
 }
 const LOCKED_MCP_DEFS = [];
 const SEED_MCP_DEFS = [
-  { id: "filesystem", autoStart: true },
-  { id: "sequential-thinking" },
-  { id: "memory" },
-  { id: "everything" },
-  { id: "context7" },
-  { id: "playwright" },
-  { id: "fetch" },
-  { id: "open-websearch" },
-  { id: "github", enabled: false },
-  { id: "brave-search", enabled: false }
+  { id: "filesystem" },
+  { id: "playwright" }
 ];
 const LOCKED_MCP_IDS = new Set(LOCKED_MCP_DEFS.map((d) => d.id));
 const SEED_MCP_IDS = new Set(SEED_MCP_DEFS.map((d) => d.id));
 const CURATED_MCP_IDS = /* @__PURE__ */ new Set([...LOCKED_MCP_IDS, ...SEED_MCP_IDS]);
-const PROTECTED_MCP_IDS = /* @__PURE__ */ new Set(["filesystem"]);
 const hasDirArg = (id2) => id2 === "filesystem";
 const CURATED_ENV = {
   "open-websearch": { MODE: "stdio" }
@@ -13536,18 +13526,34 @@ function dismissSeed(id2) {
   mcpStore().set("dismissed", [...set]);
 }
 function ensureSeeded() {
+  pruneRetiredSeeds();
   const specs = loadSpecs();
   const present = new Set(specs.map((s) => s.id));
   const dismissed = new Set(loadDismissed());
   let changed = false;
   for (const def of SEED_MCP_DEFS) {
     if (present.has(def.id)) continue;
-    if (!PROTECTED_MCP_IDS.has(def.id) && dismissed.has(def.id)) continue;
+    if (dismissed.has(def.id)) continue;
     specs.push(curatedSpec(def));
     present.add(def.id);
     changed = true;
   }
   if (changed) persistSpecs(specs);
+}
+function undismissSeed(id2) {
+  const set = new Set(loadDismissed());
+  if (!set.delete(id2)) return;
+  mcpStore().set("dismissed", [...set]);
+}
+function pruneRetiredSeeds() {
+  const isRetiredDefault = (s) => {
+    const pkg = RETIRED_MCP_PKG[s.id];
+    return !!pkg && s.command === "npx" && (s.args ?? []).includes(pkg);
+  };
+  const specs = loadSpecs();
+  const kept = specs.filter((s) => !isRetiredDefault(s));
+  if (kept.length === specs.length) return;
+  persistSpecs(kept);
 }
 function reconcile() {
   ensureSeeded();
@@ -13585,6 +13591,7 @@ async function saveServer(raw) {
   if (idx >= 0) specs[idx] = spec;
   else specs.push(spec);
   persistSpecs(specs);
+  undismissSeed(spec.id);
   reconcile();
   const entry = entries.get(spec.id);
   if (entry && entry.status === "connected") {
@@ -13595,7 +13602,6 @@ async function saveServer(raw) {
 }
 async function removeServer(id2) {
   if (isCodeOwnedId(id2)) throw new Error(m("mcp.errBuiltinRemove"));
-  if (PROTECTED_MCP_IDS.has(id2)) throw new Error(m("mcp.errProtectedRemove"));
   await disconnect(id2).catch(() => void 0);
   entries.delete(id2);
   persistSpecs(loadSpecs().filter((s) => s.id !== id2));
@@ -13778,7 +13784,6 @@ const mcpHub = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProper
   CURATED_MCP_IDS,
   LOCKED_MCP_IDS,
   MCP_CALL_TOOL_TIMEOUT_MS,
-  PROTECTED_MCP_IDS,
   SEED_MCP_IDS,
   autoStartAll,
   callTool,

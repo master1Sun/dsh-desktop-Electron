@@ -916,10 +916,9 @@ export interface McpServerSpec {
   /**
    * Locked, code-owned row (see runtime/mcp-hub lockedMcpSpecs): command/args/name are
    * re-asserted on every reconcile, never persisted, and the panel renders it read-only
-   * (no edit/delete) — only connect/disconnect. No curated server is locked today; `filesystem`
-   * is a *protected seed* instead (surfaced as McpServerState.protected): an ordinary persisted
-   * row the user can edit but not delete. The other curated servers are seeded once into the
-   * store as ordinary edit/delete-able rows; direct-launch of a downloaded package is resolved
+   * (no edit/delete) — only connect/disconnect. Today that is just the shared-context server;
+   * the curated seeds (filesystem/playwright) are ordinary rows seeded once into the store,
+   * fully editable and deletable by the user. Direct-launch of a downloaded package is resolved
    * at connect time (mcp-hub.effectiveSpawn), not baked into the spec, for that reason.
    */
   builtin?: boolean
@@ -936,11 +935,6 @@ export interface McpServerState {
   /** tool count after the last successful listTools (0 when never connected) */
   toolCount: number
   lastError?: string
-  /**
-   * A container-curated row the user may edit but NOT delete (currently `filesystem`).
-   * The panel hides the delete affordance for these; the main process guards removeServer too.
-   */
-  protected?: boolean
 }
 
 /** One tool surfaced by a connected server, namespaced by its server id. */

@@ -1109,8 +1109,6 @@ const en: Dict = {
     builtinTag: 'built-in',
     builtinTip:
       'Shipped by the container — cannot be edited or removed; connect it to browse and test its tools',
-    protectedTip:
-      'Shipped by the container — you can edit its arguments (e.g. allowed directories) but not remove it',
     toolsN: '{n} tools',
     connect: 'Connect',
     disconnect: 'Disconnect',

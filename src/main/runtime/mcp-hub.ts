@@ -23,7 +23,7 @@ import { logEvent } from '../shell/events'
 import { m } from '../shell/i18n'
 import { resolveDownloadDir } from '../shell/store'
 import { getNodeExePath } from './node-runtime'
-import { BUILTIN_MCP_PKG, resolveMcpPkgEntry } from './mcp-packages'
+import { BUILTIN_MCP_PKG, RETIRED_MCP_PKG, resolveMcpPkgEntry } from './mcp-packages'
 import { exportBridgeFiles } from './mcp-bridge'
 import { WORKSPACE_MCP_ID, workspaceMcpSpec } from './workspace-mcp'
 import type {
@@ -169,8 +169,7 @@ function snapshot(): McpServerState[] {
     status: e.status,
     serverInfo: e.serverInfo,
     toolCount: e.tools.length,
-    lastError: e.lastError,
-    protected: PROTECTED_MCP_IDS.has(e.spec.id)
+    lastError: e.lastError
   }))
 }
 
@@ -217,18 +216,17 @@ function persistSpecs(list: McpServerSpec[]): void {
   mcpStore().set('servers', list.filter((s) => !isCodeOwnedId(s.id)) as never)
 }
 
-/* ---- curated servers: one locked built-in + a set of editable seeded defaults ---- */
+/* ---- curated servers: a small set of editable, deletable seeded defaults ---- */
 
 /**
- * The container's curated MCP servers split in three:
+ * The container's curated MCP servers split in two:
  *  - LOCKED (none today): code-owned, never persisted, non-editable — kept as a mechanism for a
  *    future server whose invocation must never be widened by a stray edit.
- *  - PROTECTED SEED (`filesystem`): an ordinary persisted seed the user can fully EDIT, but that
- *    can never be deleted — its allowed roots are meant to be tuned, while the server itself
- *    stays guaranteed-present (ensureSeeded resurrects it past any tombstone).
- *  - SEED (the rest): injected once into the store as ordinary rows on first sight, after which
- *    the user owns them (edit/delete). Deleting adds a tombstone so seeding never resurrects it;
- *    ids not yet seeded (a server added in a future update) still appear, so this list can grow.
+ *  - SEED (`filesystem`, `playwright`): ordinary persisted rows — fully editable AND deletable.
+ *    Deleting adds a tombstone so ensureSeeded never resurrects them; ids not yet seeded (a
+ *    server added in a future update) still appear, so this list can grow.
+ * Nothing is auto-started by default: every seed (except the code-owned shared-context row,
+ * which always auto-connects) needs the user to switch 开机连接 on explicitly.
  * Every curated row launches its npm package. Once that package is downloaded to
  * userData/mcp the hub swaps the `npx -y` spec for a direct bundled-node launch at connect
  * time (effectiveSpawn) — so seeding keeps specs portable (no baked absolute paths) and any
@@ -243,29 +241,13 @@ interface CuratedDef {
 }
 const LOCKED_MCP_DEFS: CuratedDef[] = []
 const SEED_MCP_DEFS: CuratedDef[] = [
-  { id: 'filesystem', autoStart: true },
-  { id: 'sequential-thinking' },
-  { id: 'memory' },
-  { id: 'everything' },
-  { id: 'context7' },
-  { id: 'playwright' },
-  { id: 'fetch' },
-  { id: 'open-websearch' },
-  { id: 'github', enabled: false },
-  { id: 'brave-search', enabled: false }
+  { id: 'filesystem' },
+  { id: 'playwright' }
 ]
 export const LOCKED_MCP_IDS = new Set(LOCKED_MCP_DEFS.map((d) => d.id))
 export const SEED_MCP_IDS = new Set(SEED_MCP_DEFS.map((d) => d.id))
 /** Every curated id (locked ∪ seed) — what the on-demand package download provisions. */
 export const CURATED_MCP_IDS = new Set([...LOCKED_MCP_IDS, ...SEED_MCP_IDS])
-
-/**
- * Seeded rows the container owns the *existence* of: unlike an ordinary seed they cannot be
- * deleted (no tombstone is ever written, and ensureSeeded resurrects them even if the store was
- * hand-edited), yet they stay fully editable — `filesystem` is here so the user can widen/trim
- * its allowed roots without ever losing the server itself.
- */
-export const PROTECTED_MCP_IDS = new Set<string>(['filesystem'])
 
 /** filesystem is the one curated row that carries an allowed-root positional argument. */
 const hasDirArg = (id: string): boolean => id === 'filesystem'
@@ -380,19 +362,46 @@ function dismissSeed(id: string): void {
 
 /** Idempotent: append any curated seed the store doesn't have yet (and wasn't dismissed). */
 function ensureSeeded(): void {
+  pruneRetiredSeeds()
   const specs = loadSpecs()
   const present = new Set(specs.map((s) => s.id))
   const dismissed = new Set(loadDismissed())
   let changed = false
   for (const def of SEED_MCP_DEFS) {
     if (present.has(def.id)) continue
-    // A protected row can never be dismissed: ignore a stale tombstone and resurrect it.
-    if (!PROTECTED_MCP_IDS.has(def.id) && dismissed.has(def.id)) continue
+    if (dismissed.has(def.id)) continue
     specs.push(curatedSpec(def))
     present.add(def.id)
     changed = true
   }
   if (changed) persistSpecs(specs)
+}
+
+/** Remove a dismissal so (re-)saving an id under user ownership isn't masked by a stale tombstone. */
+function undismissSeed(id: string): void {
+  const set = new Set(loadDismissed())
+  if (!set.delete(id)) return
+  mcpStore().set('dismissed', [...set] as never)
+}
+
+/**
+ * Retire the curated seeds an older version injected that this one no longer ships: the panel
+ * kept more built-ins than we now curate, so drop those store rows once. Only rows still in
+ * their untouched seeded form (`npx -y <old package> …`) go — a row the user edited is an
+ * ordinary server they own, whatever its id. No tombstone is written: retired ids are no
+ * longer seeds, so nothing can resurrect them, and pruning on every reconcile would otherwise
+ * wipe a hand-added row reusing one of those ids. Packages already downloaded under
+ * userData/mcp simply stop being referenced (harmless leftovers).
+ */
+function pruneRetiredSeeds(): void {
+  const isRetiredDefault = (s: McpServerSpec): boolean => {
+    const pkg = RETIRED_MCP_PKG[s.id]
+    return !!pkg && s.command === 'npx' && (s.args ?? []).includes(pkg)
+  }
+  const specs = loadSpecs()
+  const kept = specs.filter((s) => !isRetiredDefault(s))
+  if (kept.length === specs.length) return
+  persistSpecs(kept)
 }
 
 /** Rebuild in-memory rows from the persisted registry (idempotent; keeps live rows intact). */
@@ -445,6 +454,9 @@ export async function saveServer(raw: unknown): Promise<McpServerState[]> {
   if (idx >= 0) specs[idx] = spec
   else specs.push(spec)
   persistSpecs(specs)
+  // The user now owns this row: drop any earlier dismissal so a later delete re-tombstones
+  // against *this* spec's seeding status instead of masking a hand-re-added row.
+  undismissSeed(spec.id)
   reconcile()
   const entry = entries.get(spec.id)
   if (entry && entry.status === 'connected') {
@@ -456,7 +468,6 @@ export async function saveServer(raw: unknown): Promise<McpServerState[]> {
 
 export async function removeServer(id: string): Promise<McpServerState[]> {
   if (isCodeOwnedId(id)) throw new Error(m('mcp.errBuiltinRemove'))
-  if (PROTECTED_MCP_IDS.has(id)) throw new Error(m('mcp.errProtectedRemove'))
   await disconnect(id).catch(() => undefined)
   entries.delete(id)
   persistSpecs(loadSpecs().filter((s) => s.id !== id))

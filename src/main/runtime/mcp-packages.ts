@@ -17,16 +17,24 @@ import { isJsLauncher } from './command-line'
 
 /** Built-in MCP row id → its npm package name. Order mirrors mcp-hub's curated defs. */
 export const BUILTIN_MCP_PKG: Record<string, string> = {
+  filesystem: '@modelcontextprotocol/server-filesystem',
+  playwright: '@playwright/mcp'
+}
+
+/**
+ * Curated seeds earlier versions shipped (id → package) that this one no longer does.
+ * mcp-hub uses this to prune store rows still sitting in their untouched seeded form
+ * (`npx -y <pkg> …`); a row the user edited away from that shape is theirs to keep.
+ */
+export const RETIRED_MCP_PKG: Record<string, string> = {
   'sequential-thinking': '@modelcontextprotocol/server-sequential-thinking',
   memory: '@modelcontextprotocol/server-memory',
   everything: '@modelcontextprotocol/server-everything',
-  filesystem: '@modelcontextprotocol/server-filesystem',
   context7: '@upstash/context7-mcp',
-  playwright: '@playwright/mcp',
-  github: '@modelcontextprotocol/server-github',
-  'brave-search': '@modelcontextprotocol/server-brave-search',
   fetch: '@kazuph/mcp-fetch',
-  'open-websearch': 'open-websearch'
+  'open-websearch': 'open-websearch',
+  github: '@modelcontextprotocol/server-github',
+  'brave-search': '@modelcontextprotocol/server-brave-search'
 }
 
 /**

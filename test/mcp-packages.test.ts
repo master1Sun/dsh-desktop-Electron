@@ -44,7 +44,7 @@ afterEach(() => {
 
 describe('resolveMcpPkgEntry', () => {
   it('resolves a string bin to its absolute launcher path', () => {
-    const pkg = '@modelcontextprotocol/server-memory'
+    const pkg = '@modelcontextprotocol/server-filesystem'
     seedPkg(pkg, { version: '1.2.3', bin: 'index.js' }, 'index.js')
     expect(resolveMcpPkgEntry(pkg)).toBe(join(root, 'node_modules', ...pkg.split('/'), 'index.js'))
   })
@@ -62,7 +62,7 @@ describe('resolveMcpPkgEntry', () => {
   })
 
   it('falls back to the first string value when the short-name key is absent', () => {
-    const pkg = '@modelcontextprotocol/server-everything'
+    const pkg = '@playwright/mcp'
     seedPkg(pkg, { version: '1.0.0', bin: { weird: 'dist/main.js' } }, 'dist/main.js')
     expect(resolveMcpPkgEntry(pkg)).toContain(join('dist', 'main.js'))
   })
@@ -72,19 +72,19 @@ describe('resolveMcpPkgEntry', () => {
   })
 
   it('returns null when package.json declares no runnable bin', () => {
-    const pkg = '@modelcontextprotocol/server-memory'
+    const pkg = '@modelcontextprotocol/server-filesystem'
     seedPkg(pkg, { version: '1.0.0' })
     expect(resolveMcpPkgEntry(pkg)).toBeNull()
   })
 
   it('returns null when the bin target file is missing on disk', () => {
-    const pkg = '@modelcontextprotocol/server-memory'
+    const pkg = '@modelcontextprotocol/server-filesystem'
     seedPkg(pkg, { version: '1.0.0', bin: 'index.js' }) // no binFile → file not written
     expect(resolveMcpPkgEntry(pkg)).toBeNull()
   })
 
   it('strips a leading ./ from the bin path', () => {
-    const pkg = '@modelcontextprotocol/server-memory'
+    const pkg = '@modelcontextprotocol/server-filesystem'
     seedPkg(pkg, { version: '1.0.0', bin: './run.js' }, 'run.js')
     expect(resolveMcpPkgEntry(pkg)).toBe(join(root, 'node_modules', ...pkg.split('/'), 'run.js'))
   })
@@ -97,7 +97,7 @@ describe('resolveMcpPkgEntry', () => {
 
 describe('mcpPkgVersion', () => {
   it('reads the installed version', () => {
-    const pkg = '@modelcontextprotocol/server-memory'
+    const pkg = '@modelcontextprotocol/server-filesystem'
     seedPkg(pkg, { version: '3.4.5', bin: 'index.js' }, 'index.js')
     expect(mcpPkgVersion(pkg)).toBe('3.4.5')
   })
