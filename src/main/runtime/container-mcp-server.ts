@@ -203,8 +203,16 @@ async function dispatch(
     case 'container_workspace_read':
       return textResult(readWorkspace())
     case 'container_workspace_submit': {
-      const title = typeof a.title === 'string' ? a.title.trim() : ''
+      const rawTitle = typeof a.title === 'string' ? a.title : ''
+      const title = rawTitle.trim()
       if (!title) return errorResult('container_workspace_submit needs a title')
+      // Reject control characters (newlines especially): the title is later interpolated into an
+      // autopilot prompt written to a PTY, where an embedded newline would run as a separate
+      // command against a bare-shell executor. buildPrompt neutralises this too as a backstop.
+      if (/[\x00-\x1f\x7f]/.test(rawTitle))
+        return errorResult(
+          'container_workspace_submit title must not contain newlines or control characters'
+        )
       const cur = readWorkspace()
       const tasks = normalizeTasks(cur.tasks)
       const deps = (Array.isArray(a.deps) ? a.deps : [])
@@ -324,6 +332,8 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
 let httpServer: HttpServer | null = null
 let currentInfo: ContainerServerInfo | null = null
 let currentToken = ''
+/** In-flight {@link listen} so concurrent starts share one bring-up (see startContainerMcpServer). */
+let starting: Promise<ContainerServerInfo> | null = null
 
 function writeToken(token: string): string {
   const file = join(bridgeDir(), 'container-server.token')
@@ -354,7 +364,18 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 export async function startContainerMcpServer(
   getRegistry: () => PageRegistry | undefined
 ): Promise<ContainerServerInfo> {
+  // Dedupe concurrent starts: while a listener is coming up `httpServer`/`currentInfo` are still
+  // null, so a second caller (double-toggle, or cold-start racing an IPC start) would otherwise
+  // spawn a second server and overwrite the bearer token already handed to agents. Everyone joins
+  // the one in-flight promise instead.
   if (httpServer && currentInfo) return currentInfo
+  if (!starting) starting = listen(getRegistry).finally(() => (starting = null))
+  return starting
+}
+
+/** Actual bring-up: mint the token, bind the loopback listener, publish the endpoint. Runs at most
+ *  once concurrently — {@link startContainerMcpServer} memoises the returned promise. */
+async function listen(getRegistry: () => PageRegistry | undefined): Promise<ContainerServerInfo> {
   const token = randomBytes(24).toString('hex')
   const tokenFile = writeToken(token)
   currentToken = token
@@ -392,7 +413,14 @@ export async function startContainerMcpServer(
   })
 
   server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
+  try {
+    await once(server, 'listening')
+  } catch (err) {
+    // Never leave a half-published token behind a listener that failed to bind.
+    currentToken = ''
+    server.close()
+    throw err
+  }
   const address = server.address()
   const port = typeof address === 'object' && address ? address.port : 0
   const url = `http://127.0.0.1:${port}/mcp`
@@ -409,6 +437,15 @@ export async function startContainerMcpServer(
 
 /** Stop the server and clear its token file + published endpoint. Safe to call when not running. */
 export async function stopContainerMcpServer(): Promise<void> {
+  // If a start is mid-flight, let it finish binding first so we close the real listener instead of
+  // racing it (which would otherwise leave a live server behind a `containerMcpServer=false` store).
+  if (starting) {
+    try {
+      await starting
+    } catch {
+      /* start failed; nothing to tear down beyond the best-effort cleanup below */
+    }
+  }
   setContainerEndpoint(null)
   const server = httpServer
   httpServer = null

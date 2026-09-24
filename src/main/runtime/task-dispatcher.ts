@@ -88,21 +88,32 @@ export function pickNextTask(tasks: WorkspaceTask[], busy: Set<string>): Workspa
   return best
 }
 
+/** Neutralise a task-supplied field before it reaches the PTY: strip CR/LF/tab and every other
+ *  C0/DEL control character so a title (or id/dep) written via #11 can never smuggle extra lines
+ *  into the prompt — a bare-shell executor would run each newline as its own command. Structural
+ *  newlines come only from the template, never from this text. */
+function safeField(s: string): string {
+  return s.replace(/[\x00-\x1f\x7f]/g, ' ')
+}
+
 /** Render the prompt handed to the executor, from a template or the built-in default. */
 export function buildPrompt(task: WorkspaceTask, template?: string): string {
-  const deps = (task.deps ?? []).join(', ') || '无'
+  const title = safeField(task.title)
+  const id = safeField(task.id)
+  const deps = (task.deps ?? []).map(safeField).join(', ') || '无'
+  // Function replacements so a value containing `$&`/`$1` is inserted verbatim, not re-interpreted.
   if (template && template.trim()) {
     return template
-      .replace(/\{title\}/g, task.title)
-      .replace(/\{id\}/g, task.id)
-      .replace(/\{deps\}/g, deps)
+      .replace(/\{title\}/g, () => title)
+      .replace(/\{id\}/g, () => id)
+      .replace(/\{deps\}/g, () => deps)
   }
   return (
     `请完成以下任务：\n` +
-    `标题：${task.title}\n` +
-    `编号：${task.id}\n` +
+    `标题：${title}\n` +
+    `编号：${id}\n` +
     `依赖：${deps}\n` +
-    `完成后，务必调用 dsh-workspace 的 workspace_complete（taskId="${task.id}"）回填你的结果。`
+    `完成后，务必调用 dsh-workspace 的 workspace_complete（taskId="${id}"）回填你的结果。`
   )
 }
 

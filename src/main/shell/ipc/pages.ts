@@ -287,6 +287,10 @@ export function registerPagesIpc(ctx: IpcCtx): void {
       // overrides) and swap in the proposed row, then DFS for any back-edge.
       const graph: Record<string, string[]> = {}
       for (const p of registry.list()) graph[p.id] = p.id === id ? next : [...(p.dependsOn ?? [])]
+      // Guarantee the edited node exists even when it is not (yet) in the registry — otherwise a DFS
+      // from `id` reads `graph[id] ?? []`, finds no edges and silently skips the cycle check, letting
+      // a loop be written into settings for a page mid-uninstall / not-yet-reconciled / IPC-direct.
+      graph[id] = next
       const cycle = findDepCycle(graph, id)
       if (cycle) return { ok: false, error: m('ipc.depsCycle', { chain: cycle.join(' → ') }) }
       updateSettings({ pageDeps: cleaned })

@@ -15163,8 +15163,13 @@ async function dispatch(getRegistry, name, args) {
     case "container_workspace_read":
       return textResult(readWorkspace());
     case "container_workspace_submit": {
-      const title2 = typeof a.title === "string" ? a.title.trim() : "";
+      const rawTitle = typeof a.title === "string" ? a.title : "";
+      const title2 = rawTitle.trim();
       if (!title2) return errorResult("container_workspace_submit needs a title");
+      if (/[\x00-\x1f\x7f]/.test(rawTitle))
+        return errorResult(
+          "container_workspace_submit title must not contain newlines or control characters"
+        );
       const cur = readWorkspace();
       const tasks = normalizeTasks(cur.tasks);
       const deps = (Array.isArray(a.deps) ? a.deps : []).filter((d) => typeof d === "string" && !!d.trim()).map((d) => d.trim());
@@ -15277,6 +15282,7 @@ function readJsonBody(req) {
 let httpServer = null;
 let currentInfo = null;
 let currentToken = "";
+let starting = null;
 function writeToken(token) {
   const file = join(bridgeDir(), "container-server.token");
   mkdirSync(bridgeDir(), { recursive: true });
@@ -15295,6 +15301,10 @@ function sendJson(res, status, body) {
 }
 async function startContainerMcpServer(getRegistry) {
   if (httpServer && currentInfo) return currentInfo;
+  if (!starting) starting = listen(getRegistry).finally(() => starting = null);
+  return starting;
+}
+async function listen(getRegistry) {
   const token = randomBytes(24).toString("hex");
   const tokenFile = writeToken(token);
   currentToken = token;
@@ -15328,7 +15338,13 @@ async function startContainerMcpServer(getRegistry) {
     }
   });
   server.listen(0, "127.0.0.1");
-  await once(server, "listening");
+  try {
+    await once(server, "listening");
+  } catch (err) {
+    currentToken = "";
+    server.close();
+    throw err;
+  }
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : 0;
   const url = `http://127.0.0.1:${port}/mcp`;
@@ -15341,6 +15357,12 @@ async function startContainerMcpServer(getRegistry) {
   return currentInfo;
 }
 async function stopContainerMcpServer() {
+  if (starting) {
+    try {
+      await starting;
+    } catch {
+    }
+  }
   setContainerEndpoint(null);
   const server = httpServer;
   httpServer = null;
@@ -16253,16 +16275,21 @@ function pickNextTask(tasks, busy) {
   }
   return best;
 }
+function safeField(s) {
+  return s.replace(/[\x00-\x1f\x7f]/g, " ");
+}
 function buildPrompt(task, template) {
-  const deps = (task.deps ?? []).join(", ") || "无";
+  const title2 = safeField(task.title);
+  const id2 = safeField(task.id);
+  const deps = (task.deps ?? []).map(safeField).join(", ") || "无";
   if (template && template.trim()) {
-    return template.replace(/\{title\}/g, task.title).replace(/\{id\}/g, task.id).replace(/\{deps\}/g, deps);
+    return template.replace(/\{title\}/g, () => title2).replace(/\{id\}/g, () => id2).replace(/\{deps\}/g, () => deps);
   }
   return `请完成以下任务：
-标题：${task.title}
-编号：${task.id}
+标题：${title2}
+编号：${id2}
 依赖：${deps}
-完成后，务必调用 dsh-workspace 的 workspace_complete（taskId="${task.id}"）回填你的结果。`;
+完成后，务必调用 dsh-workspace 的 workspace_complete（taskId="${id2}"）回填你的结果。`;
 }
 class TaskDispatcher {
   deps;
@@ -19553,6 +19580,7 @@ function registerPagesIpc(ctx) {
       if (next2.length) cleaned[id2] = next2;
       const graph = {};
       for (const p of registry2.list()) graph[p.id] = p.id === id2 ? next2 : [...p.dependsOn ?? []];
+      graph[id2] = next2;
       const cycle = findDepCycle(graph, id2);
       if (cycle) return { ok: false, error: m("ipc.depsCycle", { chain: cycle.join(" → ") }) };
       updateSettings({ pageDeps: cleaned });
@@ -21994,9 +22022,13 @@ if (!gotLock) {
     setMcpPackagesRoot(join(app$1.getPath("userData"), "mcp"));
     autoStartAll().catch((err) => console.warn("[mcp-hub] auto-start failed", err));
     if (settings.containerMcpServer) {
-      startContainerMcpServer(() => registry ?? void 0).catch(
-        (err) => console.warn("[container-mcp] start failed:", err)
-      );
+      startContainerMcpServer(() => registry ?? void 0).catch((err) => {
+        console.warn("[container-mcp] start failed, reverting flag:", err);
+        try {
+          updateSettings({ containerMcpServer: false });
+        } catch {
+        }
+      });
     }
     initAutopilot(() => registry ?? void 0);
     void pnpmBinDirs().catch(() => void 0);

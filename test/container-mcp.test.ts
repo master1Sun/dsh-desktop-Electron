@@ -160,6 +160,22 @@ describe('#11 container MCP server — HTTP guard + protocol', () => {
       await client.close()
     }
   })
+
+  it('M1: rejects a container_workspace_submit title carrying newlines/control chars', async () => {
+    const token = readFileSync(getContainerMcpServerInfo()!.tokenFile, 'utf8')
+    const client = await connectClient(token)
+    try {
+      // The guard is an early return, so it fires before any workspace read/write.
+      const r = (await client.callTool({
+        name: 'container_workspace_submit',
+        arguments: { title: 'Do it\nrm -rf /' }
+      })) as { isError?: boolean; content: { text: string }[] }
+      expect(r.isError).toBe(true)
+      expect(r.content[0].text).toMatch(/control characters/)
+    } finally {
+      await client.close()
+    }
+  })
 })
 
 describe('#11 container MCP server — teardown', () => {

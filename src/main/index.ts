@@ -26,6 +26,7 @@ import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './runtime/opencla
 import { pnpmBinDirs } from './runtime/dsh'
 import {
   getSettings,
+  updateSettings,
   resolvePagesDir,
   resolveProjectDir,
   applyLaunchAtStartup,
@@ -438,9 +439,16 @@ if (!gotLock) {
     // #11: bring the container's own MCP server up off the critical path, but only when the
     // (default-off) gate is on. A bind failure is logged, never allowed to break the window.
     if (settings.containerMcpServer) {
-      startContainerMcpServer(() => registry ?? undefined).catch((err) =>
-        console.warn('[container-mcp] start failed:', err)
-      )
+      startContainerMcpServer(() => registry ?? undefined).catch((err) => {
+        console.warn('[container-mcp] start failed, reverting flag:', err)
+        // Mirror the IPC toggle path: a listener that never came up must not leave the persisted
+        // store (and the Settings switch it feeds) claiming the server is running.
+        try {
+          updateSettings({ containerMcpServer: false })
+        } catch {
+          /* best-effort revert; a store write failure here must not break startup */
+        }
+      })
     }
 
     // #1: autopilot task dispatch. Always initialised (a tick no-ops while the setting is off),

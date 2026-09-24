@@ -73,6 +73,26 @@ describe('buildPrompt', () => {
     expect(p).toContain('t9')
     expect(p).toContain('workspace_complete')
   })
+
+  it('M1 backstop: neutralises newlines/control chars smuggled into a title', () => {
+    // A bare-shell executor runs each newline as its own command — the value must not carry any.
+    const evil = 'Fix bug\nrm -rf /\r\t\u0000end'
+    const p = buildPrompt(task({ id: 't9', title: evil }))
+    // Only the template's own structural LF (\x0a) may remain; CR/tab/NUL and the injected LF are gone.
+    expect(/[\x00-\x09\x0b-\x1f\x7f]/.test(p)).toBe(false)
+    // The injected newline can no longer spawn a second command: exactly the template's 5 lines.
+    const lines = p.split('\n')
+    expect(lines).toHaveLength(5)
+    // The sanitised title sits entirely on its own line (text kept, but neutralised — not its own cmd).
+    const titleLine = lines.find((l) => l.startsWith('标题：'))!
+    expect(titleLine).toContain('Fix bug')
+    expect(titleLine).toContain('rm -rf')
+  })
+
+  it('M1 backstop: inserts $-sequences verbatim instead of re-interpreting them', () => {
+    const p = buildPrompt(task({ id: 't9', title: "pay $&100" }), '{title}')
+    expect(p).toBe('pay $&100')
+  })
 })
 
 /* ---- state machine over a controllable fake executor ---- */
