@@ -54,6 +54,8 @@ export interface Settings {
   terminalHeight?: number
   /** 每个终端会话保留的 scrollback 行数；缺省 8000，上限 50000 */
   terminalScrollback?: number
+  /** 常驻 CLI 页切走后无输出的闲置分钟数，超时自动停止；0 = 不自动停止 */
+  cliIdleStopMinutes?: number
   /** 终端展示模式：内嵌页面容器（默认，不可最小化）/ 浮窗覆盖层（可最小化） */
   terminalMode?: 'embedded' | 'floating'
   /** #26: 记住并恢复窗口尺寸/位置/最大化状态 */

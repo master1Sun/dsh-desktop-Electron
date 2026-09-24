@@ -24,7 +24,9 @@ export const BUILTIN_MCP_PKG: Record<string, string> = {
   context7: '@upstash/context7-mcp',
   playwright: '@playwright/mcp',
   github: '@modelcontextprotocol/server-github',
-  'brave-search': '@modelcontextprotocol/server-brave-search'
+  'brave-search': '@modelcontextprotocol/server-brave-search',
+  fetch: '@kazuph/mcp-fetch',
+  'open-websearch': 'open-websearch'
 }
 
 /**

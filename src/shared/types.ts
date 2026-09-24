@@ -390,6 +390,11 @@ export interface ContainerSettings {
    */
   terminalScrollback?: number
   /**
+   * Minutes a resident CLI (terminal-kind) page may sit hidden and silent before the container
+   * stops it, so background agents stop burning memory/CPU. 0 = never auto-stop.
+   */
+  cliIdleStopMinutes?: number
+  /**
    * How the embedded terminal is shown: 'embedded' (default) docks it as a flow sibling of the
    * page area so it pushes the webview up; 'floating' makes it a window-wide fixed overlay that
    * can be minimized to the floating FAB. Minimize is only offered in floating mode.
@@ -508,6 +513,9 @@ export const TERMINAL_SCROLLBACK_MAX = 50000
 
 /** Default scrollback when the setting is unset. */
 export const TERMINAL_SCROLLBACK_DEFAULT = 8000
+
+/** Default idle minutes before a hidden resident CLI is auto-stopped ({@link ContainerSettings.cliIdleStopMinutes}). */
+export const CLI_IDLE_STOP_DEFAULT_MINUTES = 5
 
 /** Dist-tags {@link ContainerSettings.dshChannel} can pick between. */
 export type DshReleaseChannel = 'alpha' | 'latest'
@@ -906,12 +914,13 @@ export interface McpServerSpec {
   /** connect automatically at container boot (implies nothing about `enabled` — both must be true) */
   autoStart?: boolean
   /**
-   * Locked, code-owned row (see runtime/mcp-hub lockedMcpSpecs — currently only
-   * `filesystem`): command/args/name are re-asserted on every reconcile, never persisted,
-   * and the panel renders it read-only (no edit/delete) — only connect/disconnect. The other
-   * curated servers are NOT built-in: they are seeded once into the store as ordinary rows
-   * the user can edit/delete; direct-launch of their downloaded package is resolved at
-   * connect time (mcp-hub.effectiveSpawn), not baked into the spec, for that reason.
+   * Locked, code-owned row (see runtime/mcp-hub lockedMcpSpecs): command/args/name are
+   * re-asserted on every reconcile, never persisted, and the panel renders it read-only
+   * (no edit/delete) — only connect/disconnect. No curated server is locked today; `filesystem`
+   * is a *protected seed* instead (surfaced as McpServerState.protected): an ordinary persisted
+   * row the user can edit but not delete. The other curated servers are seeded once into the
+   * store as ordinary edit/delete-able rows; direct-launch of a downloaded package is resolved
+   * at connect time (mcp-hub.effectiveSpawn), not baked into the spec, for that reason.
    */
   builtin?: boolean
 }
@@ -927,6 +936,11 @@ export interface McpServerState {
   /** tool count after the last successful listTools (0 when never connected) */
   toolCount: number
   lastError?: string
+  /**
+   * A container-curated row the user may edit but NOT delete (currently `filesystem`).
+   * The panel hides the delete affordance for these; the main process guards removeServer too.
+   */
+  protected?: boolean
 }
 
 /** One tool surfaced by a connected server, namespaced by its server id. */

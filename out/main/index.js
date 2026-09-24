@@ -1,7 +1,7 @@
 import electron, { app as app$1, Notification, shell as shell$1, nativeTheme, BrowserWindow, net, screen, ipcMain as ipcMain$1, dialog, webContents, session, nativeImage, Tray, Menu } from "electron";
 import * as fs from "node:fs";
 import fs__default, { existsSync, mkdirSync, readdirSync, appendFileSync, statSync, renameSync, openSync, readSync, closeSync, watch, readFileSync, unlinkSync, writeFileSync as writeFileSync$1, rmSync, cpSync, createWriteStream, createReadStream, promises, copyFileSync } from "node:fs";
-import path, { join, delimiter, extname, basename, dirname, sep } from "node:path";
+import path, { join, delimiter, extname, basename, dirname, parse, sep } from "node:path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import { EventEmitter, once } from "node:events";
 import { spawn, execFile, execFileSync, spawnSync } from "node:child_process";
@@ -53,6 +53,7 @@ const REGISTRY_CANDIDATES = [
 ];
 const NPM_REGISTRY_DEFAULT = REGISTRY_CANDIDATES[0].url;
 const OPENCLAW_DEFAULT_PORT = 18789;
+const CLI_IDLE_STOP_DEFAULT_MINUTES = 5;
 const DEFAULT_KEYBINDINGS = {
   palette: "Ctrl+K",
   devtools: "F12",
@@ -4886,7 +4887,7 @@ function requireFastUri() {
       normalizeString(uri2, options);
     } else if (typeof uri2 === "object") {
       uri2 = /** @type {T} */
-      parse(serialize(uri2, options), options);
+      parse2(serialize(uri2, options), options);
     }
     return uri2;
   }
@@ -4926,8 +4927,8 @@ function requireFastUri() {
   function resolveComponent(base, relative, options, skipNormalization) {
     const target = {};
     if (!skipNormalization) {
-      base = parse(serialize(base, options), options);
-      relative = parse(serialize(relative, options), options);
+      base = parse2(serialize(base, options), options);
+      relative = parse2(serialize(relative, options), options);
     }
     options = options || {};
     if (!options.tolerant && relative.scheme) {
@@ -5226,7 +5227,7 @@ function requireFastUri() {
     }
     return { parsed, malformedAuthorityOrPort, malformedPercentEncoding, malformedSchemeSpecific, malformedHost, malformedScheme };
   }
-  function parse(uri2, opts) {
+  function parse2(uri2, opts) {
     return parseWithStatus(uri2, opts).parsed;
   }
   function normalizeString(uri2, opts) {
@@ -5263,7 +5264,7 @@ function requireFastUri() {
     resolveComponent,
     equal: equal2,
     serialize,
-    parse
+    parse: parse2
   };
   fastUri.exports = fastUri$1;
   fastUri.exports.default = fastUri$1;
@@ -9298,7 +9299,7 @@ function requireParse() {
   if (hasRequiredParse) return parse_1;
   hasRequiredParse = 1;
   const SemVer = requireSemver$1();
-  const parse = (version, options, throwErrors = false) => {
+  const parse2 = (version, options, throwErrors = false) => {
     if (version instanceof SemVer) {
       return version;
     }
@@ -9311,7 +9312,7 @@ function requireParse() {
       throw er;
     }
   };
-  parse_1 = parse;
+  parse_1 = parse2;
   return parse_1;
 }
 var valid_1;
@@ -9319,9 +9320,9 @@ var hasRequiredValid$1;
 function requireValid$1() {
   if (hasRequiredValid$1) return valid_1;
   hasRequiredValid$1 = 1;
-  const parse = requireParse();
+  const parse2 = requireParse();
   const valid2 = (version, options) => {
-    const v = parse(version, options);
+    const v = parse2(version, options);
     return v ? v.version : null;
   };
   valid_1 = valid2;
@@ -9332,9 +9333,9 @@ var hasRequiredClean;
 function requireClean() {
   if (hasRequiredClean) return clean_1;
   hasRequiredClean = 1;
-  const parse = requireParse();
+  const parse2 = requireParse();
   const clean = (version, options) => {
-    const s = parse(version.trim().replace(/^[=v]+/, ""), options);
+    const s = parse2(version.trim().replace(/^[=v]+/, ""), options);
     return s ? s.version : null;
   };
   clean_1 = clean;
@@ -9369,10 +9370,10 @@ var hasRequiredDiff;
 function requireDiff() {
   if (hasRequiredDiff) return diff_1;
   hasRequiredDiff = 1;
-  const parse = requireParse();
+  const parse2 = requireParse();
   const diff = (version1, version2) => {
-    const v1 = parse(version1, null, true);
-    const v2 = parse(version2, null, true);
+    const v1 = parse2(version1, null, true);
+    const v2 = parse2(version2, null, true);
     const comparison = v1.compare(v2);
     if (comparison === 0) {
       return null;
@@ -9443,9 +9444,9 @@ var hasRequiredPrerelease;
 function requirePrerelease() {
   if (hasRequiredPrerelease) return prerelease_1;
   hasRequiredPrerelease = 1;
-  const parse = requireParse();
+  const parse2 = requireParse();
   const prerelease = (version, options) => {
-    const parsed = parse(version, options);
+    const parsed = parse2(version, options);
     return parsed && parsed.prerelease.length ? parsed.prerelease : null;
   };
   prerelease_1 = prerelease;
@@ -9631,7 +9632,7 @@ function requireCoerce() {
   if (hasRequiredCoerce) return coerce_1;
   hasRequiredCoerce = 1;
   const SemVer = requireSemver$1();
-  const parse = requireParse();
+  const parse2 = requireParse();
   const { safeRe: re2, t } = requireRe();
   const coerce = (version, options) => {
     if (version instanceof SemVer) {
@@ -9666,7 +9667,7 @@ function requireCoerce() {
     const patch = match[4] || "0";
     const prerelease = options.includePrerelease && match[5] ? `-${match[5]}` : "";
     const build = options.includePrerelease && match[6] ? `+${match[6]}` : "";
-    return parse(`${major}.${minor}.${patch}${prerelease}${build}`, options);
+    return parse2(`${major}.${minor}.${patch}${prerelease}${build}`, options);
   };
   coerce_1 = coerce;
   return coerce_1;
@@ -9676,7 +9677,7 @@ var hasRequiredTruncate;
 function requireTruncate() {
   if (hasRequiredTruncate) return truncate_1;
   hasRequiredTruncate = 1;
-  const parse = requireParse();
+  const parse2 = requireParse();
   const constants2 = requireConstants();
   const SemVer = requireSemver$1();
   const truncate = (version, truncation, options) => {
@@ -9688,7 +9689,7 @@ function requireTruncate() {
   };
   const cloneInputVersion = (version, options) => {
     const versionStringToParse = version instanceof SemVer ? version.version : version;
-    return parse(versionStringToParse, options);
+    return parse2(versionStringToParse, options);
   };
   const doTruncation = (version, truncation) => {
     if (isPrerelease(truncation)) {
@@ -10732,7 +10733,7 @@ function requireSemver() {
   const constants2 = requireConstants();
   const SemVer = requireSemver$1();
   const identifiers2 = requireIdentifiers();
-  const parse = requireParse();
+  const parse2 = requireParse();
   const valid2 = requireValid$1();
   const clean = requireClean();
   const inc = requireInc();
@@ -10771,7 +10772,7 @@ function requireSemver() {
   const simplifyRange = requireSimplify();
   const subset = requireSubset();
   semver$1 = {
-    parse,
+    parse: parse2,
     valid: valid2,
     clean,
     inc,
@@ -11627,6 +11628,9 @@ const DEFAULTS = {
   terminalHeight: 320,
   // scrollback lines kept per terminal surface; clamped to TERMINAL_SCROLLBACK_MAX at create time.
   terminalScrollback: 8e3,
+  // a hidden resident CLI with no output for this many minutes gets stopped, so background
+  // agents don't burn memory/CPU forever; 0 = never auto-stop.
+  cliIdleStopMinutes: CLI_IDLE_STOP_DEFAULT_MINUTES,
   // how the terminal is shown: docked into the page area, or a floating overlay that can minimize.
   terminalMode: "embedded",
   // #26: restore the last window geometry/maximized state. On by default: a container that
@@ -11907,6 +11911,7 @@ const zh = {
   "mcp.errClosed": "MCP 服务进程已退出（异常终止或被外部结束）",
   "mcp.errBuiltinEdit": "内置 MCP 服务不可修改",
   "mcp.errBuiltinRemove": "内置 MCP 服务不可删除",
+  "mcp.errProtectedRemove": "该内置 MCP 服务可编辑参数，但不可删除",
   "mcp.errPkgMissing": "「{name}」的组件尚未下载，请点击行下方的下载按钮获取",
   "mcp.builtin.sequential-thinking.name": "分步推理 Sequential Thinking",
   "mcp.builtin.memory.name": "知识图谱记忆 Memory",
@@ -11916,6 +11921,8 @@ const zh = {
   "mcp.builtin.playwright.name": "浏览器自动化 Playwright",
   "mcp.builtin.github.name": "GitHub（需密钥）",
   "mcp.builtin.brave-search.name": "Brave 搜索（需密钥）",
+  "mcp.builtin.fetch.name": "网页内容抓取 Fetch",
+  "mcp.builtin.open-websearch.name": "免密钥网页搜索 Open WebSearch",
   "mcp.builtin.dsh-workspace.name": "共享上下文 Workspace",
   "download.doneTitle": "下载完成",
   "download.doneBody": "{name} 已保存到 {dir}",
@@ -12127,6 +12134,7 @@ const en = {
   "mcp.errClosed": "MCP server process exited (crashed or killed externally)",
   "mcp.errBuiltinEdit": "built-in MCP servers cannot be modified",
   "mcp.errBuiltinRemove": "built-in MCP servers cannot be removed",
+  "mcp.errProtectedRemove": "this built-in MCP server can be edited but not removed",
   "mcp.errPkgMissing": "the component for '{name}' has not been downloaded yet — use the download button under the row to fetch it",
   "mcp.builtin.sequential-thinking.name": "Sequential Thinking",
   "mcp.builtin.memory.name": "Knowledge-graph Memory",
@@ -12136,6 +12144,8 @@ const en = {
   "mcp.builtin.playwright.name": "Playwright (browser automation)",
   "mcp.builtin.github.name": "GitHub (needs token)",
   "mcp.builtin.brave-search.name": "Brave Search (needs key)",
+  "mcp.builtin.fetch.name": "Web content fetch",
+  "mcp.builtin.open-websearch.name": "Key-free web search (Open WebSearch)",
   "mcp.builtin.dsh-workspace.name": "Shared context (Workspace)",
   "download.doneTitle": "Download complete",
   "download.doneBody": "{name} saved to {dir}",
@@ -13240,7 +13250,9 @@ const BUILTIN_MCP_PKG = {
   context7: "@upstash/context7-mcp",
   playwright: "@playwright/mcp",
   github: "@modelcontextprotocol/server-github",
-  "brave-search": "@modelcontextprotocol/server-brave-search"
+  "brave-search": "@modelcontextprotocol/server-brave-search",
+  fetch: "@kazuph/mcp-fetch",
+  "open-websearch": "open-websearch"
 };
 const MCP_PKG_GROUP = "@modelcontextprotocol/server-*";
 let root = null;
@@ -13408,7 +13420,8 @@ function snapshot() {
     status: e.status,
     serverInfo: e.serverInfo,
     toolCount: e.tools.length,
-    lastError: e.lastError
+    lastError: e.lastError,
+    protected: PROTECTED_MCP_IDS.has(e.spec.id)
   }));
 }
 function emitChanged() {
@@ -13438,30 +13451,50 @@ function loadSpecs() {
 function persistSpecs(list) {
   mcpStore().set("servers", list.filter((s) => !isCodeOwnedId(s.id)));
 }
-const LOCKED_MCP_DEFS = [{ id: "filesystem", autoStart: true }];
+const LOCKED_MCP_DEFS = [];
 const SEED_MCP_DEFS = [
+  { id: "filesystem", autoStart: true },
   { id: "sequential-thinking" },
   { id: "memory" },
   { id: "everything" },
   { id: "context7" },
   { id: "playwright" },
+  { id: "fetch" },
+  { id: "open-websearch" },
   { id: "github", enabled: false },
   { id: "brave-search", enabled: false }
 ];
 const LOCKED_MCP_IDS = new Set(LOCKED_MCP_DEFS.map((d) => d.id));
 const SEED_MCP_IDS = new Set(SEED_MCP_DEFS.map((d) => d.id));
 const CURATED_MCP_IDS = /* @__PURE__ */ new Set([...LOCKED_MCP_IDS, ...SEED_MCP_IDS]);
+const PROTECTED_MCP_IDS = /* @__PURE__ */ new Set(["filesystem"]);
 const hasDirArg = (id2) => id2 === "filesystem";
+const CURATED_ENV = {
+  "open-websearch": { MODE: "stdio" }
+};
+function filesystemAllowedRoots() {
+  if (process.platform !== "win32") return ["/"];
+  const roots = /* @__PURE__ */ new Set();
+  for (const p of [resolveDownloadDir(), homedir$1(), process.cwd()]) {
+    try {
+      const root2 = parse(p).root;
+      if (root2) roots.add(root2);
+    } catch {
+    }
+  }
+  return roots.size ? [...roots] : ["C:\\"];
+}
 function curatedSpec(def) {
   const pkg = BUILTIN_MCP_PKG[def.id];
   return {
     id: def.id,
     name: m(`mcp.builtin.${def.id}.name`),
     command: "npx",
-    args: hasDirArg(def.id) ? ["-y", pkg, resolveDownloadDir()] : ["-y", pkg],
+    args: hasDirArg(def.id) ? ["-y", pkg, ...filesystemAllowedRoots()] : ["-y", pkg],
     enabled: def.enabled ?? true,
     autoStart: def.autoStart === true,
-    builtin: LOCKED_MCP_IDS.has(def.id)
+    builtin: LOCKED_MCP_IDS.has(def.id),
+    env: CURATED_ENV[def.id]
   };
 }
 function lockedMcpSpecs() {
@@ -13508,7 +13541,8 @@ function ensureSeeded() {
   const dismissed = new Set(loadDismissed());
   let changed = false;
   for (const def of SEED_MCP_DEFS) {
-    if (present.has(def.id) || dismissed.has(def.id)) continue;
+    if (present.has(def.id)) continue;
+    if (!PROTECTED_MCP_IDS.has(def.id) && dismissed.has(def.id)) continue;
     specs.push(curatedSpec(def));
     present.add(def.id);
     changed = true;
@@ -13561,6 +13595,7 @@ async function saveServer(raw) {
 }
 async function removeServer(id2) {
   if (isCodeOwnedId(id2)) throw new Error(m("mcp.errBuiltinRemove"));
+  if (PROTECTED_MCP_IDS.has(id2)) throw new Error(m("mcp.errProtectedRemove"));
   await disconnect(id2).catch(() => void 0);
   entries.delete(id2);
   persistSpecs(loadSpecs().filter((s) => s.id !== id2));
@@ -13743,6 +13778,7 @@ const mcpHub = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProper
   CURATED_MCP_IDS,
   LOCKED_MCP_IDS,
   MCP_CALL_TOOL_TIMEOUT_MS,
+  PROTECTED_MCP_IDS,
   SEED_MCP_IDS,
   autoStartAll,
   callTool,

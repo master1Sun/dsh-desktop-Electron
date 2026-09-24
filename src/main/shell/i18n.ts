@@ -61,6 +61,7 @@ const zh: Dict = {
   'mcp.errClosed': 'MCP 服务进程已退出（异常终止或被外部结束）',
   'mcp.errBuiltinEdit': '内置 MCP 服务不可修改',
   'mcp.errBuiltinRemove': '内置 MCP 服务不可删除',
+  'mcp.errProtectedRemove': '该内置 MCP 服务可编辑参数，但不可删除',
   'mcp.errPkgMissing': '「{name}」的组件尚未下载，请点击行下方的下载按钮获取',
   'mcp.builtin.sequential-thinking.name': '分步推理 Sequential Thinking',
   'mcp.builtin.memory.name': '知识图谱记忆 Memory',
@@ -70,6 +71,8 @@ const zh: Dict = {
   'mcp.builtin.playwright.name': '浏览器自动化 Playwright',
   'mcp.builtin.github.name': 'GitHub（需密钥）',
   'mcp.builtin.brave-search.name': 'Brave 搜索（需密钥）',
+  'mcp.builtin.fetch.name': '网页内容抓取 Fetch',
+  'mcp.builtin.open-websearch.name': '免密钥网页搜索 Open WebSearch',
   'mcp.builtin.dsh-workspace.name': '共享上下文 Workspace',
 
   'download.doneTitle': '下载完成',
@@ -316,6 +319,7 @@ const en: Dict = {
   'mcp.errClosed': 'MCP server process exited (crashed or killed externally)',
   'mcp.errBuiltinEdit': 'built-in MCP servers cannot be modified',
   'mcp.errBuiltinRemove': 'built-in MCP servers cannot be removed',
+  'mcp.errProtectedRemove': 'this built-in MCP server can be edited but not removed',
   'mcp.errPkgMissing': "the component for '{name}' has not been downloaded yet — use the download button under the row to fetch it",
   'mcp.builtin.sequential-thinking.name': 'Sequential Thinking',
   'mcp.builtin.memory.name': 'Knowledge-graph Memory',
@@ -325,6 +329,8 @@ const en: Dict = {
   'mcp.builtin.playwright.name': 'Playwright (browser automation)',
   'mcp.builtin.github.name': 'GitHub (needs token)',
   'mcp.builtin.brave-search.name': 'Brave Search (needs key)',
+  'mcp.builtin.fetch.name': 'Web content fetch',
+  'mcp.builtin.open-websearch.name': 'Key-free web search (Open WebSearch)',
   'mcp.builtin.dsh-workspace.name': 'Shared context (Workspace)',
 
   'download.doneTitle': 'Download complete',

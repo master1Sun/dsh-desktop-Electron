@@ -29,6 +29,7 @@ import {
   REGISTRY_CANDIDATES,
   DEFAULT_KEYBINDINGS,
   KEYBINDING_ACTIONS,
+  CLI_IDLE_STOP_DEFAULT_MINUTES,
   type KeybindingAction
 } from '@shared/types'
 import { acceleratorFromEvent, formatAccelerator, parseAccelerator } from '@shared/accel'
@@ -962,6 +963,20 @@ watch(
               :autosize="{ minRows: 2, maxRows: 6 }"
               :placeholder="t('settings.autopilotPromptPlaceholder')"
               @change="patch({ autopilotPrompt: autopilotPromptDraft })"
+            />
+          </el-form-item>
+
+          <el-form-item>
+            <template #label
+              >{{ t('settings.cliIdleStop')
+              }}<InfoTip :content="t('settings.cliIdleStopTip')" />
+            </template>
+            <el-input-number
+              :model-value="settingsStore.settings.cliIdleStopMinutes ?? CLI_IDLE_STOP_DEFAULT_MINUTES"
+              :min="0"
+              :max="240"
+              controls-position="right"
+              @update:model-value="patch({ cliIdleStopMinutes: Math.max(0, Number($event) || 0) })"
             />
           </el-form-item>
 

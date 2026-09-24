@@ -122,6 +122,23 @@ describe('terminal store groups & splits', () => {
     expect(store.sessionById(a.id)?.buffer).toContain('hello')
   })
 
+  it('trims a background group buffer to the hidden cap while the active one runs full', async () => {
+    const store = useTerminalStore()
+    const a = await store.start('container', 'A')
+    await store.start('dsh', 'B') // B's group becomes active; A is now a background group
+    const chunk = 'x'.repeat(2048)
+    // Feed far past both caps; A must settle near the hidden ceiling, B near the full one.
+    for (let i = 0; i < 400; i++) {
+      dataCb?.({ id: a.id, data: chunk })
+      dataCb?.({ id: store.activeSession!.id, data: chunk })
+    }
+    const hiddenLen = store.sessionById(a.id)!.buffer.length
+    const activeLen = store.sessionById(store.activeSession!.id)!.buffer.length
+    expect(hiddenLen).toBeLessThan(80 * 1024) // MAX_BUFFER_HIDDEN (64K) + one chunk slack
+    expect(activeLen).toBeGreaterThan(hiddenLen)
+    expect(activeLen).toBeLessThan(300 * 1024) // MAX_BUFFER (256K) + one chunk slack
+  })
+
   it('passes the chosen shell id through to ptyStart (default = none)', async () => {
     const store = useTerminalStore()
     await store.start('container', 'PS', 'powershell')

@@ -55,28 +55,14 @@ import {
   hubEvents
 } from '../src/main/runtime/mcp-hub'
 
-describe('curated MCP servers (one locked + seeded editable defaults)', () => {
-  it('locks only filesystem as a read-only npx row', () => {
-    const specs = lockedMcpSpecs()
-    expect(specs.map((s) => s.id)).toEqual(['filesystem'])
-    for (const s of specs) {
-      expect(s.command).toBe('npx')
-      expect(s.args?.[0]).toBe('-y')
-      expect(s.builtin).toBe(true)
-      expect(s.enabled).toBe(true)
-      // the locked filesystem row is code-owned and auto-connects at boot
-      expect(s.autoStart).toBe(true)
-      expect(s.name).toBeTruthy()
-    }
-    // filesystem is the one row that needs an allowed root: the container's download dir
-    const fs = specs.find((s) => s.id === 'filesystem')!
-    expect(fs.args?.[1]).toBe('@modelcontextprotocol/server-filesystem')
-    expect(fs.args?.[2]).toBeTruthy()
+describe('curated MCP servers (a protected editable seed + ordinary seeds; nothing locked)', () => {
+  it('locks no curated row anymore', () => {
+    expect(lockedMcpSpecs()).toEqual([])
+    expect([...LOCKED_MCP_IDS]).toEqual([])
   })
 
-  it('seeds the other curated servers as ordinary (non-locked) rows', () => {
-    // ensureSeeded runs via listServers; only filesystem is locked, the rest are user-owned.
-    expect([...LOCKED_MCP_IDS]).toEqual(['filesystem'])
+  it('seeds every curated server as an ordinary (non-locked) row', () => {
+    // ensureSeeded runs via listServers; nothing is locked, so every curated id is a seed.
     expect(CURATED_MCP_IDS.size).toBe(LOCKED_MCP_IDS.size + SEED_MCP_IDS.size)
     const byId = new Map(listServers().map((s) => [s.spec.id, s]))
     for (const id of SEED_MCP_IDS) {
@@ -87,6 +73,15 @@ describe('curated MCP servers (one locked + seeded editable defaults)', () => {
     // credential-gated defaults are seeded disabled; the rest enabled
     expect(byId.get('github')!.spec.enabled).toBe(false)
     expect(byId.get('memory')!.spec.enabled).toBe(true)
+    // filesystem is the protected seed: an npx row carrying broad allowed-root positionals
+    const fs = byId.get('filesystem')!
+    expect(fs.spec.command).toBe('npx')
+    expect(fs.spec.args?.[1]).toBe('@modelcontextprotocol/server-filesystem')
+    expect(fs.spec.args?.[2]).toBeTruthy()
+    expect(fs.spec.autoStart).toBe(true)
+    expect(fs.protected).toBe(true)
+    // an ordinary seed is not protected (the user can delete it)
+    expect(byId.get('memory')!.protected).toBe(false)
   })
 
   it('lists exactly one row per curated id (locked one wins over a colliding user row)', () => {
@@ -101,10 +96,19 @@ describe('curated MCP servers (one locked + seeded editable defaults)', () => {
     expect(spec?.builtin).toBeUndefined()
   })
 
-  it('refuses to edit or remove the locked filesystem row', async () => {
-    await expect(saveServer({ id: 'filesystem', command: 'npx' })).rejects.toThrow(/内置|built-in/)
-    await expect(removeServer('filesystem')).rejects.toThrow(/内置|built-in/)
-    expect(listServers().map((s) => s.spec.id)).toContain('filesystem')
+  it('lets the user edit the protected filesystem row but never delete it', async () => {
+    // deletion is refused (a distinct "protected" error, not the read-only built-in one) ...
+    await expect(removeServer('filesystem')).rejects.toThrow(/删除|remove/i)
+    // ... but editing is allowed: no "built-in cannot be modified" rejection, roots follow the edit
+    await saveServer({
+      id: 'filesystem',
+      name: 'Filesystem',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-filesystem', 'C:\\']
+    })
+    const fs = listServers().find((s) => s.spec.id === 'filesystem')
+    expect(fs?.spec.args).toEqual(['-y', '@modelcontextprotocol/server-filesystem', 'C:\\'])
+    expect(fs?.protected).toBe(true)
   })
 
   it('lets the user edit a seeded default outright', async () => {
@@ -121,7 +125,7 @@ describe('curated MCP servers (one locked + seeded editable defaults)', () => {
     expect(listServers().map((s) => s.spec.id)).not.toContain('everything')
   })
 
-  it('persists user rows without leaking the locked row into the store', async () => {
+  it('persists user rows and keeps the protected filesystem seed', async () => {
     await saveServer({ id: 'user-own', name: 'Mine', command: 'node', args: ['s.js'] })
     expect(listServers().map((s) => s.spec.id)).toContain('user-own')
     await removeServer('user-own')

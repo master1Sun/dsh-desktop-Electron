@@ -192,6 +192,9 @@ const zh: Dict = {
     terminalHeightTip: '底部内嵌终端面板的默认高度；拖动面板上边缘后会自动更新这里的值。',
     terminalScrollback: '终端缓存行数',
     terminalScrollbackTip: '每个终端窗口向上可回滚的历史行数（500–50000，默认 8000）；仅对新建的会话生效。',
+    cliIdleStop: '闲置终端自动停止',
+    cliIdleStopTip:
+      '智能体终端页被切走且连续 N 分钟没有任何输出时自动停止，切回该页会重新启动；0 为关闭。',
     rememberWindow: '记住窗口大小',
     rememberWindowTip:
       '保存并恢复主窗口的大小、位置与最大化状态；关闭会同时清除已记住的几何信息，下次启动回到默认尺寸。恢复前会校验窗口还落在某块已连接的屏幕上，拔掉副屏也不会把窗口丢到可视区外。',
@@ -1075,6 +1078,7 @@ const zh: Dict = {
     disabled: '已停用',
     builtinTag: '内置',
     builtinTip: '容器内置能力，不可修改或删除；可连接后浏览和测试其工具',
+    protectedTip: '容器内置能力，可编辑其参数（如允许读取的目录），但不可删除',
     toolsN: '{n} 个工具',
     connect: '连接',
     disconnect: '断开',

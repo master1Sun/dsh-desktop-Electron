@@ -430,7 +430,14 @@ onBeforeUnmount(() => {
           <span class="sname">{{ s.spec.name }}</span>
           <code class="scmd">{{ s.spec.command }}{{ (s.spec.args || []).join(' ') ? ' …' : '' }}</code>
           <el-tag v-if="s.spec.autoStart" size="small" effect="plain" round>{{ t('mcpMgr.autoStart') }}</el-tag>
-          <el-tag v-if="s.spec.builtin" size="small" effect="plain" round class="builtin-tag" :title="t('mcpMgr.builtinTip')">
+          <el-tag
+            v-if="s.spec.builtin || s.protected"
+            size="small"
+            effect="plain"
+            round
+            class="builtin-tag"
+            :title="s.spec.builtin ? t('mcpMgr.builtinTip') : t('mcpMgr.protectedTip')"
+          >
             {{ t('mcpMgr.builtinTag') }}
           </el-tag>
           <el-tag v-if="s.spec.enabled === false" size="small" type="info" round>{{ t('mcpMgr.disabled') }}</el-tag>
@@ -452,7 +459,8 @@ onBeforeUnmount(() => {
             </el-button>
           </el-tooltip>
           <!-- Built-in rows are code-owned: no edit/delete affordance at all (the main
-               process guards both paths too), leaving connect + tool browsing. -->
+               process guards both paths too), leaving connect + tool browsing. A protected
+               seed (filesystem) is editable but undeletable, so it shows edit but not delete. -->
           <el-tooltip
             v-if="!s.spec.builtin"
             :content="t('mcpMgr.edit')"
@@ -464,7 +472,7 @@ onBeforeUnmount(() => {
             </el-button>
           </el-tooltip>
           <el-tooltip
-            v-if="!s.spec.builtin"
+            v-if="!s.spec.builtin && !s.protected"
             :content="t('common.delete')"
             placement="top"
             popper-class="dsh-tip-popper"

@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { dirname, join, basename, extname } from 'node:path'
 import Store from 'electron-store'
 import type { ContainerSettings, DefaultView } from '../../shared/types'
-import { NPM_REGISTRY_DEFAULT } from '../../shared/types'
+import { NPM_REGISTRY_DEFAULT, CLI_IDLE_STOP_DEFAULT_MINUTES } from '../../shared/types'
 import { ENV_INSTALL, ENV_SYSTEM, envDirName } from '../../shared/envDir'
 
 const DEFAULTS: ContainerSettings = {
@@ -68,6 +68,9 @@ const DEFAULTS: ContainerSettings = {
   terminalHeight: 320,
   // scrollback lines kept per terminal surface; clamped to TERMINAL_SCROLLBACK_MAX at create time.
   terminalScrollback: 8000,
+  // a hidden resident CLI with no output for this many minutes gets stopped, so background
+  // agents don't burn memory/CPU forever; 0 = never auto-stop.
+  cliIdleStopMinutes: CLI_IDLE_STOP_DEFAULT_MINUTES,
   // how the terminal is shown: docked into the page area, or a floating overlay that can minimize.
   terminalMode: 'embedded',
   // #26: restore the last window geometry/maximized state. On by default: a container that

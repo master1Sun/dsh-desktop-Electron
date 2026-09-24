@@ -31,6 +31,9 @@ export interface TerminalGroup {
 }
 
 const MAX_BUFFER = 256 * 1024
+/** Cap for sessions with no mounted pane (closed drawer / background group): enough replay to
+    repaint usefully, without letting idle background shells accumulate at the full budget. */
+const MAX_BUFFER_HIDDEN = 64 * 1024
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
   const res = await p
@@ -168,7 +171,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   function feed(id: string, data: string): void {
     const s = sessionById(id)
     if (!s) return
-    if (s.buffer.length > MAX_BUFFER) s.buffer = s.buffer.slice(-MAX_BUFFER / 2)
+    // Only the active group's sessions have a pane on screen; the rest run at the trimmed cap.
+    const cap = open.value && activeGroupId.value === groupBySession(id)?.id ? MAX_BUFFER : MAX_BUFFER_HIDDEN
+    if (s.buffer.length > cap) s.buffer = s.buffer.slice(-(cap / 2))
     s.buffer += data
   }
 

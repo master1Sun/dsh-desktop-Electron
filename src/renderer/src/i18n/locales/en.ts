@@ -196,6 +196,9 @@ const en: Dict = {
     terminalScrollback: 'Terminal scrollback',
     terminalScrollbackTip:
       'Lines each terminal keeps for scrolling up (500–50000, default 8000); applies to newly opened sessions.',
+    cliIdleStop: 'Idle terminal auto-stop',
+    cliIdleStopTip:
+      'A switched-away agent terminal with no output for N straight minutes is stopped automatically; switching back starts it again. 0 turns this off.',
     rememberWindow: 'Remember window size',
     rememberWindowTip:
       'Keeps the main window’s size, position and maximized state across launches. Turning this off also forgets what was stored, so the next start returns to the default size. A restored window is checked against every connected display first, so unplugging a monitor never leaves it off-screen.',
@@ -1106,6 +1109,8 @@ const en: Dict = {
     builtinTag: 'built-in',
     builtinTip:
       'Shipped by the container — cannot be edited or removed; connect it to browse and test its tools',
+    protectedTip:
+      'Shipped by the container — you can edit its arguments (e.g. allowed directories) but not remove it',
     toolsN: '{n} tools',
     connect: 'Connect',
     disconnect: 'Disconnect',

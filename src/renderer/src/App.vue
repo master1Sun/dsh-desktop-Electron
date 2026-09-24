@@ -116,7 +116,7 @@ function startPopoutPage(): void {
 /* ---- Ctrl+K command palette ---- */
 const paletteOpen = ref(false)
 
-/** Stop a running page from the palette; failures surface as a toast. */
+/** Stop a running page from the palette (or a CLI surface's idle auto-stop); failures toast. */
 function stopPage(id: string): void {
   pagesStore.stop(id).catch((err) => ElMessage.error((err as Error).message))
 }
@@ -1720,6 +1720,7 @@ const showNav = computed(() =>
               :page="pagesStore.pages.find((p) => p.id === id) || null"
               :active="id === activePageId"
               @exit="backToWorkbench"
+              @idle-stop="stopPage"
             />
             <HomeView
               ref="homeRef"

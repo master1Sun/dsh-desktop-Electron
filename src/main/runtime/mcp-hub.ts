@@ -14,6 +14,8 @@
  * registry). Live state never persists: every connection starts at 'stopped'.
  */
 import { EventEmitter } from 'node:events'
+import { homedir } from 'node:os'
+import { parse as parsePath } from 'node:path'
 import Store from 'electron-store'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -167,7 +169,8 @@ function snapshot(): McpServerState[] {
     status: e.status,
     serverInfo: e.serverInfo,
     toolCount: e.tools.length,
-    lastError: e.lastError
+    lastError: e.lastError,
+    protected: PROTECTED_MCP_IDS.has(e.spec.id)
   }))
 }
 
@@ -217,14 +220,15 @@ function persistSpecs(list: McpServerSpec[]): void {
 /* ---- curated servers: one locked built-in + a set of editable seeded defaults ---- */
 
 /**
- * The container's curated MCP servers split in two:
- *  - LOCKED (`filesystem`): code-owned, never persisted, non-editable — it binds the one
- *    directory guaranteed writable (the download folder), a security-relevant root we don't
- *    want a stray edit to widen.
- *  - SEED (the rest): injected once into the store as ordinary rows on first sight, after
- *    which the user fully owns them (edit/delete). Deleting adds a tombstone so seeding
- *    never resurrects it; ids not yet seeded (a server added in a future update) still
- *    appear, so this list can grow across releases.
+ * The container's curated MCP servers split in three:
+ *  - LOCKED (none today): code-owned, never persisted, non-editable — kept as a mechanism for a
+ *    future server whose invocation must never be widened by a stray edit.
+ *  - PROTECTED SEED (`filesystem`): an ordinary persisted seed the user can fully EDIT, but that
+ *    can never be deleted — its allowed roots are meant to be tuned, while the server itself
+ *    stays guaranteed-present (ensureSeeded resurrects it past any tombstone).
+ *  - SEED (the rest): injected once into the store as ordinary rows on first sight, after which
+ *    the user owns them (edit/delete). Deleting adds a tombstone so seeding never resurrects it;
+ *    ids not yet seeded (a server added in a future update) still appear, so this list can grow.
  * Every curated row launches its npm package. Once that package is downloaded to
  * userData/mcp the hub swaps the `npx -y` spec for a direct bundled-node launch at connect
  * time (effectiveSpawn) — so seeding keeps specs portable (no baked absolute paths) and any
@@ -237,13 +241,16 @@ interface CuratedDef {
   /** true → auto-connect at container boot (both this and `enabled` must hold) */
   autoStart?: boolean
 }
-const LOCKED_MCP_DEFS: CuratedDef[] = [{ id: 'filesystem', autoStart: true }]
+const LOCKED_MCP_DEFS: CuratedDef[] = []
 const SEED_MCP_DEFS: CuratedDef[] = [
+  { id: 'filesystem', autoStart: true },
   { id: 'sequential-thinking' },
   { id: 'memory' },
   { id: 'everything' },
   { id: 'context7' },
   { id: 'playwright' },
+  { id: 'fetch' },
+  { id: 'open-websearch' },
   { id: 'github', enabled: false },
   { id: 'brave-search', enabled: false }
 ]
@@ -252,20 +259,58 @@ export const SEED_MCP_IDS = new Set(SEED_MCP_DEFS.map((d) => d.id))
 /** Every curated id (locked ∪ seed) — what the on-demand package download provisions. */
 export const CURATED_MCP_IDS = new Set([...LOCKED_MCP_IDS, ...SEED_MCP_IDS])
 
+/**
+ * Seeded rows the container owns the *existence* of: unlike an ordinary seed they cannot be
+ * deleted (no tombstone is ever written, and ensureSeeded resurrects them even if the store was
+ * hand-edited), yet they stay fully editable — `filesystem` is here so the user can widen/trim
+ * its allowed roots without ever losing the server itself.
+ */
+export const PROTECTED_MCP_IDS = new Set<string>(['filesystem'])
+
 /** filesystem is the one curated row that carries an allowed-root positional argument. */
 const hasDirArg = (id: string): boolean => id === 'filesystem'
 
-/** Canonical npx spec for one curated id; the download dir is filesystem's only positional. */
+/**
+ * Seed env baked per curated id — for servers that need a switch set just to speak the hub's
+ * stdio transport. open-websearch otherwise boots an HTTP/SSE server and never answers the
+ * handshake, so we pin MODE=stdio. (The hub merges spec.env into the spawned child.)
+ */
+const CURATED_ENV: Record<string, Record<string, string>> = {
+  'open-websearch': { MODE: 'stdio' }
+}
+
+/**
+ * Allowed roots seeded for the editable `filesystem` row. We aim for "the whole disk" without
+ * probing drives that could hang startup (an offline mapped network drive blocks existsSync on
+ * Windows): derive the distinct drive roots behind paths we already know exist (download dir,
+ * home, cwd). POSIX gets `/`. The row is a persisted seed, so the user can edit this set later.
+ */
+function filesystemAllowedRoots(): string[] {
+  if (process.platform !== 'win32') return ['/']
+  const roots = new Set<string>()
+  for (const p of [resolveDownloadDir(), homedir(), process.cwd()]) {
+    try {
+      const root = parsePath(p).root
+      if (root) roots.add(root)
+    } catch {
+      /* skip an unparseable candidate */
+    }
+  }
+  return roots.size ? [...roots] : ['C:\\']
+}
+
+/** Canonical npx spec for one curated id; filesystem's allowed roots are its only positionals. */
 function curatedSpec(def: CuratedDef): McpServerSpec {
   const pkg = BUILTIN_MCP_PKG[def.id]
   return {
     id: def.id,
     name: m(`mcp.builtin.${def.id}.name`),
     command: 'npx',
-    args: hasDirArg(def.id) ? ['-y', pkg, resolveDownloadDir()] : ['-y', pkg],
+    args: hasDirArg(def.id) ? ['-y', pkg, ...filesystemAllowedRoots()] : ['-y', pkg],
     enabled: def.enabled ?? true,
     autoStart: def.autoStart === true,
-    builtin: LOCKED_MCP_IDS.has(def.id)
+    builtin: LOCKED_MCP_IDS.has(def.id),
+    env: CURATED_ENV[def.id]
   }
 }
 
@@ -340,7 +385,9 @@ function ensureSeeded(): void {
   const dismissed = new Set(loadDismissed())
   let changed = false
   for (const def of SEED_MCP_DEFS) {
-    if (present.has(def.id) || dismissed.has(def.id)) continue
+    if (present.has(def.id)) continue
+    // A protected row can never be dismissed: ignore a stale tombstone and resurrect it.
+    if (!PROTECTED_MCP_IDS.has(def.id) && dismissed.has(def.id)) continue
     specs.push(curatedSpec(def))
     present.add(def.id)
     changed = true
@@ -409,6 +456,7 @@ export async function saveServer(raw: unknown): Promise<McpServerState[]> {
 
 export async function removeServer(id: string): Promise<McpServerState[]> {
   if (isCodeOwnedId(id)) throw new Error(m('mcp.errBuiltinRemove'))
+  if (PROTECTED_MCP_IDS.has(id)) throw new Error(m('mcp.errProtectedRemove'))
   await disconnect(id).catch(() => undefined)
   entries.delete(id)
   persistSpecs(loadSpecs().filter((s) => s.id !== id))

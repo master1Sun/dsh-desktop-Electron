@@ -6,7 +6,11 @@ import '@xterm/xterm/css/xterm.css'
 import type { PageState } from '@renderer/stores/pages'
 import { useSettingsStore } from '@renderer/stores/settings'
 import { useIsLight } from '@renderer/composables/useTheme'
-import { TERMINAL_SCROLLBACK_DEFAULT, TERMINAL_SCROLLBACK_MAX } from '@shared/types'
+import {
+  TERMINAL_SCROLLBACK_DEFAULT,
+  TERMINAL_SCROLLBACK_MAX,
+  CLI_IDLE_STOP_DEFAULT_MINUTES
+} from '@shared/types'
 import TerminalSearchBar from './TerminalSearchBar.vue'
 import { useTerminalClipboard } from './clipboard'
 import { t } from '@renderer/i18n'
@@ -18,7 +22,7 @@ import { t } from '@renderer/i18n'
  * after it stopped/exited” (auto-start on switch), which is what makes the terminal resident.
  */
 const props = defineProps<{ page: PageState | null; active?: boolean }>()
-const emit = defineEmits<{ exit: [] }>()
+const emit = defineEmits<{ exit: []; idleStop: [id: string] }>()
 const settingsStore = useSettingsStore()
 
 /** Clamp the persisted scrollback setting into the range xterm may safely hold. */
@@ -26,6 +30,8 @@ function scrollbackLines(): number {
   const n = settingsStore.settings.terminalScrollback ?? TERMINAL_SCROLLBACK_DEFAULT
   return Math.max(1, Math.min(TERMINAL_SCROLLBACK_MAX, Math.round(n) || TERMINAL_SCROLLBACK_DEFAULT))
 }
+/** The user's full scrollback budget, captured once: while hidden the surface runs a trimmed one. */
+const userScrollback = scrollbackLines()
 
 const containerEl = ref<HTMLElement | null>(null)
 let term: Terminal | null = null
@@ -68,6 +74,15 @@ function flushWrite(): void {
 function queueWrite(data: string): void {
   if (!term) return
   pendingWrite += data
+  // A v-show-hidden surface never gets an intersection, so rAF callbacks are suppressed there —
+  // scheduling one would leak every byte into pendingWrite forever. Background sessions instead
+  // trim their own backlog (the full stream still lands in the main-process page log), and the
+  // next visible chunk reschedules the flush.
+  if (hidden) {
+    if (pendingWrite.length > HIDDEN_WRITE_MAX)
+      pendingWrite = pendingWrite.slice(-Math.floor(HIDDEN_WRITE_MAX / 2))
+    return
+  }
   if (writeScheduled) return
   writeScheduled = true
   requestAnimationFrame(flushWrite)
@@ -179,8 +194,12 @@ async function run(page: PageState): Promise<void> {
     const info = start.data as { id: string }
     ptyId.value = info.id
     state.value = 'running'
+    markActivity()
+    if (hidden) armIdle()
     disposeData = window.container.onPtyData(({ id, data }) => {
-      if (id === ptyId.value) queueWrite(data)
+      if (id !== ptyId.value) return
+      markActivity()
+      queueWrite(data)
     })
     disposeExit = window.container.onPtyExit(({ id, code }) => {
       if (id !== ptyId.value) return
@@ -205,6 +224,7 @@ function cleanupListeners(): void {
   disposeExit?.()
   disposeData = null
   disposeExit = null
+  disarmIdle()
 }
 
 function stopPty(): void {
@@ -213,6 +233,87 @@ function stopPty(): void {
   if (ptyId.value) window.container.ptyKill(ptyId.value).catch(() => undefined)
   ptyId.value = null
 }
+
+/* ---- hidden-session upkeep: idle auto-stop + trimmed buffers --------------------------------
+   A resident CLI nobody looks at keeps its PTY (and its TUI repaint loop) alive forever. Two
+   guards bound the cost: while off-screen the xterm scrollback runs trimmed (restored on reveal),
+   and a session with no output for cliIdleStopMinutes asks App to stop the page — the same
+   explicit-stop path the switcher uses, so the registry's traffic light stays in sync. Only
+   PTY output and local keystrokes count as activity: a “stuck” agent idling into a stop is the
+   accepted trade-off (switching back auto-starts a fresh run); 0 disables the guard. */
+const IDLE_TICK_MS = 5_000
+/** Hard ceiling on bytes a hidden surface may queue before its backlog is trimmed. */
+const HIDDEN_WRITE_MAX = 128 * 1024
+let hidden = false
+let lastActivityAt = Date.now()
+let idleTimer: ReturnType<typeof setInterval> | null = null
+
+function markActivity(): void {
+  lastActivityAt = Date.now()
+}
+
+/** 0 = the guard is off (setting 0 / unset fallback). */
+function idleBudgetMs(): number {
+  const min = settingsStore.settings.cliIdleStopMinutes ?? CLI_IDLE_STOP_DEFAULT_MINUTES
+  return Math.max(0, Math.round(min) || 0) * 60_000
+}
+
+function disarmIdle(): void {
+  if (idleTimer !== null) {
+    clearInterval(idleTimer)
+    idleTimer = null
+  }
+}
+
+function armIdle(): void {
+  disarmIdle()
+  if (idleBudgetMs() <= 0) return
+  idleTimer = setInterval(onIdleTick, IDLE_TICK_MS)
+}
+
+function onIdleTick(): void {
+  if (!hidden || state.value !== 'running' || !props.page) return disarmIdle()
+  if (Date.now() - lastActivityAt >= idleBudgetMs()) emit('idleStop', props.page.id)
+}
+
+/** Cap the surface's retained history to `cap` lines. xterm only re-reads the scrollback option
+    (and trims the existing backlog) inside resize(), so lower it then force a same-grid resize to
+    actually reclaim the memory; a full-screen TUI on the alt buffer has no scrollback to trim and
+    is a no-op. Wrapped defensively so a pending-layout/alt-screen miss just retains memory. */
+function applyBufferCap(cap: number): void {
+  if (!term) return
+  try {
+    term.options.scrollback = Math.max(1, cap)
+    term.resize(term.cols, term.rows)
+  } catch {
+    /* buffer not laid out yet — the reveal path restores the full budget regardless */
+  }
+}
+
+watch(
+  () => props.active,
+  (on) => {
+    hidden = on === false
+    if (hidden) {
+      // The idle budget restarts from the moment the surface leaves the screen.
+      markActivity()
+      armIdle()
+      if (state.value === 'running' || state.value === 'starting')
+        applyBufferCap(Math.min(500, Math.floor(userScrollback / 8)))
+      return
+    }
+    if (on) {
+      disarmIdle()
+      applyBufferCap(userScrollback)
+      // The queue a hidden surface kept now paints in one batch. rAF may never have fired while
+      // hidden, so flush synchronously instead of trusting the scheduled callback.
+      if (pendingWrite) flushWrite()
+    }
+  },
+  { immediate: true }
+)
+
+onBeforeUnmount(disarmIdle)
 
 /**
  * Leave the CLI terminal and give the user back the normal workbench. This only hides the surface
