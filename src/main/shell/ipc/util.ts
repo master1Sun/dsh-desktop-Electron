@@ -1,5 +1,5 @@
 import type { IpcResult } from '../../../shared/types'
-import type { PageRegistry } from '../../runtime/pages'
+import type { PageRegistry } from '../../runtime/pages/pages'
 
 /**
  * The shared plumbing every ipc/<domain> registrar gets: the page registry plus the

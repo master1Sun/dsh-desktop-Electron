@@ -3,9 +3,13 @@
  * after its entry, and boot.cjs + the OTA asar swap are both anchored to `out/main/index.js`.
  * Everything else is grouped by responsibility:
  *
- *   runtime/ what the container hosts — the page registry & lifecycle, the dsh / openclaw /
- *            bundled-Node CLIs, pty terminals, port forensics, project import, metrics,
- *            snapshots and diagnostics
+ *   runtime/ what the container hosts — grouped by capability:
+ *            pages/      the page registry & lifecycle, manifest/import, project classify, snapshot
+ *            cli/        the bundled CLIs & Node: dsh / openclaw / node-runtime
+ *            terminal/   pty sessions and the shared command-line tokenizer
+ *            mcp/        MCP hub/bridge/packages, the container MCP server and the shared workspace
+ *            autopilot/  headless task dispatch (pure state machine + electron wiring)
+ *            diagnostics/ system & network snapshots, metrics, port forensics, probes
  *   update/  how things get newer — the unified update check, the OTA app.asar channel, git
  *            pulls, the bundled-Node updater, and webview file downloads
  *   shell/   the window and its plumbing — IPC handlers, settings store, file logging, the
@@ -16,14 +20,14 @@ import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { IPC } from '../shared/types'
-import { PageRegistry } from './runtime/pages'
-import { autoStartAll as mcpAutoStart, shutdownAll as mcpShutdown } from './runtime/mcp-hub'
-import { startContainerMcpServer, stopContainerMcpServer } from './runtime/container-mcp-server'
-import { initAutopilot, disposeAutopilot } from './runtime/autopilot'
-import { setMcpPackagesRoot } from './runtime/mcp-packages'
+import { PageRegistry } from './runtime/pages/pages'
+import { autoStartAll as mcpAutoStart, shutdownAll as mcpShutdown } from './runtime/mcp/mcp-hub'
+import { startContainerMcpServer, stopContainerMcpServer } from './runtime/mcp/container-mcp-server'
+import { initAutopilot, disposeAutopilot } from './runtime/autopilot/autopilot'
+import { setMcpPackagesRoot } from './runtime/mcp/mcp-packages'
 import { registerIpc, flushPopoutBounds } from './shell/ipc'
-import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './runtime/openclaw'
-import { pnpmBinDirs } from './runtime/dsh'
+import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './runtime/cli/openclaw'
+import { pnpmBinDirs } from './runtime/cli/dsh'
 import {
   getSettings,
   updateSettings,
@@ -32,7 +36,7 @@ import {
   applyLaunchAtStartup,
   applyNpmRegistryEnv
 } from './shell/store'
-import { getNodeRuntimeInfo } from './runtime/node-runtime'
+import { getNodeRuntimeInfo } from './runtime/cli/node-runtime'
 import { m, onLocaleChanged, registerLocaleSource } from './shell/i18n'
 import { installFileLogger } from './shell/logger'
 import { logEvent } from './shell/events'

@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CopyDocument, Hide, Refresh, View, Monitor, Operation } from '@element-plus/icons-vue'
+import {
+  CopyDocument,
+  Hide,
+  Refresh,
+  View,
+  Monitor,
+  Operation,
+  FolderOpened,
+  Promotion,
+  Box
+} from '@element-plus/icons-vue'
 import { usePagesStore } from '@renderer/stores/pages'
 import { useDshStore } from '@renderer/stores/dsh'
 import EmptyState from '@renderer/components/base/EmptyState.vue'
@@ -94,6 +104,49 @@ const maskedToken = computed(() => {
 /** profile being managed; dsh ships web/acp/headless/sdk templates */
 const profile = ref('web')
 const installForm = reactive({ spec: '' })
+
+/* ---- inline plugin import (mirrors PageManager's 智能导入 flow) ----
+   One input accepts every source form (package / GitHub / local dir); `installResult` is
+   null while idle/form and set once an install settles so the progress block can linger on
+   the result. */
+const installResult = ref<{ ok: boolean; spec: string; error?: string } | null>(null)
+const installing = computed(() => !!dsh.busy && dsh.busy.startsWith('install:'))
+const showProgress = computed(() => installing.value || installResult.value !== null)
+// The detail shows a single line: the newest streamed pnpm line, falling back to the
+// authoritative IPC error when the run produced no output (e.g. a rejected spec).
+const detailText = computed(() => {
+  const last = dsh.installOutput[dsh.installOutput.length - 1]
+  if (last) return last
+  const r = installResult.value
+  return r && !r.ok ? r.error || t('dshMgr.msgInstallFail') : ''
+})
+const progressTitle = computed(() => {
+  if (installing.value) return t('dshMgr.opInstalling', { spec: (dsh.busy || '').slice(8) })
+  const r = installResult.value
+  if (!r) return ''
+  return r.ok
+    ? t('dshMgr.installedTitle', { spec: r.spec })
+    : t('dshMgr.installFailedTitle', { spec: r.spec })
+})
+// Drives the progress panel's status dot colour (running pulse / success / failure).
+const progressState = computed(() => {
+  if (installing.value) return 'is-running'
+  const r = installResult.value
+  return r ? (r.ok ? 'is-ok' : 'is-fail') : ''
+})
+/** local-directory source: borrow the native folder picker so users needn't type a path. */
+async function chooseDir(): Promise<void> {
+  try {
+    const res = await window.container.chooseDirectory()
+    if (res?.ok && res.data) installForm.spec = String(res.data)
+  } catch {
+    /* user cancelled or bridge absent; leave the input untouched */
+  }
+}
+function resetInstall(): void {
+  installResult.value = null
+  installForm.spec = ''
+}
 
 /* ---- operation progress: elapsed timer + label for install/update/uninstall ----
    `busy` / `startedAt` live in the dsh store so the strip survives a panel close/reopen; here
@@ -193,14 +246,18 @@ async function install(): Promise<void> {
     ElMessage.warning(t('dshMgr.msgEnterPackage'))
     return
   }
+  installResult.value = null
   const res = await dsh.installPlugin(spec, profile.value)
   await load()
   if (!res.ok) {
-    ElMessage.error(res.error || t('dshMgr.msgInstallFail'))
+    const error = res.error || t('dshMgr.msgInstallFail')
+    installResult.value = { ok: false, spec, error }
+    ElMessage.error(error)
     return
   }
+  // Keep the spec on screen so the progress block can title itself with what just installed.
+  installResult.value = { ok: true, spec }
   ElMessage.success(t('dshMgr.msgInstalled', { spec }))
-  installForm.spec = ''
 }
 
 /**
@@ -307,10 +364,15 @@ const sourceLabel = (p: DshPluginInfo): string =>
 const versionLabel = (p: DshPluginInfo): string =>
   p.present === false ? t('dshMgr.versionMissing') : p.version
 
-/* Cap the plugin table so a long list scrolls inside the table body (fixed header + install/toolbar
-   above) instead of pushing the whole pane. The IM bubble sizes to a shorter box, so cap it tighter
-   there to keep the table (not the tab pane) as the single scroll host. */
-const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : '360px'))
+/* Cap the plugin table so the list scrolls INSIDE the table body while the install card + toolbar
+   stay fixed above it. The cap is viewport-relative (not a fixed px) so "card + toolbar + table"
+   always fits the panel — otherwise the outer `.panel-body` grows a second scrollbar (the card
+   would scroll away too). The `max()` floor keeps a usable list on short windows. */
+const pluginsTableMax = computed(() =>
+  props.tabPosition === 'top'
+    ? 'max(140px, calc(100vh - 440px))'
+    : 'max(160px, calc(100vh - 420px))'
+)
 </script>
 
 <template>
@@ -419,25 +481,79 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
               ><el-icon><Operation /></el-icon>{{ t('dshMgr.tabPlugins') }}</span
             >
           </template>
-          <el-form class="install-row" @submit.prevent="install">
-            <el-form-item style="margin-bottom: 8px">
+          <div class="install-card">
+            <div class="install-head">
+              <span class="install-head-icon"><el-icon><Box /></el-icon></span>
+              <div class="install-head-text">
+                <span class="install-title neon-title soft">{{ t('dshMgr.installTitle') }}</span>
+                <p class="install-hint">{{ t('dshMgr.installDesc') }}</p>
+              </div>
+            </div>
+
+            <div class="install-form">
               <el-input
                 v-model="installForm.spec"
-                :placeholder="t('dshMgr.installPlaceholder')"
+                class="install-input"
+                size="large"
+                :placeholder="t('dshMgr.installSpecPlaceholder')"
                 clearable
+                :disabled="installing"
                 @keyup.enter="install"
               >
                 <template #append>
-                  <el-button
-                    :loading="dsh.busy === `install:${installForm.spec.trim()}`"
-                    @click="install"
+                  <el-tooltip
+                    :content="t('dshMgr.browseDir')"
+                    placement="top"
+                    popper-class="dsh-tip-popper"
                   >
-                    {{ t('dshMgr.install') }}
-                  </el-button>
+                    <el-button :icon="FolderOpened" :disabled="installing" @click="chooseDir" />
+                  </el-tooltip>
                 </template>
               </el-input>
-            </el-form-item>
-          </el-form>
+              <el-button
+                type="primary"
+                size="large"
+                class="install-btn"
+                :loading="installing"
+                :disabled="!installForm.spec.trim()"
+                @click="install"
+              >
+                <el-icon v-if="!installing"><Promotion /></el-icon>
+                {{ t('dshMgr.install') }}
+              </el-button>
+            </div>
+
+            <transition name="ip-fade">
+              <div v-if="showProgress" class="install-progress" :class="progressState">
+                <div class="ip-line">
+                  <span class="ip-dot" />
+                  <span class="ip-title">{{ progressTitle }}</span>
+                  <span v-if="opElapsedText" class="ip-elapsed">{{ opElapsedText }}</span>
+                </div>
+                <el-progress
+                  v-if="installing"
+                  :percentage="0"
+                  :stroke-width="6"
+                  :show-text="false"
+                  indeterminate
+                  striped
+                  :striped-flow="true"
+                />
+                <div
+                  class="ip-output"
+                  :class="{ 'is-error': installResult && !installResult.ok }"
+                  :title="detailText"
+                >
+                  {{ detailText || t('dshMgr.installNoOutput') }}
+                </div>
+                <div v-if="installResult && !installing" class="ip-actions">
+                  <el-button size="small" text @click="resetInstall">
+                    {{ t('dshMgr.installAnother') }}
+                  </el-button>
+                </div>
+              </div>
+            </transition>
+          </div>
 
           <!-- Plugin update toolbar: re-check on demand; 全部更新 only when N>0 updates are known -->
           <div class="plugin-tools">
@@ -475,7 +591,9 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
           <!-- Operation progress strip: visible while any long-running CLI op is active.
                npm/pnpm report no byte progress, so this is the striped indeterminate bar (see
                main.css) rather than a fake percentage; the elapsed counter is the real signal. -->
-          <div v-if="opLabel" class="op-progress">
+          <!-- Operation progress strip for update / uninstall (installs render their own
+               richer block with live output above). -->
+          <div v-if="opLabel && !installing" class="op-progress">
             <div class="op-line">
               <span class="op-text">{{ opLabel }}</span>
               <span v-if="opElapsedText" class="op-elapsed">{{ opElapsedText }}</span>
@@ -490,7 +608,12 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
             />
           </div>
 
-          <el-table :data="plugins" size="small" :max-height="pluginsTableMax" :empty-text="t('dshMgr.pluginsEmpty')">
+          <el-table
+            :data="plugins"
+            size="small"
+            :max-height="pluginsTableMax"
+            :empty-text="t('dshMgr.pluginsEmpty')"
+          >
             <el-table-column :label="t('dshMgr.colPlugin')" min-width="220">
               <template #default="{ row }">
                 <div class="cell-name">{{ row.name }}</div>
@@ -617,8 +740,157 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
   flex-wrap: wrap;
   margin: 0 0 10px;
 }
-.install-row {
-  margin-bottom: 10px;
+.install-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 14px;
+  background: var(--glass-well);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.install-card:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.install-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.install-head-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 9px;
+}
+.install-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.install-title {
+  font-size: 14px;
+  line-height: 1.25;
+}
+.install-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.install-form {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.install-input {
+  flex: 1;
+  min-width: 0;
+}
+.install-btn {
+  flex-shrink: 0;
+}
+.install-btn :deep(.el-icon) {
+  margin-right: 4px;
+}
+.install-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  background: var(--glass-chip);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.ip-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ip-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+.install-progress.is-running .ip-dot {
+  animation: ip-pulse 1.1s ease-in-out infinite;
+}
+.install-progress.is-ok .ip-dot {
+  background: var(--el-color-success);
+}
+.install-progress.is-fail .ip-dot {
+  background: var(--el-color-danger);
+}
+.ip-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ip-elapsed {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.ip-output {
+  padding: 6px 8px;
+  overflow: hidden;
+  font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--glass-well);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.ip-output.is-error {
+  color: var(--el-color-danger);
+}
+.ip-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+@keyframes ip-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.7);
+  }
+}
+.ip-fade-enter-active {
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease;
+}
+.ip-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.ip-fade-enter-from,
+.ip-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 .plugin-tools {
   display: flex;

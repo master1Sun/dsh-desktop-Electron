@@ -9,7 +9,7 @@ import {
   type Executor,
   type RegistryView,
   type TaskExecution
-} from '../src/main/runtime/task-dispatcher'
+} from '../src/main/runtime/autopilot/task-dispatcher'
 import type { PageState, WorkspaceTask } from '../src/shared/types'
 
 const EXEC_PAGE = {

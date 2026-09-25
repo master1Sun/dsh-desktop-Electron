@@ -11,7 +11,7 @@ import {
   mcpPackagesInstalled,
   buildCapabilityStartCommand,
   setMcpPackagesRoot
-} from '../src/main/runtime/mcp-packages'
+} from '../src/main/runtime/mcp/mcp-packages'
 
 /**
  * mcp-packages is electron-free (pure fs/path), so these tests drive it against a throwaway

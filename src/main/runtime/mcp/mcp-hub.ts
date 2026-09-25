@@ -19,10 +19,10 @@ import { parse as parsePath } from 'node:path'
 import Store from 'electron-store'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { logEvent } from '../shell/events'
-import { m } from '../shell/i18n'
-import { resolveDownloadDir } from '../shell/store'
-import { getNodeExePath } from './node-runtime'
+import { logEvent } from '../../shell/events'
+import { m } from '../../shell/i18n'
+import { resolveDownloadDir } from '../../shell/store'
+import { getNodeExePath } from '../cli/node-runtime'
 import { BUILTIN_MCP_PKG, RETIRED_MCP_PKG, resolveMcpPkgEntry } from './mcp-packages'
 import { exportBridgeFiles } from './mcp-bridge'
 import { WORKSPACE_MCP_ID, workspaceMcpSpec } from './workspace-mcp'
@@ -34,7 +34,7 @@ import type {
   McpServerState,
   McpServerStatus,
   McpToolInfo
-} from '../../shared/types'
+} from '../../../shared/types'
 
 /** Handshake + listTools budget for one server; a hung spawn must not wedge the panel. */
 const CONNECT_TIMEOUT_MS = 30_000

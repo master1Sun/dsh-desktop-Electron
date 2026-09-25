@@ -797,7 +797,16 @@ const zh: Dict = {
     opUpdating: '正在更新 {name}…',
     opUninstalling: '正在卸载 {name}…',
     opUpdatingAll: '正在批量更新…',
-    opElapsed: '已 {n}s'
+    opElapsed: '已 {n}s',
+    /** 「导入插件」内联区（对齐 PageManager 的导入风格）。 */
+    installTitle: '导入插件',
+    installDesc: '输入插件的包名、GitHub 仓库地址或本地目录路径。',
+    installSpecPlaceholder: '例如 @deepseek-ai/dsh-experimental-auto-review',
+    browseDir: '浏览本地目录',
+    installNoOutput: '暂无输出…',
+    installAnother: '再装一个',
+    installedTitle: '{spec} 已安装',
+    installFailedTitle: '{spec} 安装失败'
   },
   openclawMgr: {
     emptyError: '未找到 openclaw CLI',

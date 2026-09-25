@@ -12,8 +12,8 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { McpPkgStatus } from '../../shared/types'
-import { isJsLauncher } from './command-line'
+import type { McpPkgStatus } from '../../../shared/types'
+import { isJsLauncher } from '../terminal/command-line'
 
 /** Built-in MCP row id → its npm package name. Order mirrors mcp-hub's curated defs. */
 export const BUILTIN_MCP_PKG: Record<string, string> = {

@@ -23,9 +23,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app } from 'electron'
-import { expandHome } from '../shell/store'
+import { expandHome } from '../../shell/store'
 import { getContainerEndpoint } from './container-endpoint'
-import type { McpServerSpec, McpToolInfo } from '../../shared/types'
+import type { McpServerSpec, McpToolInfo } from '../../../shared/types'
 
 /* ---- #11: the container's own HTTP MCP server, folded into every downstream export ----
    When the container MCP server is running, hosted agents should be able to drive the container

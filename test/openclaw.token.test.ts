@@ -38,7 +38,7 @@ vi.mock('electron-store', () => ({
   }
 }))
 
-import { initializeOpenclawToken, getOpenclawGatewayToken } from '../src/main/runtime/openclaw'
+import { initializeOpenclawToken, getOpenclawGatewayToken } from '../src/main/runtime/cli/openclaw'
 
 let base = ''
 let cfgPath = ''

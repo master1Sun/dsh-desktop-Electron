@@ -2,8 +2,8 @@ import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import * as os from 'node:os'
 import { app } from 'electron'
-import { resolveInstallDir } from '../shell/store'
-import type { NetworkStats, NetInterfaceInfo, SystemInfo } from '../../shared/types'
+import { resolveInstallDir } from '../../shell/store'
+import type { NetworkStats, NetInterfaceInfo, SystemInfo } from '../../../shared/types'
 
 /**
  * System + network snapshots for the Help panel's vertical tabs. Everything here is

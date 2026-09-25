@@ -1148,6 +1148,11 @@ export interface DshPluginOpEvent {
   index?: number
   total?: number
   error?: string
+  /**
+   * One cleaned stdout/stderr line from the running pnpm/dsh process, streamed live while
+   * `done` is false so the panel can show a progress detail (not just "which plugin").
+   */
+  line?: string
 }
 
 /**

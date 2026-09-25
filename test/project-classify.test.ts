@@ -9,7 +9,7 @@ import {
   readPkgSafe,
   npmSuggestionFor,
   runtimeDepCount
-} from '../src/main/runtime/project-classify'
+} from '../src/main/runtime/pages/project-classify'
 
 /** Create a throwaway project dir, run `body`, then clean it up. */
 function withProject(body: (dir: string) => void): void {

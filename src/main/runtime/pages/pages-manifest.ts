@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { resolvePagePort, isValidPort, getSettings } from '../shell/store'
-import { logEvent } from '../shell/events'
-import { m as msg, resolveText } from '../shell/i18n'
-import { OPENCLAW_DEFAULT_PORT, type LocalizableText, type PageMeta } from '../../shared/types'
+import { resolvePagePort, isValidPort, getSettings } from '../../shell/store'
+import { logEvent } from '../../shell/events'
+import { m as msg, resolveText } from '../../shell/i18n'
+import { OPENCLAW_DEFAULT_PORT, type LocalizableText, type PageMeta } from '../../../shared/types'
 
 /**
  * container.json land of the page runtime: the on-disk manifest shape, its validation and the

@@ -1,11 +1,11 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { IPC, type IpcResult, type ContainerMcpInfo, type McpCallToolArgs, type McpCallToolResult, type McpCallEvent, type McpServerSpec, type McpServerState, type McpToolInfo, type WorkspaceContext, type WorkspaceNote, type WorkspaceTask } from '../../../shared/types'
-import { listServers as mcpListServers, saveServer as mcpSaveServer, removeServer as mcpRemoveServer, connect as mcpConnect, disconnect as mcpDisconnect, listTools as mcpListTools, callTool as mcpCallTool, getCalls as mcpGetCalls, hubEvents } from '../../runtime/mcp-hub'
-import { bridgeCatalogFile, bridgeConfigFile, bridgeDir } from '../../runtime/mcp-bridge'
-import { getContainerMcpServerInfo, isContainerMcpServerRunning } from '../../runtime/container-mcp-server'
+import { listServers as mcpListServers, saveServer as mcpSaveServer, removeServer as mcpRemoveServer, connect as mcpConnect, disconnect as mcpDisconnect, listTools as mcpListTools, callTool as mcpCallTool, getCalls as mcpGetCalls, hubEvents } from '../../runtime/mcp/mcp-hub'
+import { bridgeCatalogFile, bridgeConfigFile, bridgeDir } from '../../runtime/mcp/mcp-bridge'
+import { getContainerMcpServerInfo, isContainerMcpServerRunning } from '../../runtime/mcp/container-mcp-server'
 import { getSettings } from '../store'
-import { workspaceInfo, writeWorkspace, broadcastWorkspace } from '../../runtime/workspace'
-import { mcpPackagesStatus } from '../../runtime/mcp-packages'
+import { workspaceInfo, writeWorkspace, broadcastWorkspace } from '../../runtime/mcp/workspace'
+import { mcpPackagesStatus } from '../../runtime/mcp/mcp-packages'
 import { type IpcCtx } from './util'
 
 export function registerMcpIpc(ctx: IpcCtx): void {

@@ -1,9 +1,9 @@
 import { BrowserWindow } from 'electron'
 import { createSocket } from 'node:dgram'
-import { IPC, type NetSample, type OnlinePort, type NetInterfaceInfo } from '../../shared/types'
+import { IPC, type NetSample, type OnlinePort, type NetInterfaceInfo } from '../../../shared/types'
 import { getNetworkStats } from './sysinfo'
 import { probeUrl } from './net-probe'
-import type { PageRegistry } from './pages'
+import type { PageRegistry } from '../pages/pages'
 
 /**
  * Top-bar live-network indicator feed: one main-process loop samples the same

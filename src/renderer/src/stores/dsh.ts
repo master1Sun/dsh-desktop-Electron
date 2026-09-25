@@ -15,6 +15,27 @@ export const useDshStore = defineStore('dsh', () => {
   const busy = ref<string | null>(null)
   /** epoch ms the current op started, so the elapsed timer can be recomputed after a remount. */
   const startedAt = ref(0)
+  /**
+   * Live pnpm/dsh output lines for the in-flight install, streamed from main as `line` events.
+   * Kept in the store (not the panel) so closing/reopening the DSH panel mid-install still shows
+   * the accumulated log. Capped so a very chatty install cannot grow unbounded.
+   */
+  const installOutput = ref<string[]>([])
+  const INSTALL_OUTPUT_CAP = 800
+  /** the spec whose install we currently mirror output for; '' when none. */
+  let trackingSpec = ''
+
+  // Subscribe once for the store's lifetime: main broadcasts every plugin op to all windows, so
+  // we filter to the tracked install and append its output line. Optional-chained for the test
+  // environment where the preload bridge is absent.
+  window.container?.onDshPluginOp?.((p): void => {
+    if (!p.line || p.done) return
+    if (trackingSpec && p.name === trackingSpec) {
+      installOutput.value.push(p.line)
+      if (installOutput.value.length > INSTALL_OUTPUT_CAP)
+        installOutput.value.splice(0, installOutput.value.length - INSTALL_OUTPUT_CAP)
+    }
+  })
 
   async function run(key: string, fn: () => Promise<IpcResult>): Promise<IpcResult> {
     if (busy.value) return { ok: false, error: '' }
@@ -28,8 +49,15 @@ export const useDshStore = defineStore('dsh', () => {
     }
   }
 
-  const installPlugin = (spec: string, profile: string): Promise<IpcResult> =>
-    run(`install:${spec}`, () => window.container.dshInstallPlugin(spec, profile))
+  const installPlugin = (spec: string, profile: string): Promise<IpcResult> => {
+    installOutput.value = []
+    trackingSpec = spec.trim()
+    return run(`install:${spec}`, () => window.container.dshInstallPlugin(spec, profile)).finally(
+      () => {
+        trackingSpec = ''
+      }
+    )
+  }
 
   const uninstallPlugin = (name: string, profile: string): Promise<IpcResult> =>
     run(`uninstall:${name}`, () => window.container.dshUninstallPlugin(name, profile))
@@ -51,5 +79,13 @@ export const useDshStore = defineStore('dsh', () => {
   ): Promise<IpcResult> =>
     run(name, () => window.container.dshUpdatePlugin(name, channel, gitUrl, profile))
 
-  return { busy, startedAt, installPlugin, uninstallPlugin, updatePlugin, updateAllPlugins }
+  return {
+    busy,
+    startedAt,
+    installOutput,
+    installPlugin,
+    uninstallPlugin,
+    updatePlugin,
+    updateAllPlugins
+  }
 })

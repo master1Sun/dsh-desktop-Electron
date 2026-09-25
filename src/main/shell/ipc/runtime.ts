@@ -1,9 +1,9 @@
 import { ipcMain } from 'electron'
 import { IPC, type BuiltinKind, type IpcResult, type UpdateProgress } from '../../../shared/types'
-import { getNodeRuntimeInfo } from '../../runtime/node-runtime'
+import { getNodeRuntimeInfo } from '../../runtime/cli/node-runtime'
 import { listNodeVersions, updateNodeRuntime, restoreBundledNode } from '../../update/node-updater'
 import { clearUpdateCache, provisionBuiltin } from '../../update/update-service'
-import { refreshBuiltinPackages } from '../../runtime/mcp-hub'
+import { refreshBuiltinPackages } from '../../runtime/mcp/mcp-hub'
 import { type IpcCtx } from './util'
 
 export function registerRuntimeIpc(ctx: IpcCtx): void {

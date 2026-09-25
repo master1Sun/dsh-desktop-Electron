@@ -46,8 +46,8 @@ vi.mock('electron-store', () => {
   }
 })
 
-const dsh = await import('../src/main/runtime/dsh')
-const pages = await import('../src/main/runtime/pages')
+const dsh = await import('../src/main/runtime/cli/dsh')
+const pages = await import('../src/main/runtime/pages/pages')
 
 describe('dsh plugin management against the installed CLI', () => {
   afterAll(() => {

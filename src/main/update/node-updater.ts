@@ -18,8 +18,8 @@ import { pipeline } from 'node:stream/promises'
 import { app, net } from 'electron'
 import { m } from '../shell/i18n'
 import { getSettings } from '../shell/store'
-import { getNodeRuntimeInfo, invalidateNodeRuntimeCache, nodeVersionUsable, overrideNodeDir } from '../runtime/node-runtime'
-import type { NodeRuntimeInfo } from '../runtime/node-runtime'
+import { getNodeRuntimeInfo, invalidateNodeRuntimeCache, nodeVersionUsable, overrideNodeDir } from '../runtime/cli/node-runtime'
+import type { NodeRuntimeInfo } from '../runtime/cli/node-runtime'
 import type { NodeVersionInfo, UpdateProgress } from '../../shared/types'
 
 /** Version-index sources, tried in order (CN mirrors first, upstream last). */

@@ -8,16 +8,16 @@
  * fallback poll. Kept separate from task-dispatcher.ts so the state machine stays dependency-free
  * and unit-testable.
  */
-import type { PageRegistry } from './pages'
-import { buildPageEnv, expandStartCommand } from './pages'
-import { PtyManager } from './pty'
-import { bridgeEnvVars } from './mcp-bridge'
-import { getSettings } from '../shell/store'
-import { normalizeTasks, readWorkspace, writeWorkspace, workspaceEnvVars, onWorkspaceTasksChanged } from './workspace'
-import { logEvent } from '../shell/events'
-import { logPageLine } from '../shell/logger'
+import type { PageRegistry } from '../pages/pages'
+import { buildPageEnv, expandStartCommand } from '../pages/pages'
+import { PtyManager } from '../terminal/pty'
+import { bridgeEnvVars } from '../mcp/mcp-bridge'
+import { getSettings } from '../../shell/store'
+import { normalizeTasks, readWorkspace, writeWorkspace, workspaceEnvVars, onWorkspaceTasksChanged } from '../mcp/workspace'
+import { logEvent } from '../../shell/events'
+import { logPageLine } from '../../shell/logger'
 import { TaskDispatcher, type Executor, type TaskExecution } from './task-dispatcher'
-import type { PageState, WorkspaceTask } from '../../shared/types'
+import type { PageState, WorkspaceTask } from '../../../shared/types'
 
 /** How long to let the agent CLI boot before typing the task prompt into its PTY. */
 const BOOT_INJECT_MS = 3500

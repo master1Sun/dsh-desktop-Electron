@@ -13,7 +13,7 @@
  * / `Executor`, so the selection logic and the whole state machine are unit-testable with fakes.
  * The real wiring that binds this to the store / workspace / node-pty lives in `autopilot.ts`.
  */
-import type { PageState, WorkspaceTask } from '../../shared/types'
+import type { PageState, WorkspaceTask } from '../../../shared/types'
 
 /** A task at/over this many dispatch attempts stops being auto-picked (crash-loop guard). */
 export const MAX_ATTEMPTS = 2

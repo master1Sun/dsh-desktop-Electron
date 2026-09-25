@@ -41,7 +41,7 @@ vi.mock('electron-store', () => ({
 }))
 
 import { updateSettings } from '../src/main/shell/store'
-import { buildPageEnv, expandStartCommand } from '../src/main/runtime/pages'
+import { buildPageEnv, expandStartCommand } from '../src/main/runtime/pages/pages'
 import type { EnvVarSpec, PageMeta } from '../src/shared/types'
 
 /**

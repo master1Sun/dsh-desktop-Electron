@@ -22,14 +22,14 @@ import { join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import type { PageRegistry } from './pages'
+import type { PageRegistry } from '../pages/pages'
 import { listTools as hubListTools, callTool as hubCallTool, refreshBridge } from './mcp-hub'
 import { normalizeTasks, readWorkspace, writeWorkspace } from './workspace'
-import { readLogTail } from '../shell/logger'
+import { readLogTail } from '../../shell/logger'
 import { bridgeDir } from './mcp-bridge'
-import { logEvent } from '../shell/events'
+import { logEvent } from '../../shell/events'
 import { setContainerEndpoint, type ContainerEndpoint } from './container-endpoint'
-import type { McpCallToolArgs } from '../../shared/types'
+import type { McpCallToolArgs } from '../../../shared/types'
 
 /** Everything the panel + bridge need to know about a running server. */
 export interface ContainerServerInfo {

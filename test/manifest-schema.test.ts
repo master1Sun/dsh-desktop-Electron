@@ -46,7 +46,7 @@ vi.mock('electron-store', () => ({
   }
 }))
 
-import { MANIFEST_KEYS, readPageMeta, scanInstalledPages } from '../src/main/runtime/pages'
+import { MANIFEST_KEYS, readPageMeta, scanInstalledPages } from '../src/main/runtime/pages/pages'
 import { listEvents, resetEventState } from '../src/main/shell/events'
 import { updateSettings } from '../src/main/shell/store'
 

@@ -1,17 +1,17 @@
 import { app } from 'electron'
 import { promises as fs, type Dirent } from 'node:fs'
 import { join } from 'node:path'
-import type { DiskReport, DiskScope } from '../../shared/types'
+import type { DiskReport, DiskScope } from '../../../shared/types'
 import {
   resolveCapabilitiesDir,
   resolveDownloadDir,
   resolveEnvRoot,
   resolvePagesDir,
   resolveWorkspaceDir
-} from '../shell/store'
-import { logsDir } from '../shell/logger'
-import { CACHE_DIRS, STORAGE_DIRS, clearWebData } from '../shell/webdata'
-import { bridgeDir } from './mcp-bridge'
+} from '../../shell/store'
+import { logsDir } from '../../shell/logger'
+import { CACHE_DIRS, STORAGE_DIRS, clearWebData } from '../../shell/webdata'
+import { bridgeDir } from '../mcp/mcp-bridge'
 
 /**
  * #8: the container's own disk-usage dashboard, surfaced in Settings ▸ 存储.

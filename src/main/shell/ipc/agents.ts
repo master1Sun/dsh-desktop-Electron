@@ -1,8 +1,8 @@
 import { ipcMain } from 'electron'
 import { IPC, type DshTokenResult, type DshUpdateChannel, type IpcResult, type OpenclawInitTokenResult } from '../../../shared/types'
-import { resolveDshToken } from '../../runtime/pages'
-import { getDshStatus, listDshPlugins, installDshPlugin, uninstallDshPlugin, updateDshPlugin, updateAllDshPlugins, checkDshPluginUpdates, createDshPage } from '../../runtime/dsh'
-import { getOpenclawStatus, createOpenclawPage, getOpenclawGatewayToken, initializeOpenclawToken } from '../../runtime/openclaw'
+import { resolveDshToken } from '../../runtime/pages/pages'
+import { getDshStatus, listDshPlugins, installDshPlugin, uninstallDshPlugin, updateDshPlugin, updateAllDshPlugins, checkDshPluginUpdates, createDshPage } from '../../runtime/cli/dsh'
+import { getOpenclawStatus, createOpenclawPage, getOpenclawGatewayToken, initializeOpenclawToken } from '../../runtime/cli/openclaw'
 import { type IpcCtx } from './util'
 
 export function registerAgentsIpc(ctx: IpcCtx): void {

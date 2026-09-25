@@ -54,7 +54,7 @@ import {
   syncOpenclawMcpConfig,
   dshMcpPatchFile,
   OPENCLAW_MCP_PREFIX
-} from '../src/main/runtime/mcp-bridge'
+} from '../src/main/runtime/mcp/mcp-bridge'
 import type { McpServerSpec, McpToolInfo } from '../src/shared/types'
 
 function spec(over: Partial<McpServerSpec> & { id: string }): McpServerSpec {

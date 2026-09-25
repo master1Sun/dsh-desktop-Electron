@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { copyFile, readdir, stat } from 'node:fs/promises'
 import { dirname, join, sep, basename } from 'node:path'
 import { simpleGit } from 'simple-git'
-import { logPageLine } from '../shell/logger'
+import { logPageLine } from '../../shell/logger'
 import { readPageMeta, BUILTIN_PAGE_IDS, type ContainerManifest } from './pages'
 import {
   classifyProject,
@@ -12,13 +12,13 @@ import {
   runtimeDepCount,
   type ProjectClass
 } from './project-classify'
-import { getSettings, isValidPort, updateSettings, applyNpmRegistryEnv } from '../shell/store'
-import { getNodeExePath, bundledEnv } from './node-runtime'
-import { resolveMcpPkgEntry, buildCapabilityStartCommand } from './mcp-packages'
-import { normalizeRepoUrl, cloneWithAuthFallback, type CloneProgress } from '../update/git-updates'
-import { logEvent } from '../shell/events'
-import type { ImportOptions, InstallProgress } from '../../shared/types'
-import { m, msgIn } from '../shell/i18n'
+import { getSettings, isValidPort, updateSettings, applyNpmRegistryEnv } from '../../shell/store'
+import { getNodeExePath, bundledEnv } from '../cli/node-runtime'
+import { resolveMcpPkgEntry, buildCapabilityStartCommand } from '../mcp/mcp-packages'
+import { normalizeRepoUrl, cloneWithAuthFallback, type CloneProgress } from '../../update/git-updates'
+import { logEvent } from '../../shell/events'
+import type { ImportOptions, InstallProgress } from '../../../shared/types'
+import { m, msgIn } from '../../shell/i18n'
 
 /** A local folder path the user meant instead of a URL (e.g. D:\GitProject\dsh-desktop-Electron). */
 export function looksLikeLocalPath(s: string): boolean {

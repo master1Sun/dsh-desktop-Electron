@@ -9,13 +9,13 @@ import {
   resolvePagesDir,
   setDefaultView,
   updateSettings
-} from '../shell/store'
+} from '../../shell/store'
 import { getNodeExePath, bundledEnv } from './node-runtime'
-import { bridgeEnvVars, syncOpenclawMcpConfig, type McpBridgeCatalog } from './mcp-bridge'
-import { workspaceEnvVars } from './workspace'
-import type { ContainerManifest } from './pages'
-import { m, msgIn } from '../shell/i18n'
-import { OPENCLAW_DEFAULT_PORT } from '../../shared/types'
+import { bridgeEnvVars, syncOpenclawMcpConfig, type McpBridgeCatalog } from '../mcp/mcp-bridge'
+import { workspaceEnvVars } from '../mcp/workspace'
+import type { ContainerManifest } from '../pages/pages'
+import { m, msgIn } from '../../shell/i18n'
+import { OPENCLAW_DEFAULT_PORT } from '../../../shared/types'
 
 /** Run a CLI without blocking the main-process event loop (a frozen UI otherwise). */
 function runCli(

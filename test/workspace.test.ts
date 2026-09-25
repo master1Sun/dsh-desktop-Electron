@@ -56,7 +56,7 @@ import {
   broadcastWorkspace,
   isSharedWorkspaceEnabled,
   workspaceInfo
-} from '../src/main/runtime/workspace'
+} from '../src/main/runtime/mcp/workspace'
 import type { WorkspaceTask } from '../src/shared/types'
 
 /**

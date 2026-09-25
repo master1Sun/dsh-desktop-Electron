@@ -21,14 +21,14 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getSettings, resolveWorkspaceDir } from '../shell/store'
+import { getSettings, resolveWorkspaceDir } from '../../shell/store'
 import type {
   WorkspaceContext,
   WorkspaceInfo,
   WorkspaceNote,
   WorkspaceTask,
   WorkspaceTaskStatus
-} from '../../shared/types'
+} from '../../../shared/types'
 
 /* ---- paths ---- */
 

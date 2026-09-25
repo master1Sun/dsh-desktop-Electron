@@ -3,11 +3,11 @@ import { existsSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import * as os from 'node:os'
 import * as pty from 'node-pty'
-import { getNodeExePath } from './node-runtime'
+import { getNodeExePath } from '../cli/node-runtime'
 import { splitCommandArgs, quoteForCreateProcess, isJsLauncher } from './command-line'
-import { pnpmBinDirs } from './dsh'
-import { m } from '../shell/i18n'
-import type { PtyShellInfo } from '../../shared/types'
+import { pnpmBinDirs } from '../cli/dsh'
+import { m } from '../../shell/i18n'
+import type { PtyShellInfo } from '../../../shared/types'
 
 export interface PtySessionInfo {
   id: string

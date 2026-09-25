@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
-import { m } from '../shell/i18n'
-import type { PageMetrics } from '../../shared/types'
-import type { PageRegistry } from './pages'
+import { m } from '../../shell/i18n'
+import type { PageMetrics } from '../../../shared/types'
+import type { PageRegistry } from '../pages/pages'
 
 /**
  * #20: resource sampling (CPU / RSS) for running pages, so the Pages panel can show what each

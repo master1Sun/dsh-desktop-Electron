@@ -137,6 +137,9 @@ export const useTasksStore = defineStore('tasks', () => {
       remove(id)
       return
     }
+    // Per-output-line events stream the install detail to the panel; they are not a separate
+    // progress row, so skip them here (the start event already upserted the row).
+    if (p.line) return
     upsert(id, {
       label: t('topbar.dshPlugin'),
       percent:

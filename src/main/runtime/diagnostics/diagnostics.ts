@@ -15,11 +15,11 @@ import {
 import { join } from 'node:path'
 import { app } from 'electron'
 import * as os from 'node:os'
-import { logsDir } from '../shell/logger'
-import { logEvent } from '../shell/events'
-import { isoShanghai } from '../shell/time'
-import { getSettings, resolveExportPath } from '../shell/store'
-import type { PageRegistry } from './pages'
+import { logsDir } from '../../shell/logger'
+import { logEvent } from '../../shell/events'
+import { isoShanghai } from '../../shell/time'
+import { getSettings, resolveExportPath } from '../../shell/store'
+import type { PageRegistry } from '../pages/pages'
 
 /**
  * One-click diagnostic bundle for field bugs ("it doesn't start on my machine").
@@ -97,15 +97,15 @@ export async function exportDiagnostics(registry: PageRegistry): Promise<string 
     // ---- versions.json: what is running, on what runtime stack ----
     let nodeRuntime: unknown = null
     try {
-      nodeRuntime = await import('./node-runtime').then((r) => r.getNodeRuntimeInfo())
+      nodeRuntime = await import('../cli/node-runtime').then((r) => r.getNodeRuntimeInfo())
     } catch {
       /* dev-tree probing can fail; the rest of the bundle still stands */
     }
     let runtimes: unknown = {}
     try {
       const [{ isDshInstalled }, { isOpenclawInstalled }] = await Promise.all([
-        import('./dsh'),
-        import('./openclaw')
+        import('../cli/dsh'),
+        import('../cli/openclaw')
       ])
       runtimes = { dshInstalled: isDshInstalled(), openclawInstalled: isOpenclawInstalled() }
     } catch {
@@ -191,7 +191,7 @@ export async function exportDiagnostics(registry: PageRegistry): Promise<string 
 
     // ---- mcp.json: hub server states (spec summary only — spec.env may carry credentials) ----
     try {
-      const { listServers } = await import('./mcp-hub')
+      const { listServers } = await import('../mcp/mcp-hub')
       const summary = listServers().map((s) => ({
         id: s.spec.id,
         name: s.spec.name,

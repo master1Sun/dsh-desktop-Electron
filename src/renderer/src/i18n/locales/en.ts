@@ -817,7 +817,16 @@ const en: Dict = {
     opUpdating: 'Updating {name}…',
     opUninstalling: 'Uninstalling {name}…',
     opUpdatingAll: 'Batch-updating…',
-    opElapsed: '{n}s elapsed'
+    opElapsed: '{n}s elapsed',
+    /** Inline plugin import area (mirrors PageManager's import style). */
+    installTitle: 'Import plugin',
+    installDesc: 'Enter the plugin package name, a GitHub repository URL, or a local directory path.',
+    installSpecPlaceholder: 'e.g. @deepseek-ai/dsh-experimental-auto-review',
+    browseDir: 'Browse local directory',
+    installNoOutput: 'No output yet…',
+    installAnother: 'Install another',
+    installedTitle: '{spec} installed',
+    installFailedTitle: '{spec} failed to install'
   },
   openclawMgr: {
     emptyError: 'openclaw CLI not found',

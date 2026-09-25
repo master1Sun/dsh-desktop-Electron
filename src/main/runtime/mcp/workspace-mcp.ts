@@ -14,11 +14,11 @@
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getNodeExePath } from './node-runtime'
+import { getNodeExePath } from '../cli/node-runtime'
 import { bridgeDir } from './mcp-bridge'
 import { isSharedWorkspaceEnabled, workspaceDir, workspaceFile } from './workspace'
-import { m } from '../shell/i18n'
-import type { McpServerSpec } from '../../shared/types'
+import { m } from '../../shell/i18n'
+import type { McpServerSpec } from '../../../shared/types'
 // Vite inlines the server source as a string at build time; we write it to userData at runtime
 // because the bundled node.exe cannot read into app.asar (see workspace-server.mjs header).
 import WORKSPACE_SERVER_SOURCE from './workspace-server.mjs?raw'

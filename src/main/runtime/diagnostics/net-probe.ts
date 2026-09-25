@@ -1,8 +1,8 @@
 import { createServer, createConnection } from 'node:net'
 import { get as httpGet } from 'node:http'
 import { get as httpsGet } from 'node:https'
-import { m } from '../shell/i18n'
-import { REGISTRY_CANDIDATES, type NetProbeResult, type NetProbeStep, type RegistryProbe } from '../../shared/types'
+import { m } from '../../shell/i18n'
+import { REGISTRY_CANDIDATES, type NetProbeResult, type NetProbeStep, type RegistryProbe } from '../../../shared/types'
 
 /**
  * #21: one-shot network diagnostic wizard. npm/git/page-installs all hinge on the network, and

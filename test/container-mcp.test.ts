@@ -57,9 +57,9 @@ import {
   stopContainerMcpServer,
   isContainerMcpServerRunning,
   getContainerMcpServerInfo
-} from '../src/main/runtime/container-mcp-server'
-import { getContainerEndpoint } from '../src/main/runtime/container-endpoint'
-import { buildMcpServersJson } from '../src/main/runtime/mcp-bridge'
+} from '../src/main/runtime/mcp/container-mcp-server'
+import { getContainerEndpoint } from '../src/main/runtime/mcp/container-endpoint'
+import { buildMcpServersJson } from '../src/main/runtime/mcp/mcp-bridge'
 
 const TOOL_NAMES = [
   'container_list_pages',

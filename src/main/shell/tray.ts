@@ -1,7 +1,7 @@
 import { Menu, nativeImage, Tray } from 'electron'
 import type { NativeImage } from 'electron'
 import { existsSync } from 'node:fs'
-import type { PageRegistry } from '../runtime/pages'
+import type { PageRegistry } from '../runtime/pages/pages'
 import { m } from './i18n'
 import { appIconPath } from './icon'
 import { getSettings } from './store'

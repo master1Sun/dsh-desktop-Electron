@@ -37,9 +37,9 @@ vi.mock('node:child_process', async () => {
 // so the case runs the same on a Linux CI host.
 Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
 
-import { collectPageMetrics, getMetricsHistory, resetMetricsHistory } from '../src/main/runtime/metrics'
+import { collectPageMetrics, getMetricsHistory, resetMetricsHistory } from '../src/main/runtime/diagnostics/metrics'
 import type { PageMetrics } from '../src/shared/types'
-import type { PageRegistry } from '../src/main/runtime/pages'
+import type { PageRegistry } from '../src/main/runtime/pages/pages'
 
 const MB = 1024 * 1024
 

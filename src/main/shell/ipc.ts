@@ -1,6 +1,6 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { IPC, type PageProgress } from '../../shared/types'
-import type { PageRegistry } from '../runtime/pages'
+import type { PageRegistry } from '../runtime/pages/pages'
 import { setEventBroadcaster } from './events'
 import { ok, fail, type IpcCtx } from './ipc/util'
 import { registerWindowIpc } from './ipc/window'

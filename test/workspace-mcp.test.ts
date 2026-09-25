@@ -44,20 +44,20 @@ vi.mock('electron-store', () => ({
   }
 }))
 
-vi.mock('../src/main/runtime/node-runtime', () => ({
+vi.mock('../src/main/runtime/cli/node-runtime', () => ({
   getNodeExePath: () => join(scratch, 'bin', 'node'),
   bundledEnv: (e: Record<string, string>) => e,
   envWithPATH: (_dirs: string[], e: Record<string, string>) => e
 }))
 
 import { updateSettings } from '../src/main/shell/store'
-import { workspaceFile, normalizeContext } from '../src/main/runtime/workspace'
+import { workspaceFile, normalizeContext } from '../src/main/runtime/mcp/workspace'
 import {
   WORKSPACE_MCP_ID,
   workspaceServerFile,
   ensureWorkspaceServerScript,
   workspaceMcpSpec
-} from '../src/main/runtime/workspace-mcp'
+} from '../src/main/runtime/mcp/workspace-mcp'
 
 beforeEach(() => {
   rmSync(scratch, { recursive: true, force: true })
@@ -114,7 +114,7 @@ describe('workspace-server.mjs (stdio MCP over newline-delimited JSON-RPC)', () 
     call: (method: string, params?: unknown) => Promise<Record<string, unknown>>
     kill: () => void
   }> {
-    const script = join(__dirname, '..', 'src', 'main', 'runtime', 'workspace-server.mjs')
+    const script = join(__dirname, '..', 'src', 'main', 'runtime', 'mcp', 'workspace-server.mjs')
     const child = spawn(process.execPath, [script], {
       env: { ...process.env, DSH_WORKSPACE_FILE: file }
     })
@@ -167,7 +167,7 @@ describe('workspace-server.mjs (stdio MCP over newline-delimited JSON-RPC)', () 
 
   it('reads, appends to the shared memory, and sets the task end to end', async () => {
     const file = join(scratch, 'workspace', 'context.json')
-    const script = join(__dirname, '..', 'src', 'main', 'runtime', 'workspace-server.mjs')
+    const script = join(__dirname, '..', 'src', 'main', 'runtime', 'mcp', 'workspace-server.mjs')
     const child = spawn(process.execPath, [script], {
       env: { ...process.env, DSH_WORKSPACE_FILE: file }
     })

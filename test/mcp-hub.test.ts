@@ -19,7 +19,7 @@ vi.mock('electron', () => {
   return { ...stub, default: stub }
 })
 
-import { isValidMcpId, sanitizeMcpSpec, flattenToolContent } from '../src/main/runtime/mcp-hub'
+import { isValidMcpId, sanitizeMcpSpec, flattenToolContent } from '../src/main/runtime/mcp/mcp-hub'
 import { mcpToolKey } from '../src/shared/types'
 
 // electron-store gets constructed once the built-in rows are reconciled; back it with
@@ -53,7 +53,7 @@ import {
   callTool,
   getCalls,
   hubEvents
-} from '../src/main/runtime/mcp-hub'
+} from '../src/main/runtime/mcp/mcp-hub'
 
 describe('curated MCP servers (editable + deletable seeds; nothing locked/protected)', () => {
   it('locks no curated row anymore', () => {

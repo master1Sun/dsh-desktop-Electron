@@ -5,13 +5,13 @@ import { createConnection } from 'node:net'
 import { get as httpGet } from 'node:http'
 import { get as httpsGet } from 'node:https'
 import { nativeTheme } from 'electron'
-import { getNodeExePath, bundledEnv } from './node-runtime'
-import { splitCommandArgs } from './command-line'
-import { resolvePageEnv, resolvePageTextEnv, expandHome, getSettings, resolvePageCustomEnvs } from '../shell/store'
-import { logPageLine } from '../shell/logger'
-import { logEvent } from '../shell/events'
-import { findPortHolder } from './port-holder'
-import { notifyEvent } from '../shell/notifications'
+import { getNodeExePath, bundledEnv } from '../cli/node-runtime'
+import { splitCommandArgs } from '../terminal/command-line'
+import { resolvePageEnv, resolvePageTextEnv, expandHome, getSettings, resolvePageCustomEnvs } from '../../shell/store'
+import { logPageLine } from '../../shell/logger'
+import { logEvent } from '../../shell/events'
+import { findPortHolder } from '../diagnostics/port-holder'
+import { notifyEvent } from '../../shell/notifications'
 import {
   bridgeEnvVars,
   buildCatalog,
@@ -19,17 +19,17 @@ import {
   exportBridgeFiles,
   syncCodexConfig,
   syncDshMcpPatch
-} from './mcp-bridge'
-import { workspaceEnvVars } from './workspace'
-import { listServers, listTools } from './mcp-hub'
-import { m as msg } from '../shell/i18n'
+} from '../mcp/mcp-bridge'
+import { workspaceEnvVars } from '../mcp/workspace'
+import { listServers, listTools } from '../mcp/mcp-hub'
+import { m as msg } from '../../shell/i18n'
 import {
   type DshTokenResult,
   type PageMeta,
   type PageProgress,
   type PageState,
   type PageStatus
-} from '../../shared/types'
+} from '../../../shared/types'
 import { scanInstalledPages, type PageKind, type PagesRoot } from './pages-manifest'
 import { reclaimDshHarnesses, reclaimOpenclawOrphans } from './pages-reclaim'
 
@@ -572,7 +572,7 @@ export class PageRegistry extends EventEmitter {
     let launch: { cmd: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }
     if (isDsh) {
       // dynamic import avoids a cycle at module load (dsh.ts imports store only)
-      const { dshSpawnCommand } = await import('./dsh')
+      const { dshSpawnCommand } = await import('../cli/dsh')
       let spec
       try {
         spec = await dshSpawnCommand(e.meta.dshProfile || 'web', port, syncDshMcpPatch(mcpServers))
@@ -587,7 +587,7 @@ export class PageRegistry extends EventEmitter {
         env: { ...spec.env, ...resolvePageCustomEnvs(e.meta.id) }
       }
     } else if (isOpenclaw) {
-      const { openclawSpawnSpec } = await import('./openclaw')
+      const { openclawSpawnSpec } = await import('../cli/openclaw')
       const spec = openclawSpawnSpec(port, mcpServers)
       launch = {
         cmd: spec.cmd,
@@ -662,7 +662,7 @@ export class PageRegistry extends EventEmitter {
         // Self-pair the webview past the "gateway needs a token" screen by fetching a
         // one-time owner-bootstrap Control UI URL from the now-running gateway.
         this.emitProgress(e, 'url')
-        const { resolveOpenclawLaunchUrl } = await import('./openclaw')
+        const { resolveOpenclawLaunchUrl } = await import('../cli/openclaw')
         launchUrl = (await resolveOpenclawLaunchUrl()) || url
       }
       e.launchUrl = launchUrl
@@ -1022,8 +1022,8 @@ export class PageRegistry extends EventEmitter {
    */
   async refreshRuntimePresence(): Promise<void> {
     const [{ isDshInstalled }, { isOpenclawInstalled }] = await Promise.all([
-      import('./dsh'),
-      import('./openclaw')
+      import('../cli/dsh'),
+      import('../cli/openclaw')
     ])
     this.runtimePresence.dsh = isDshInstalled()
     this.runtimePresence.openclaw = isOpenclawInstalled()

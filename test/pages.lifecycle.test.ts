@@ -48,7 +48,7 @@ vi.mock('electron-store', () => {
   }
 })
 
-import { PageRegistry, waitPortReady, readPageMeta, scanInstalledPages } from '../src/main/runtime/pages'
+import { PageRegistry, waitPortReady, readPageMeta, scanInstalledPages } from '../src/main/runtime/pages/pages'
 import { updateSettings } from '../src/main/shell/store'
 
 const projectDir = join(__dirname, '..')

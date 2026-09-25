@@ -4,9 +4,9 @@ import { dirname, join } from 'node:path'
 import { app } from 'electron'
 import { checkOne, performUpdate as gitPull } from './git-updates'
 import { applyAsarUpdate, checkAsarUpdate, type ProgressCb } from './asar-updates'
-import { getNodeExePath } from '../runtime/node-runtime'
-import { getDshStatus, repairPnpmCmd } from '../runtime/dsh'
-import { openclawVersion } from '../runtime/openclaw'
+import { getNodeExePath } from '../runtime/cli/node-runtime'
+import { getDshStatus, repairPnpmCmd } from '../runtime/cli/dsh'
+import { openclawVersion } from '../runtime/cli/openclaw'
 import { resolveCapabilitiesDir, resolvePagesDir, resolveInstallDir, getSettings } from '../shell/store'
 import {
   MCP_PKG_GROUP,
@@ -15,7 +15,7 @@ import {
   mcpPkgVersion,
   resolveMcpPkgEntry,
   buildCapabilityStartCommand
-} from '../runtime/mcp-packages'
+} from '../runtime/mcp/mcp-packages'
 import { m } from '../shell/i18n'
 import { logEvent } from '../shell/events'
 import {

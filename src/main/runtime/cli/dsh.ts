@@ -11,19 +11,19 @@ import {
 } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { envWithPATH, resolveDshNodeExePath } from './node-runtime'
-import { bridgeEnvVars } from './mcp-bridge'
-import { workspaceEnvVars } from './workspace'
+import { bridgeEnvVars } from '../mcp/mcp-bridge'
+import { workspaceEnvVars } from '../mcp/workspace'
 import {
   resolveDshProfileDir,
   resolveDshRuntimeDirs,
   npmRegistryWithSlash,
   resolvePagesDir
-} from '../shell/store'
-import { IPC } from '../../shared/types'
-import type { DshPluginInfo, DshPluginUpdate, DshUpdateChannel } from '../../shared/types'
-import type { ContainerManifest } from './pages'
+} from '../../shell/store'
+import { IPC } from '../../../shared/types'
+import type { DshPluginInfo, DshPluginUpdate, DshUpdateChannel } from '../../../shared/types'
+import type { ContainerManifest } from '../pages/pages'
 // aliased: `m` is already a local identifier in this file (regex match results)
-import { m as msg, msgIn } from '../shell/i18n'
+import { m as msg, msgIn } from '../../shell/i18n'
 
 const DEFAULT_PROFILE = 'web'
 /** An empty writer lock older than this is a crashed holder, not a live writer mid-flush. */
@@ -459,7 +459,9 @@ function validateNpmSpec(spec: string): string {
 export async function installDshPlugin(spec: string, profile = DEFAULT_PROFILE): Promise<void> {
   const s = validateNpmSpec(spec)
   broadcastPluginOp({ name: s, done: false })
-  const tee = pluginOutputTee(`plugin add ${s}`)
+  const tee = pluginOutputTee(`plugin add ${s}`, (line) =>
+    broadcastPluginOp({ name: s, done: false, line })
+  )
   try {
     await dshPluginForward(['add', s], profile, tee.onData)
     broadcastPluginOp({ name: s, done: true })
@@ -499,14 +501,21 @@ export async function uninstallDshPlugin(name: string, profile = DEFAULT_PROFILE
  * progress strip alone only says "which plugin", not "what it did". `flush` emits any tail
  * left after the last newline so a final line without a trailing break is not dropped.
  */
-function pluginOutputTee(label: string): {
+function pluginOutputTee(
+  label: string,
+  onLine?: (line: string) => void
+): {
   onData: (chunk: string) => void
   flush: () => void
 } {
   let buf = ''
   const emit = (line: string): void => {
+    // eslint-disable-next-line no-control-regex -- ANSI/VT color codes are literal bytes in pnpm output
     const trimmed = line.replace(/\x1b\[[0-9;]*m/g, '').trim()
-    if (trimmed) console.log(`[dsh] ${trimmed}`)
+    if (trimmed) {
+      console.log(`[dsh] ${trimmed}`)
+      onLine?.(trimmed)
+    }
   }
   console.log(`[dsh] ${label} started`)
   return {
@@ -530,6 +539,7 @@ function broadcastPluginOp(p: {
   index?: number
   total?: number
   error?: string
+  line?: string
 }): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(IPC.OnDshPluginOp, p)

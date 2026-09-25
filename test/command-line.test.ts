@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { quoteForCreateProcess, splitCommandArgs, isJsLauncher } from '../src/main/runtime/command-line'
+import { quoteForCreateProcess, splitCommandArgs, isJsLauncher } from '../src/main/runtime/terminal/command-line'
 
 describe('splitCommandArgs', () => {
   it('strips the quotes a capability manifest wraps around its absolute entry path', () => {

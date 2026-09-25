@@ -42,7 +42,7 @@ import {
   installFromNpm,
   parseNpmSpec,
   removePage
-} from '../src/main/runtime/installer'
+} from '../src/main/runtime/pages/installer'
 import type { InstallProgress } from '../src/shared/types'
 
 describe('installFromLocalDir container.json seeding', () => {

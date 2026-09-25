@@ -65,7 +65,7 @@ process.env.DSH_TEST_USERDATA = P.userData
 // resolvePagesDir() honours this env var; without it the real (repo) pages dir would be scanned.
 process.env.DSH_PAGES_DIR = P.pages
 
-import { clearDiskScope, getDiskReport } from '../src/main/runtime/disk-usage'
+import { clearDiskScope, getDiskReport } from '../src/main/runtime/diagnostics/disk-usage'
 
 function writeBytes(path: string, n: number): void {
   mkdirSync(join(path, '..'), { recursive: true })
