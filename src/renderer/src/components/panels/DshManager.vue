@@ -318,7 +318,7 @@ const pluginsTableMax = computed(() => (props.tabPosition === 'top' ? '240px' : 
     <EmptyState
       v-if="status && !status.installed"
       :description="status.error || t('dshMgr.emptyError')"
-      hint="npm install @deepseek-ai/dsh@0.1.6-alpha.2"
+      hint="npm install @deepseek-ai/dsh@0.1.7-rc.2"
       :tone="status.error ? 'error' : 'muted'"
     >
       <el-button size="small" text @click="load">{{ t('dshMgr.recheck') }}</el-button>

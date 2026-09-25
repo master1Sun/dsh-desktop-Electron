@@ -774,6 +774,52 @@ function depsOf(row: PageState): DepView[] {
 function hasDownDep(row: PageState): boolean {
   return depsOf(row).some((d) => !d.running)
 }
+
+/* ---- 顶栏显示 tab ----
+   Per-entry visibility for the top-bar page switcher. Lists every installed page (disabled rows
+   included, so the surface mirrors the 已安装页面 list — only a deleted page drops out) plus the
+   external sites; a row's switch writes its id into settings.hiddenSwitcherPages when hidden.
+   MenuBar collapses the whole switcher + running-count badge once nothing switchable is left, so
+   the top bar reads as a plain title bar. Display only — a hidden/disabled page still starts/stops
+   from the 已安装页面 tab; a disabled one won't reach the switcher until it's re-enabled. */
+const switcherEntries = computed<
+  { id: string; name: string; external: boolean; disabled: boolean }[]
+>(() => [
+  ...pagesStore.pages.map((p) => ({
+    id: p.id,
+    name: p.name,
+    external: false,
+    disabled: !!p.disabled
+  })),
+  ...settingsStore.settings.externalSites.map((s) => ({
+    id: s.id,
+    name: s.name,
+    external: true,
+    disabled: false
+  }))
+])
+function switcherVisible(id: string): boolean {
+  return !(settingsStore.settings.hiddenSwitcherPages ?? []).includes(id)
+}
+async function toggleSwitcher(id: string, visible: boolean): Promise<void> {
+  const cur = new Set(settingsStore.settings.hiddenSwitcherPages ?? [])
+  if (visible) cur.delete(id)
+  else cur.add(id)
+  try {
+    await settingsStore.patch({ hiddenSwitcherPages: [...cur] })
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+/** One-click show/hide all: 全部显示 empties the hidden set; 全部隐藏 lists every current entry. */
+async function setAllSwitcher(visible: boolean): Promise<void> {
+  const next = visible ? [] : switcherEntries.value.map((e) => e.id)
+  try {
+    await settingsStore.patch({ hiddenSwitcherPages: next })
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
 </script>
 
 <template>
@@ -1269,6 +1315,58 @@ function hasDownDep(row: PageState): boolean {
         </div>
       </el-tab-pane>
 
+      <!-- 顶栏显示：逐条控制页面/外部站点是否在顶栏「选择页面」切换器中显示；全部隐藏时顶栏切换器与角标一并收起。 -->
+      <el-tab-pane name="switcher">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Monitor /></el-icon>{{ t('pageMgr.tabSwitcher') }}</span
+          >
+        </template>
+        <div class="switcher-wrap">
+          <p class="hint">{{ t('pageMgr.switcherHeading') }}</p>
+          <el-alert
+            :closable="false"
+            type="info"
+            show-icon
+            :title="t('pageMgr.switcherTip')"
+            class="switcher-tip"
+          />
+          <div v-if="switcherEntries.length" class="switcher-actions">
+            <el-button size="small" text type="primary" @click="setAllSwitcher(true)">
+              {{ t('pageMgr.switcherShowAll') }}
+            </el-button>
+            <el-button size="small" text type="warning" @click="setAllSwitcher(false)">
+              {{ t('pageMgr.switcherHideAll') }}
+            </el-button>
+          </div>
+          <el-table v-if="switcherEntries.length" :data="switcherEntries" size="small">
+            <el-table-column :label="t('pageMgr.switcherColName')" min-width="180">
+              <template #default="{ row }">
+                <div class="cell-name">
+                  {{ row.name }}
+                  <span v-if="row.external" class="disabled-tag">
+                    {{ t('settings.tagExternal') }}
+                  </span>
+                  <span v-if="row.disabled" class="disabled-tag">
+                    {{ t('pageMgr.disabledTag') }}
+                  </span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('pageMgr.switcherColShow')" width="140" align="center">
+              <template #default="{ row }">
+                <el-switch
+                  :model-value="switcherVisible(row.id)"
+                  size="small"
+                  @update:model-value="toggleSwitcher(row.id, $event as boolean)"
+                />
+              </template>
+            </el-table-column>
+          </el-table>
+          <p v-else class="hint">{{ t('pageMgr.switcherEmpty') }}</p>
+        </div>
+      </el-tab-pane>
+
       <!-- 环境目录：从「设置」搬来的集中式每页目录开关，与齿轮里的配置同源（写 pageEnvs）。 -->
       <el-tab-pane name="env">
         <template #label>
@@ -1488,6 +1586,17 @@ function hasDownDep(row: PageState): boolean {
   color: var(--text-dim);
   font-size: 13px;
   margin: 4px 0 14px;
+}
+/* 顶栏显示 tab: tip banner sits above the per-entry switch list with a little breathing room. */
+.switcher-wrap .switcher-tip {
+  margin-bottom: 14px;
+}
+/* One-click show/hide-all buttons, right-aligned above the table. */
+.switcher-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 6px;
 }
 .hint code {
   background: var(--glass-chip);

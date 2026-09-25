@@ -142,17 +142,8 @@ const en: Dict = {
       'When on, the container runs its own Streamable-HTTP MCP server on loopback (127.0.0.1); any external/hosted agent holding the bearer token can drive the container — list/start/stop pages, read logs, read/write the shared task queue. Off by default: no listener and no URL is exported to agents when off.',
     containerMcpOn: 'Container MCP server enabled',
     containerMcpOff: 'Container MCP server disabled',
-    autopilotEnabled: 'Auto-dispatch tasks',
-    autopilotEnabledTip:
-      'When on, a todo task whose dependencies are all done is auto-claimed and run headlessly inside the chosen CLI agent page. The agent backfilling its own result wins; a clean executor exit is recorded done by the container, an abnormal one reverts to todo (up to 2 attempts).',
-    autopilotExecutor: 'Executor page',
-    autopilotExecutorTip: 'Only a terminal (CLI) agent page can run tasks; they execute headlessly under that page\'s start command.',
-    autopilotNoExecutor: 'Pick an executor…',
-    autopilotConcurrency: 'Concurrency',
-    autopilotConcurrencyTip: 'How many tasks to dispatch at once (default 1).',
-    autopilotPrompt: 'Dispatch prompt',
-    autopilotPromptTip: 'Template handed to the executor, supporting {title}/{id}/{deps}; empty uses the built-in default (which asks the agent to backfill).',
-    autopilotPromptPlaceholder: 'Leave empty for the built-in default prompt.',
+    // #1 autopilot rows no longer read from here: the whole dispatch policy (switch / executor /
+    // concurrency / prompt) is worded with the task board, under `wsMgr.autopilot*`.
     openLogs: 'Open logs',
     openLogsHint: 'Main-process and per-page output is written here, to debug a packaged build.',
     envRootLoaded: 'Loading…',
@@ -594,6 +585,16 @@ const en: Dict = {
     msgInstalledNpm: 'Installed npm package: {id}',
     tabDir: 'Install from folder',
     tabInstalled: 'Installed pages',
+    /* Top-bar display: per-entry control over which pages/sites appear in the switcher. */
+    tabSwitcher: 'Top Bar',
+    switcherHeading: 'Choose which entries show in the top-bar “Select page” dropdown',
+    switcherTip:
+      'Turning an entry off removes it from the top-bar switcher (display only — it doesn’t affect start/stop). When every entry is off, the switcher and its running-count badge hide together.',
+    switcherColName: 'Page / site',
+    switcherColShow: 'Show in top bar',
+    switcherShowAll: 'Show all',
+    switcherHideAll: 'Hide all',
+    switcherEmpty: 'No installed pages or external sites yet.',
     hintGit:
       'Supports https / git@ repo URLs: a node HTTP-serving project is embedded as a page, while a pure CLI project is auto-detected as a terminal app. Cloned into pages/<repo-name>; if the project ships its own container.json that wins.',
     labelRepo: 'Repository URL',
@@ -742,7 +743,7 @@ const en: Dict = {
     tabOverview: 'Overview',
     tabPlugins: 'Plugins',
     emptyError: '@deepseek-ai/dsh is not installed',
-    installHint: 'npm install @deepseek-ai/dsh@0.1.6-alpha.2',
+    installHint: 'npm install @deepseek-ai/dsh@0.1.7-rc.2',
     recheck: 'Re-check',
     alertNoPnpm: 'pnpm not found',
     alertNoPnpmDesc:
@@ -1202,6 +1203,10 @@ const en: Dict = {
     autopilotExecutor: 'Executor',
     autopilotNoExecutor: 'Pick an executor…',
     autopilotConcurrency: 'Concurrent',
+    autopilotPrompt: 'Dispatch prompt',
+    autopilotPromptTip:
+      'Template handed to the executor, supporting {title}/{id}/{deps}; empty uses the built-in default (which asks the agent to backfill its own result).',
+    autopilotPromptPlaceholder: 'Leave empty for the built-in default prompt.',
     autopilotNeedTerminal: 'A terminal (CLI) agent page is required as the executor; import one first.',
     taskTitlePlaceholder: 'Add a task for agents to claim…',
     addTask: 'Add task',

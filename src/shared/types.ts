@@ -494,6 +494,14 @@ export interface ContainerSettings {
    * Empty = the built-in default that also instructs the agent to call workspace_complete.
    */
   autopilotPrompt?: string
+  /**
+   * Page / external-site ids the user chose to hide from the top-bar page switcher (the
+   * "选择页面" dropdown). Managed from the Pages panel's 顶栏显示 tab. Empty/undefined =
+   * every switchable entry shows. When the switcher would list nothing left (all entries
+   * hidden, or no pages/sites installed), the top bar hides the switcher and its running-count
+   * badge entirely — pages stay startable from the Pages panel.
+   */
+  hiddenSwitcherPages?: string[]
 }
 
 /**

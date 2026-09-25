@@ -270,6 +270,47 @@ describe('shell chrome theme + layout', () => {
     expect(findTrigger('系统')?.classList.contains('active')).toBe(true)
   })
 
+  it('the floating panel dismisses on click-away but not on its own surface', async () => {
+    await mountApp()
+    const findTrigger = (label: string): Element | undefined =>
+      [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
+        b.textContent?.includes(label)
+      )
+    /**
+     * The dismiss path is a capture-phase *mousedown* (matching how a desktop menu behaves and
+     * so a press that starts a text selection already counts). `el.click()` synthesises none,
+     * hence the explicit dispatch.
+     */
+    const press = async (el: Element | null): Promise<void> => {
+      el?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      await nextTick()
+      await new Promise((r) => setTimeout(r, 30))
+      await nextTick()
+    }
+    await click(findTrigger('系统') ?? null)
+    await click(
+      ([...document.querySelectorAll('.drop-list .drop-item')].find((b) =>
+        b.textContent?.includes('设置')
+      ) ?? null) as Element | null
+    )
+    expect(document.querySelector('.panel-card')).not.toBeNull()
+
+    // A press inside the card is the user working in it, not blank space.
+    await press(document.querySelector('.panel-body'))
+    expect(document.querySelector('.panel-card')).not.toBeNull()
+    // A second-level dialog teleports to <body> (see the append-to-body rule above); its overlay
+    // is still the panel's own surface, so closing the panel under a half-filled form is wrong.
+    const overlay = document.createElement('div')
+    overlay.className = 'el-overlay'
+    document.body.appendChild(overlay)
+    await press(overlay)
+    expect(document.querySelector('.panel-card')).not.toBeNull()
+    overlay.remove()
+    // Blank content area → dismiss.
+    await press(document.querySelector('.content-main'))
+    expect(document.querySelector('.panel-card')).toBeNull()
+  })
+
   it('switching the language to English re-renders the menu chrome', async () => {
     await mountApp()
     const zhLabels = [...document.querySelectorAll('.menubar .group-trigger')].map((b) =>

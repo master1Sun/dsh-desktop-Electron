@@ -366,6 +366,11 @@ export function renderDshMcpPatch(servers: McpBridgeCatalog['servers']): unknown
       config: { serverName: dshServerName(c.id), transport: 'http', url: c.url, headers: c.headers }
     })
   }
+  // Stable order: the hub's server list is Map-insertion-ordered and can drift across a
+  // session, and a merely-reordered overlay serializes differently — which reads to dsh's
+  // patch engine (and to syncDshMcpPatch's no-change check below) as a content change that
+  // isn't one. Sorting by the derived patch id keeps an unchanged server set byte-identical.
+  entries.sort((a, b) => String((a as { id?: string }).id ?? '').localeCompare(String((b as { id?: string }).id ?? '')))
   return entries.length ? [{ insert: entries }] : []
 }
 
@@ -374,6 +379,16 @@ export function renderDshMcpPatch(servers: McpBridgeCatalog['servers']): unknown
 export function syncDshMcpPatch(servers: McpBridgeCatalog['servers']): string | null {
   const entries = renderDshMcpPatch(servers)
   if (!entries.length) return null
-  writeText(dshMcpPatchFile(), JSON.stringify(entries, null, 2))
-  return dshMcpPatchFile()
+  const file = dshMcpPatchFile()
+  const next = JSON.stringify(entries, null, 2)
+  // Skip the rewrite when the overlay already holds exactly this content: a no-op write
+  // still bumps mtime and nudges dsh to re-read/re-reconcile the plugin bundle layer on an
+  // otherwise cold boot. Only a genuine content change should touch the file.
+  try {
+    if (existsSync(file) && readFileSync(file, 'utf8') === next) return file
+  } catch {
+    /* unreadable existing file: fall through and rewrite */
+  }
+  writeText(file, next)
+  return file
 }

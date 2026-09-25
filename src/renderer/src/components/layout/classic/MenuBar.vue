@@ -9,6 +9,7 @@ import NetIndicator from '@renderer/components/shell/NetIndicator.vue'
 import { appPanelKey, parseAppPanel, type ExternalSite } from '@shared/types'
 import type { PageState } from '@renderer/stores/pages'
 import { useDualStore } from '@renderer/stores/dual'
+import { useSettingsStore } from '@renderer/stores/settings'
 import { t } from '@renderer/i18n'
 
 export type PanelKind =
@@ -84,6 +85,14 @@ const themeLabel = computed(
 /** 双屏模式 controls live on this menu row; the panes they drive live in HomeView, so both
     read/write the shared dual store rather than prop-drilling through App. */
 const dualStore = useDualStore()
+
+/**
+ * Per-entry switcher visibility, read from the Pages panel's 顶栏显示 tab. Hidden ids drop
+ * out of the dropdown; when nothing is left the top bar hides the switcher + badge entirely
+ * (see `showSwitcher`, derived from `switcherPages` below).
+ */
+const settingsStore = useSettingsStore()
+const hiddenSwitcher = computed(() => settingsStore.settings.hiddenSwitcherPages ?? [])
 
 /**
  * MenuBar owns the group triggers, their dropdown lists, and the centered floating
@@ -209,21 +218,30 @@ const panelLabel = computed(() => {
  * The page switcher also lists saved external sites, so a newly added address is
  * switchable/displayable from 「选择页面」 like any hosted page (embedded in the webview).
  * Disabled built-ins (dsh-web / openclaw switched off in the Pages panel) drop out entirely —
- * the Pages panel stays the only surface that can bring them back.
+ * the Pages panel stays the only surface that can bring them back. Entries the user hid from
+ * the Pages panel's 顶栏显示 tab (hiddenSwitcherPages) drop out too.
  */
 const switcherPages = computed<PageState[]>(() => [
-  ...props.pages.filter((p) => !p.disabled),
-  ...props.externalSites.map((s) => ({
-    id: s.id,
-    name: s.name,
-    dir: '',
-    port: 0,
-    startCommand: '',
-    external: true,
-    externalUrl: s.url,
-    status: 'running' as const
-  }))
+  ...props.pages.filter((p) => !p.disabled && !hiddenSwitcher.value.includes(p.id)),
+  ...props.externalSites
+    .filter((s) => !hiddenSwitcher.value.includes(s.id))
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      dir: '',
+      port: 0,
+      startCommand: '',
+      external: true,
+      externalUrl: s.url,
+      status: 'running' as const
+    }))
 ])
+
+/**
+ * The switcher and its running-count badge show only while there's something to switch to.
+ * Once every entry is hidden (or none is installed) the top bar collapses to a plain title bar.
+ */
+const showSwitcher = computed(() => switcherPages.value.length > 0)
 
 /**
  * Top-left badge counts what the dropdown actually shows, not just the hosted-page total:
@@ -249,8 +267,9 @@ const popoutTarget = computed<PageState | null>(
   () => switcherPages.value.find((x) => x.id === props.activePageId) || null
 )
 
-/* ---- group dropdown lists. Only THESE dismiss on click-away; the floating panels
-       carry a ✕ and Esc closes them too. The page switcher owns its own open state. ---- */
+/* ---- group dropdown lists and the floating panel both dismiss on click-away (see
+       onDocumentMousedown + the .panel-clickaway scrim in App.vue); the panel keeps
+       its ✕ and Esc as well. The page switcher owns its own open state. ---- */
 /** Groups whose dropdown opens another panel: highlight the parent while any child shows. */
 const childKinds: Partial<Record<PanelKind, string[]>> = {
   view: ['external', 'dsh', 'openclaw', 'mcp', 'workspace'],
@@ -323,27 +342,47 @@ function closeDropdowns(): void {
   switchViaMousedown.value = null
 }
 
-/** Capture phase, so a trigger's own re-click toggles before this sees the mousedown. */
+/**
+ * Capture phase, so a trigger's own re-click toggles before this sees the mousedown.
+ * Dismisses both first-level surfaces: an open drop list, and the floating panel — a click on
+ * any blank area now closes it, matching the 效率 layout's rail bubble. The panel's own ✕ / Esc
+ * / re-click paths are untouched, so this only ADDS click-away rather than replacing them.
+ * A full-bleed hosted page needs the separate `.panel-clickaway` scrim in App.vue: an
+ * out-of-process <webview> swallows the host mousedown, so this listener never runs there.
+ */
 function onDocumentMousedown(ev: MouseEvent): void {
-  if (!listGroup.value) return
-  const target = ev.target as Node
-  if ((target as HTMLElement)?.closest?.('.dropdown')) return
-  // Pressing another top-menu trigger: switch the open list to it here, atomically. This
-  // keeps `listGroup` non-null across the mousedown→click gap, so `isActive` never falls
-  // back to `props.current` (which flashed whichever trigger owned the open panel) and the
-  // old list closes in the same tick instead of lingering through the button press.
-  const trig = (target as HTMLElement)?.closest?.('.group-trigger') as HTMLElement | null
-  if (trig) {
-    const kind = trig.dataset.group as PanelKind | undefined
-    if (kind && kind !== listGroup.value) {
-      listGroup.value = kind
-      anchorEl.value = trig
-      switchViaMousedown.value = kind
+  const target = ev.target as Element | null
+  if (listGroup.value) {
+    if (target?.closest?.('.dropdown')) return
+    // Pressing another top-menu trigger: switch the open list to it here, atomically. This
+    // keeps `listGroup` non-null across the mousedown→click gap, so `isActive` never falls
+    // back to `props.current` (which flashed whichever trigger owned the open panel) and the
+    // old list closes in the same tick instead of lingering through the button press.
+    const trig = target?.closest?.('.group-trigger') as HTMLElement | null
+    if (trig) {
+      const kind = trig.dataset.group as PanelKind | undefined
+      if (kind && kind !== listGroup.value) {
+        listGroup.value = kind
+        anchorEl.value = trig
+        switchViaMousedown.value = kind
+      }
+      // Re-pressing the already-open trigger: leave it; the click toggles it closed.
+      return
     }
-    // Re-pressing the already-open trigger: leave it; the click toggles it closed.
+    closeDropdowns()
     return
   }
-  closeDropdowns()
+  // IM layout docks the panel into the left rail instead (QQShell owns that dismiss path).
+  if (!props.current || props.imMode) return
+  // Anything the panel hosts is not "blank space": the card itself, plus what Element Plus
+  // teleports to <body> out of it — a second-level dialog (see the append-to-body rule the
+  // panels obey) or a select popper. Dismissing on those would yank the panel out from under
+  // a form the user is mid-fill.
+  if (target?.closest?.('.panel-card, .el-popper, .el-overlay')) return
+  // The top bar keeps its own semantics: window controls, the page switcher and the dual
+  // picker each manage a surface of their own and must not read as a click-away.
+  if (target?.closest?.('.menubar')) return
+  emit('open', null)
 }
 
 /** Esc peels the topmost surface: drop list first; App.vue closes the panel. */
@@ -369,6 +408,7 @@ onBeforeUnmount(() => {
            just left of the running-count badge, so it reads as part of the desktop-console identity. -->
       <NetIndicator />
       <span
+        v-if="showSwitcher"
         class="running-badge"
         :title="t('menu.runningBadge', { running: switcherGreenCount, total: switcherTotalCount })"
       >
@@ -377,6 +417,7 @@ onBeforeUnmount(() => {
     </div>
 
     <PageSwitcher
+      v-if="showSwitcher"
       ref="switcherRef"
       :pages="switcherPages"
       :active-page-id="props.activePageId"
@@ -738,7 +779,7 @@ onBeforeUnmount(() => {
       @detach="emit('detach')"
     />
 
-    <!-- Centered floating panels; they close via ✕ / Esc / re-click, never click-away.
+    <!-- Centered floating panels; they close via click-away / ✕ / Esc / re-click.
          In IM layout the same panel docks into the left sidebar (QQShell) instead, so skip it here. -->
     <div v-if="props.current && !listGroup && !props.imMode" class="panel-anchor">
       <div class="panel-card" role="dialog" aria-modal="false" :aria-label="panelLabel">

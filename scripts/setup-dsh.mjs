@@ -9,13 +9,14 @@ import { homedir } from 'node:os'
  * the bundled Node runtime, so the container ships the CLI (and its plugin-manager
  * dependency pnpm) and works out of the box without touching the user's global npm.
  *
- * dsh publishes on the `alpha` dist-tag — `@latest` lags behind and is the version
- * line this app pins around (see README), so default to `@alpha`. The registry has
+ * dsh dist-tags are deceptive: `@latest` is the older stable line (0.1.5-rc.3 < alpha), while
+ * `next` mirrors the official desktop release (same-version policy, apps/desktop === @deepseek-ai/dsh)
+ * — so default to `next` = the truly newest, aligned with the official desktop. The registry has
  * a minimumReleaseAge gate; we pass `--config.minimumReleaseAge=0` like every other
  * dsh install this app performs.
  */
 
-const DSH_PKG = process.env.DSH_PKG_SPEC || '@deepseek-ai/dsh@alpha'
+const DSH_PKG = process.env.DSH_PKG_SPEC || '@deepseek-ai/dsh@next'
 const PNPM_PKG = process.env.DSH_PNPM_SPEC || 'pnpm@latest'
 /** Re-run even when already provisioned, to pull a newer version. */
 const FORCE = process.argv.includes('--force') || process.env.DSH_DSH_FORCE === '1'

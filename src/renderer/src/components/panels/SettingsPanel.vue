@@ -673,17 +673,9 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   }
 }
 
-/* #1 autopilot: the 行为 tab mirrors the TaskBoard control so the dispatch policy (enable, which
- * CLI agent page runs tasks, how many at once, and the prompt handed to it) is discoverable in the
- * canonical settings surface too. Enabling a change kicks a dispatch pass in the main process. */
-const autopilotTerminalPages = computed(() => pagesStore.pages.filter((p) => p.kind === 'terminal'))
-const autopilotPromptDraft = ref(settingsStore.settings.autopilotPrompt ?? '')
-watch(
-  () => settingsStore.settings.autopilotPrompt,
-  (v) => {
-    autopilotPromptDraft.value = v ?? ''
-  }
-)
+/* #1 autopilot: the whole dispatch policy (master switch, executor page, concurrency and the
+ * prompt template) is configured on the task board's `autopilot-bar`, right where the queue they
+ * govern is edited — so no autopilot row is mirrored in this panel any more. */
 </script>
 
 <template>
@@ -909,62 +901,7 @@ watch(
             />
           </el-form-item>
 
-          <!-- #1 autopilot:入队即把任务 headless 派发到选定的 CLI 智能体页。 -->
-          <el-form-item>
-            <template #label
-              >{{ t('settings.autopilotEnabled')
-              }}<InfoTip :content="t('settings.autopilotEnabledTip')" />
-            </template>
-            <el-switch
-              :model-value="settingsStore.settings.autopilotEnabled"
-              @update:model-value="patch({ autopilotEnabled: $event as boolean })"
-            />
-          </el-form-item>
-          <el-form-item>
-            <template #label
-              >{{ t('settings.autopilotExecutor')
-              }}<InfoTip :content="t('settings.autopilotExecutorTip')" />
-            </template>
-            <el-select
-              :model-value="settingsStore.settings.autopilotExecutorPage ?? ''"
-              class="set-ctl"
-              :placeholder="t('settings.autopilotNoExecutor')"
-              @update:model-value="patch({ autopilotExecutorPage: $event as string })"
-            >
-              <el-option
-                v-for="p in autopilotTerminalPages"
-                :key="p.id"
-                :label="p.name"
-                :value="p.id"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item>
-            <template #label
-              >{{ t('settings.autopilotConcurrency')
-              }}<InfoTip :content="t('settings.autopilotConcurrencyTip')" />
-            </template>
-            <el-input-number
-              :model-value="settingsStore.settings.autopilotConcurrency ?? 1"
-              :min="1"
-              :max="4"
-              controls-position="right"
-              @update:model-value="patch({ autopilotConcurrency: Number($event) || 1 })"
-            />
-          </el-form-item>
-          <el-form-item>
-            <template #label
-              >{{ t('settings.autopilotPrompt')
-              }}<InfoTip :content="t('settings.autopilotPromptTip')" />
-            </template>
-            <el-input
-              v-model="autopilotPromptDraft"
-              type="textarea"
-              :autosize="{ minRows: 2, maxRows: 6 }"
-              :placeholder="t('settings.autopilotPromptPlaceholder')"
-              @change="patch({ autopilotPrompt: autopilotPromptDraft })"
-            />
-          </el-form-item>
+          <!-- #1 autopilot: every dispatch control lives on the task board's autopilot-bar now. -->
 
           <el-form-item>
             <template #label

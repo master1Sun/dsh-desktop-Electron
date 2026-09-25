@@ -140,17 +140,8 @@ const zh: Dict = {
       '开启后容器自身会在回环地址（127.0.0.1）启动一个 Streamable HTTP 的 MCP 服务，任意外部/托管 agent 可持令牌驱动容器：列出/启停托管页、读日志、读写共享任务队列。默认关闭，关闭时无监听、也不向 agent 导出地址。',
     containerMcpOn: '对外 MCP 服务已开启',
     containerMcpOff: '对外 MCP 服务已关闭',
-    autopilotEnabled: '任务自动派发',
-    autopilotEnabledTip:
-      '开启后，依赖已完成的待办任务会被自动领取并以无头方式在选定的 CLI 智能体页里跑；agent 自行回填结果优先，执行器正常退出时容器代为记完成，异常退出则退回待办（最多重试 2 次）。',
-    autopilotExecutor: '执行页面',
-    autopilotExecutorTip: '只能选终端类（CLI）智能体页；任务会在该页的启动命令里以无头 PTY 执行。',
-    autopilotNoExecutor: '选择执行页…',
-    autopilotConcurrency: '并发数',
-    autopilotConcurrencyTip: '同时最多派发多少个任务（默认 1）。',
-    autopilotPrompt: '派发提示词',
-    autopilotPromptTip: '注入执行页的提示模板，支持 {title}/{id}/{deps} 占位符；留空用内置默认（含要求回填）。',
-    autopilotPromptPlaceholder: '留空则用内置默认提示。',
+    // #1 autopilot rows no longer read from here: the whole dispatch policy (switch / executor /
+    // concurrency / prompt) is worded with the task board, under `wsMgr.autopilot*`.
     openLogs: '打开日志',
     openLogsHint: '主进程与各页面的运行日志会落盘到该目录，便于打包后排查问题。',
     envRootLoaded: '加载中…',
@@ -580,6 +571,16 @@ const zh: Dict = {
     msgInstalledNpm: '已安装 npm 包：{id}',
     tabDir: '从目录安装',
     tabInstalled: '已安装页面',
+    /* 顶栏显示：逐条控制页面/外部站点是否出现在顶栏“选择页面”切换器里。 */
+    tabSwitcher: '顶栏显示',
+    switcherHeading: '选择顶栏“选择页面”下拉里显示的条目',
+    switcherTip:
+      '关闭某项后它不再出现在顶栏切换器里（仅影响显示，不影响启停）；当全部关闭时，顶栏的切换器与运行数角标会一并隐藏。',
+    switcherColName: '页面 / 站点',
+    switcherColShow: '在顶栏显示',
+    switcherShowAll: '全部显示',
+    switcherHideAll: '全部隐藏',
+    switcherEmpty: '当前没有已安装的页面或外部站点。',
     hintGit:
       '支持 https / git@ 仓库地址：带 node http 服务的项目会作为页面内嵌展示，纯命令行项目会自动识别为终端应用。克隆到 pages/<repo名>；若项目自带 container.json 则以自带配置为准。',
     labelRepo: '仓库地址',
@@ -724,7 +725,7 @@ const zh: Dict = {
     tabOverview: '概览',
     tabPlugins: '插件管理',
     emptyError: '未安装 @deepseek-ai/dsh',
-    installHint: 'npm install @deepseek-ai/dsh@0.1.6-alpha.2',
+    installHint: 'npm install @deepseek-ai/dsh@0.1.7-rc.2',
     recheck: '重新检测',
     alertNoPnpm: '未找到 pnpm',
     alertNoPnpmDesc:
@@ -1166,6 +1167,10 @@ const zh: Dict = {
     autopilotExecutor: '执行页',
     autopilotNoExecutor: '选择执行页…',
     autopilotConcurrency: '并发',
+    autopilotPrompt: '派发提示词',
+    autopilotPromptTip:
+      '注入执行页的提示模板，支持 {title}/{id}/{deps} 占位符；留空用内置默认（含要求 agent 自行回填结果）。',
+    autopilotPromptPlaceholder: '留空则用内置默认提示。',
     autopilotNeedTerminal: '需要一个终端（CLI）智能体页作为执行器；请先导入一个。',
     taskTitlePlaceholder: '添加一条任务，供 Agent 认领……',
     addTask: '新增任务',

@@ -1742,17 +1742,13 @@ const showNav = computed(() =>
               @open-panel="(k: string) => (activePanel = k)"
               @cancel-start="cancelStart"
             />
-            <!-- IM click-away catcher (see .qq-clickaway): a page is an out-of-process <webview>
+            <!-- Click-away catcher (see .panel-clickaway): a page is an out-of-process <webview>
                  that swallows host pointerdown, so once it fills the content area a click there
-                 never reaches QQShell's document listener and the rail bubble lingers. This
-                 transparent host layer, sitting above the webview but below the bubble, turns a
-                 content click into a dismiss; it stops at .content-main so the rail, title bar
-                 and window controls stay clickable. -->
-            <div
-              v-if="isIm && activePanel"
-              class="qq-clickaway"
-              @pointerdown="activePanel = null"
-            />
+                 never reaches any document listener — neither QQShell's nor MenuBar's — and the
+                 rail bubble / floating panel lingers. This transparent host layer, sitting above
+                 the webview but below the popups, turns a content click into a dismiss; it stops
+                 at .content-main so the rail, title bar and window controls stay clickable. -->
+            <div v-if="activePanel" class="panel-clickaway" @pointerdown="activePanel = null" />
           </div>
           <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
                v-show, not v-if: unmounting drops the global onPtyData subscription, which
@@ -1814,10 +1810,11 @@ const showNav = computed(() =>
   overflow: hidden;
 }
 
-/* IM-mode click-away layer: transparent, above the webview / market / terminal layers (z ≤ 20)
-   but below the floating bubble (.qq-pop-wrap z 70). It only fills .content-main, so a click on
-   a full-bleed page still dismisses the rail bubble while the rail and window chrome stay live. */
-.qq-clickaway {
+/* Click-away layer, shared by both layouts: transparent, above the webview / market / terminal
+   layers (z ≤ 20) but below the floating surfaces (the IM rail bubble and the classic panel both
+   sit at z 70, inside the menubar's own stacking context). It only fills .content-main, so a click
+   on a full-bleed page still dismisses the popup while the rail and window chrome stay live. */
+.panel-clickaway {
   position: absolute;
   inset: 0;
   z-index: 40;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, toRaw } from 'vue'
+import { computed, onMounted, ref, toRaw, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Delete, ArrowRight, ArrowLeft, Check } from '@element-plus/icons-vue'
 import { t } from '@renderer/i18n'
@@ -34,15 +34,29 @@ const taskDraft = ref('')
 const props = defineProps<{ tabPosition?: 'left' | 'top' }>()
 const activeTab = ref('board')
 
-/* #1 autopilot: the master switch + executor picker live at the top of the board so dispatch can
- * be armed right where the queue is edited. Persisted through the settings store (same partial the
- * 行为 tab writes); main kicks a dispatch pass on the change. */
+/* #1 autopilot: the whole dispatch policy — master switch, executor page, concurrency and the
+ * prompt template — lives at the top of the board so it can be armed right where the queue is
+ * edited. Persisted through the settings store; main kicks a dispatch pass on the change. The
+ * settings panel used to mirror these rows and no longer does. */
 const settingsStore = useSettingsStore()
 const pagesStore = usePagesStore()
 const terminalPages = computed(() => pagesStore.pages.filter((p) => p.kind === 'terminal'))
 const autopilotEnabled = computed(() => !!settingsStore.settings.autopilotEnabled)
 const executorPage = computed(() => settingsStore.settings.autopilotExecutorPage ?? '')
 const concurrency = computed(() => settingsStore.settings.autopilotConcurrency ?? 1)
+
+/**
+ * The prompt template is free text, so it edits a local draft and persists only on the field's own
+ * `change` (blur) — a keystroke must not write the settings store. The watch hands a value changed
+ * elsewhere (an agent-driven settings write) back to the draft.
+ */
+const promptDraft = ref(settingsStore.settings.autopilotPrompt ?? '')
+watch(
+  () => settingsStore.settings.autopilotPrompt,
+  (v) => {
+    promptDraft.value = v ?? ''
+  }
+)
 
 async function patchAutopilot(partial: Parameters<typeof settingsStore.patch>[0]): Promise<void> {
   try {
@@ -177,6 +191,27 @@ onMounted(() => {
               controls-position="right"
               class="ap-conc"
               @update:model-value="patchAutopilot({ autopilotConcurrency: Number($event) || 1 })"
+            />
+          </div>
+          <!-- The template handed to the executor; empty falls back to the built-in prompt. -->
+          <div class="ap-row">
+            <span class="ap-sub">{{ t('wsMgr.autopilotPrompt') }}</span>
+            <el-tooltip
+              :content="t('wsMgr.autopilotPromptTip')"
+              placement="top"
+              :show-after="120"
+              popper-class="dsh-tip-popper"
+            >
+              <span class="ap-help">?</span>
+            </el-tooltip>
+            <el-input
+              v-model="promptDraft"
+              size="small"
+              type="textarea"
+              :autosize="{ minRows: 1, maxRows: 5 }"
+              :placeholder="t('wsMgr.autopilotPromptPlaceholder')"
+              class="ap-prompt"
+              @change="patchAutopilot({ autopilotPrompt: promptDraft })"
             />
           </div>
           <div v-if="autopilotEnabled && !terminalPages.length" class="ap-warn">
@@ -340,6 +375,12 @@ onMounted(() => {
 }
 .autopilot-bar .ap-conc {
   width: 96px;
+}
+/* The prompt takes whatever width its row has left: a free-text template reads better wide, and
+   `flex: 1` keeps its left edge aligned with the pickers above (the label + help glyph are fixed). */
+.autopilot-bar .ap-prompt {
+  flex: 1;
+  min-width: 240px;
 }
 .autopilot-bar .ap-warn {
   font-size: 11px;

@@ -94,6 +94,8 @@ export interface Settings {
   autopilotConcurrency?: number
   /** #1：注入执行器的 prompt 模板，含 {title}/{id}/{deps} 占位符；空=内置默认 */
   autopilotPrompt?: string
+  /** 顶栏“选择页面”切换器中被用户隐藏的页面/外部站点 id 列表；空=全部显示，全部隐藏时顶栏切换器与角标一并隐藏 */
+  hiddenSwitcherPages?: string[]
 }
 
 async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>): Promise<T> {
@@ -152,7 +154,8 @@ export const useSettingsStore = defineStore('settings', () => {
     npmRegistry: '',
     trayPageEntries: 'all',
     trayBadge: 'all',
-    persistentServices: false
+    persistentServices: false,
+    hiddenSwitcherPages: []
   })
   const loaded = ref(false)
 

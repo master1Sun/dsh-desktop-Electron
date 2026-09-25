@@ -86,7 +86,9 @@ const DEFAULTS: ContainerSettings = {
   trayPageEntries: 'all',
   trayBadge: 'all',
   // on by default: hosted agents get the shared workspace pointers at spawn (see runtime/workspace.ts)
-  sharedWorkspace: true
+  sharedWorkspace: true,
+  // empty by default: every switchable page/site shows in the top-bar switcher.
+  hiddenSwitcherPages: []
 }
 
 let store: Store<ContainerSettings> | null = null

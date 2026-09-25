@@ -170,7 +170,8 @@ export class PortNotReadyError extends Error {
 }
 
 export function waitPortReady(port: number, timeoutMs = START_TIMEOUT_MS): Promise<number> {
-  const deadline = Date.now() + timeoutMs
+  const start = Date.now()
+  const deadline = start + timeoutMs
   return new Promise((resolve, reject) => {
     const attempt = (): void => {
       const sock = createConnection({ host: '127.0.0.1', port }, () => {
@@ -182,7 +183,11 @@ export function waitPortReady(port: number, timeoutMs = START_TIMEOUT_MS): Promi
         if (Date.now() > deadline) {
           reject(new PortNotReadyError(port, timeoutMs))
         } else {
-          setTimeout(attempt, 400)
+          // Probe tightly for the first ~2s — that is the window where a warming server is
+          // most likely to bind, so a coarse fixed interval there is pure dead time on every
+          // boot. Relax to 400ms afterward so a genuinely slow cold start doesn't keep
+          // hammering the port with connections.
+          setTimeout(attempt, Date.now() - start < 2000 ? 120 : 400)
         }
       })
     }
