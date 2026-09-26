@@ -1136,23 +1136,26 @@ onBeforeUnmount(() => {
   height: 0;
   display: none;
 }
-/* Damped when 减少动效 is in effect (see stores/settings.applyReduceMotion): the bubble just
-   fades in/out in place, the pill only toggles visibility with a plain opacity fade, and the
-   magnification is pinned off (onPillMove also early-returns, so no `--mag` is ever written). */
+/* Damped when 减少动效 is in effect (see stores/settings.applyReduceMotion): the pill and the
+   bubble simply appear/disappear with no travel or scale, and magnification is pinned off (JS
+   onPillMove also early-returns, so no `--mag` is ever written). NOTE the pill is centred with
+   `left: 50%` + a `translateX(-50%)` baked into its travel transform — so damping must KEEP the
+   -50% (translate3d(-50%,0,0)), never `transform: none`, or the open dock shifts half its width
+   off-centre. `transition: none` (not an asymmetric visibility-delayed fade) so expand and
+   collapse read identically — no reversed open/close feel. */
 html.reduce-motion .qqpop-enter-active .qq-pop,
 html.reduce-motion .qqpop-leave-active .qq-pop {
-  transition: opacity 0.12s linear;
+  transition: none;
 }
 html.reduce-motion .qqpop-enter-from .qq-pop,
 html.reduce-motion .qqpop-leave-to .qq-pop {
+  opacity: 1;
   transform: none;
 }
 html.reduce-motion .qq-shell.pos-bottom .rail-scroll,
 html.reduce-motion .qq-shell.pos-bottom:not(.rail-collapsed) .rail-scroll {
-  transform: none;
-  transition:
-    opacity 0.12s linear,
-    visibility 0s;
+  transform: translate3d(-50%, 0, 0);
+  transition: none;
 }
 html.reduce-motion .qq-shell.pos-bottom .rail-ico {
   transform: none;
