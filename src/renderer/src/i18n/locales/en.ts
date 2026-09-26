@@ -525,6 +525,7 @@ const en: Dict = {
   boot: {
     firstBootHint:
       'The first launch downloads and initializes dependencies and may take 1–2 minutes; please wait…',
+    bootHint: 'The service is starting — this usually takes a few seconds; please wait…',
     viewLogs: 'View logs',
     hideLogs: 'Hide logs',
     elapsed: 'Waiting {n}s',

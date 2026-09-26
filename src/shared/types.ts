@@ -529,6 +529,13 @@ export interface ContainerSettings {
    * badge entirely — pages stay startable from the Pages panel.
    */
   hiddenSwitcherPages?: string[]
+  /**
+   * Page ids that have reached `running` at least once (main-process bookkeeping, not a user
+   * setting). The boot overlay reads it off the progress stream to tell a genuine first boot —
+   * where deps still download and initialize — from an ordinary start, so the long "首次启动
+   * 需下载…" expectation-setter only shows on the former.
+   */
+  bootedPages?: string[]
 }
 
 /**
@@ -815,11 +822,15 @@ export interface UpdateProgress {
  * - retry:    a fast child exit triggered orphan-reclaim; starting a second attempt
  * - log:      no phase transition, just a refreshed log tail
  * - ready:    page is up (the overlay is torn down on the accompanying state change)
+ *
+ * `firstBoot` marks the page's very first successful start (no `running` run ever recorded):
+ * the boot overlay only sets the "首次启动需下载并初始化依赖" expectation for those.
  */
 export interface PageProgress {
   pageId: string
   phase: 'spawning' | 'process' | 'port' | 'url' | 'retry' | 'log' | 'ready'
   logs: string[]
+  firstBoot?: boolean
 }
 
 /**

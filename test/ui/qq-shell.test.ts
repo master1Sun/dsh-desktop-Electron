@@ -3,6 +3,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import QQShell from '../../src/renderer/src/components/layout/qq/QQShell.vue'
 import { buildNav } from '../../src/renderer/src/components/layout/qq/qqNav'
+import { reduceMotion } from '../../src/renderer/src/stores/settings'
 import type { PageState } from '../../src/renderer/src/stores/pages'
 
 /**
@@ -106,11 +107,11 @@ describe('QQShell (IM layout)', () => {
     expect(factory(null).classes()).not.toContain('rail-collapsed')
   })
 
-  it('bottom dock: hover dwells it open after the grace delay, leaving retracts it later', async () => {
+  it('bottom dock: dwelling on the handle expands after the grace delay, leaving retracts it later', async () => {
     vi.useFakeTimers()
     try {
       const w = factory(null, undefined, { sidebarPosition: 'bottom' })
-      const rail = w.find('.qq-rail')
+      const rail = w.find('.rail-handle')
       // A short fly-through cancels the pending expand before the grace elapses.
       await rail.trigger('pointerenter')
       vi.advanceTimersByTime(60)
@@ -136,11 +137,27 @@ describe('QQShell (IM layout)', () => {
     }
   })
 
+  it('bottom dock: the strip outside the handle never triggers the dock', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      // Only the home indicator is a hover trigger; the empty row beside it (and the closed pill)
+      // must leave the dock collapsed — the strip floats over the page and passes hover through.
+      await w.find('.qq-rail').trigger('pointerenter')
+      await w.find('.rail-scroll').trigger('pointerenter')
+      vi.advanceTimersByTime(2000)
+      await w.vm.$nextTick()
+      expect(w.classes()).toContain('rail-collapsed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('bottom dock: re-entering before the leave delay cancels the collapse', async () => {
     vi.useFakeTimers()
     try {
       const w = factory(null, undefined, { sidebarPosition: 'bottom' })
-      const rail = w.find('.qq-rail')
+      const rail = w.find('.rail-handle')
       await rail.trigger('pointerenter')
       vi.advanceTimersByTime(200)
       await w.vm.$nextTick()
@@ -155,11 +172,246 @@ describe('QQShell (IM layout)', () => {
     }
   })
 
+  it('bottom dock: a pending retract never hides the dock while the pointer is still on it', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      const rail = w.find('.rail-handle')
+      // Dwell the dock open, with the pointer resting on the pill (jsdom rects are all-zero,
+      // so (0,0) is inside every element box). Dispatch on the window itself: this mount is not
+      // attached to the document, so an event on a component element never propagates to the
+      // window where the tracker listens.
+      await rail.trigger('pointerenter')
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 0, clientY: 0, bubbles: true })
+      )
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      // The pointer steps off onto the page: a retract arms.
+      const away = new Event('pointerleave') as PointerEvent
+      Object.defineProperty(away, 'relatedTarget', { value: document.body })
+      w.find('.qq-rail').element.dispatchEvent(away)
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      // …but the hand reaches back onto the pill before the dwell elapses: a fresh host move
+      // restores the coordinate and calls the retract off.
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 0, clientY: 0, bubbles: true })
+      )
+      vi.advanceTimersByTime(3000)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bottom dock: leaving the open pill into a guest webview still retracts it', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      const rail = w.find('.rail-handle')
+      await rail.trigger('pointerenter')
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 0, clientY: 0, bubbles: true })
+      )
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      // The pointer crosses onto the <webview>: the host sees exactly one boundary leave and
+      // then goes silent — the guest eats every later pointermove, so the tracked on-dock
+      // coordinate is stale and must not veto the retract. The dock still has to collapse.
+      const into = new Event('pointerleave') as PointerEvent
+      Object.defineProperty(into, 'relatedTarget', { value: document.body })
+      w.find('.qq-rail').element.dispatchEvent(into)
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      vi.advanceTimersByTime(1000)
+      await w.vm.$nextTick()
+      expect(w.classes()).toContain('rail-collapsed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bottom dock: collapseRail() dismisses at once for the page click-away scrim', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      // The scrim arms off `dock-open`: the collapsed mount publishes false up front.
+      expect(w.emitted('dock-open')?.at(-1)).toEqual([false])
+      const rail = w.find('.rail-handle')
+      await rail.trigger('pointerenter')
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      expect(w.emitted('dock-open')?.at(-1)).toEqual([true])
+      // A page click reaches the scrim (the guest webview eats the host's own pointerdown) and
+      // calls the exposed collapse: no dwell timers, the dock is shut immediately.
+      ;(w.vm as unknown as { collapseRail: () => void }).collapseRail()
+      await w.vm.$nextTick()
+      expect(w.classes()).toContain('rail-collapsed')
+      expect(w.emitted('dock-open')?.at(-1)).toEqual([false])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bottom dock: the dimmed indicator pulses back on a period until touched', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      const handle = w.find('.rail-handle')
+      // Mounted at rest dimmed, the reveal loop armed from the first second: the first pulse
+      // lights the bar exactly one period in…
+      expect(handle.classes()).toContain('dimmed')
+      vi.advanceTimersByTime(15000)
+      await w.vm.$nextTick()
+      expect(handle.classes()).not.toContain('dimmed')
+      // …and only the short hold later it is dim again.
+      vi.advanceTimersByTime(460)
+      await w.vm.$nextTick()
+      expect(handle.classes()).toContain('dimmed')
+      // Second period: same bright moment.
+      vi.advanceTimersByTime(14540)
+      await w.vm.$nextTick()
+      expect(handle.classes()).not.toContain('dimmed')
+      // A real interaction ends the loop: dwelling the handle open kills the interval (the bar
+      // itself is repainted too, hence not dimmed while the dock is up).
+      await handle.trigger('pointerenter')
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      expect(handle.classes()).not.toContain('dimmed')
+      vi.advanceTimersByTime(20000)
+      await w.vm.$nextTick()
+      expect(handle.classes()).not.toContain('dimmed')
+      // Step off (a tracked move away, then the boundary leave): the dock retracts, the bar
+      // dims only after the full idle delay, and its reveal restarts on a fresh period —
+      // nothing fires inside the dim window, proving the old interval really died.
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 400, clientY: 200, bubbles: true })
+      )
+      const finalLeave = new Event('pointerleave') as PointerEvent
+      Object.defineProperty(finalLeave, 'relatedTarget', { value: document.body })
+      w.find('.qq-rail').element.dispatchEvent(finalLeave)
+      vi.advanceTimersByTime(1000)
+      await w.vm.$nextTick()
+      expect(w.classes()).toContain('rail-collapsed')
+      expect(handle.classes()).not.toContain('dimmed')
+      // Past the dim edge (collapse 700 + idle 3000 = 3.7s): dark at 4s, and the fresh interval
+      // armed off that edge — tick due at 18.7s, so at 4s it is still dark…
+      vi.advanceTimersByTime(3000)
+      await w.vm.$nextTick()
+      expect(handle.classes()).toContain('dimmed')
+      // …one tick short at 18.6s…
+      vi.advanceTimersByTime(14600)
+      await w.vm.$nextTick()
+      expect(handle.classes()).toContain('dimmed')
+      // …and lit inside the pulse window (450ms hold ends at 19.15s).
+      vi.advanceTimersByTime(300)
+      await w.vm.$nextTick()
+      expect(handle.classes()).not.toContain('dimmed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bottom dock: the pointer sliding off without a leave event still retracts it', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      const rail = w.find('.rail-handle')
+      await rail.trigger('pointerenter')
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 0, clientY: 0, bubbles: true })
+      )
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      // The pointer leaves through a guest webview, which eats the boundary event: the dock saw
+      // no pointerleave at all, so only the document-wide pointermove tracker can notice the
+      // departure — after its dwell delay the dock must still retract.
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 400, clientY: 200, bubbles: true })
+      )
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      vi.advanceTimersByTime(2000)
+      await w.vm.$nextTick()
+      expect(w.classes()).toContain('rail-collapsed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bottom dock: a lost leave event still spares the dock while it is hovered', async () => {
+    vi.useFakeTimers()
+    try {
+      // An open bubble expanded the dock (no pointer involvement). Closing it releases the dock
+      // to the leave dwell — the watch schedules a retract even though no leave event was seen.
+      const w = factory('settings', undefined, { sidebarPosition: 'bottom' })
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      // The rail never saw the pointer's enter/leave pair (a guest webview ate the boundary
+      // event), but the tracker's coordinates say it is still on the dock, so the release path
+      // must not hide it.
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 0, clientY: 0, bubbles: true })
+      )
+      await w.setProps({ current: null })
+      vi.advanceTimersByTime(3000)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bottom dock: an element-hop pointerout keeps the tracked pointer position', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      const rail = w.find('.rail-handle')
+      await rail.trigger('pointerenter')
+      window.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 0, clientY: 0, bubbles: true })
+      )
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      // A pointerout between two host elements still has a relatedTarget — the pointer is on the
+      // dock, so the tracked position must survive and the retract must not fire. Only a
+      // pointerout with no target (pointer left the window) may clear it.
+      const hop = new Event('pointerout') as PointerEvent
+      Object.defineProperty(hop, 'relatedTarget', { value: document.body })
+      document.dispatchEvent(hop)
+      await rail.trigger('pointerleave')
+      vi.advanceTimersByTime(3000)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      // Now a real window exit: the position is dropped and the dock retracts on its dwell.
+      document.dispatchEvent(new Event('pointerout'))
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      vi.advanceTimersByTime(2000)
+      await w.vm.$nextTick()
+      expect(w.classes()).toContain('rail-collapsed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('bottom dock: a leave that stays inside the shell is noise and never retracts', async () => {
     vi.useFakeTimers()
     try {
       const w = factory(null, undefined, { sidebarPosition: 'bottom' })
-      const rail = w.find('.qq-rail')
+      const rail = w.find('.rail-handle')
       await rail.trigger('pointerenter')
       vi.advanceTimersByTime(200)
       await w.vm.$nextTick()
@@ -184,7 +436,7 @@ describe('QQShell (IM layout)', () => {
       await w.vm.$nextTick()
       expect(w.classes()).not.toContain('rail-collapsed')
       // Hovering away never retracts while the panel is open — the card floats right above it.
-      await w.find('.qq-rail').trigger('pointerleave')
+      await w.find('.rail-handle').trigger('pointerleave')
       await w.find('.qq-pop').trigger('mouseleave')
       vi.advanceTimersByTime(3000)
       await w.vm.$nextTick()
@@ -262,6 +514,72 @@ describe('QQShell (IM layout)', () => {
     expect(w.emitted('open-panel')?.at(-1)).toEqual([null])
     w.unmount()
     host.remove()
+  })
+
+  it('bottom dock: magnifies the icons nearest the pointer along a proximity falloff', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      const btns = w.findAll('.rail-btn')
+      // jsdom reports a zero rect for every element; stage three tiles at known x-centres so the
+      // gaussian has real distances to work against (tile 1 under the pointer, tile 2 mid, tile 3 far).
+      const centres = [20, 100, 400]
+      const rectAt = (cx: number): DOMRect =>
+        ({
+          left: cx - 19,
+          right: cx + 19,
+          top: 0,
+          bottom: 38,
+          x: cx - 19,
+          y: 0,
+          width: 38,
+          height: 38,
+          toJSON: () => ({})
+        }) as DOMRect
+      btns.slice(0, 3).forEach((b, i) => {
+        b.element.getBoundingClientRect = () => rectAt(centres[i])
+      })
+      // Dwell the dock open, then slide the pointer across the pill at tile 1's centre.
+      await w.find('.rail-handle').trigger('pointerenter')
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      w.find('.rail-scroll').element.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 100, bubbles: true })
+      )
+      const magOf = (i: number): number =>
+        parseFloat(btns[i].element.style.getPropertyValue('--mag') || '1')
+      expect(magOf(1)).toBeCloseTo(1.45, 2) // peak: right under the pointer
+      expect(magOf(0)).toBeGreaterThan(1.05) // 80px neighbour swells a little
+      expect(magOf(0)).toBeLessThan(magOf(1)) // ...but less than the tile under the cursor
+      expect(magOf(2)).toBeLessThan(1.05) // 300px away: effectively flat
+      // Leaving the pill clears every inline scale (resting transform falls back to var default).
+      w.find('.rail-scroll').element.dispatchEvent(new Event('pointerleave'))
+      expect(btns[1].element.style.getPropertyValue('--mag')).toBe('')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bottom dock: magnification is skipped entirely when 减少动效 is in effect', async () => {
+    vi.useFakeTimers()
+    reduceMotion.value = true
+    try {
+      const w = factory(null, undefined, { sidebarPosition: 'bottom' })
+      const btns = w.findAll('.rail-btn')
+      await w.find('.rail-handle').trigger('pointerenter')
+      vi.advanceTimersByTime(200)
+      await w.vm.$nextTick()
+      expect(w.classes()).not.toContain('rail-collapsed')
+      w.find('.rail-scroll').element.dispatchEvent(
+        new MouseEvent('pointermove', { clientX: 100, bubbles: true })
+      )
+      // The tracker early-returns before touching any tile, so no scale is ever written.
+      expect(btns[1].element.style.getPropertyValue('--mag')).toBe('')
+    } finally {
+      reduceMotion.value = false
+      vi.useRealTimers()
+    }
   })
 })
 

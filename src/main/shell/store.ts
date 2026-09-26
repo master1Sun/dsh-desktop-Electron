@@ -90,7 +90,9 @@ const DEFAULTS: ContainerSettings = {
   // on by default: hosted agents get the shared workspace pointers at spawn (see runtime/workspace.ts)
   sharedWorkspace: true,
   // empty by default: every switchable page/site shows in the top-bar switcher.
-  hiddenSwitcherPages: []
+  hiddenSwitcherPages: [],
+  // page ids that ever reached `running` — first-boot bookkeeping for the boot overlay.
+  bootedPages: []
 }
 
 let store: Store<ContainerSettings> | null = null
@@ -104,6 +106,19 @@ export function getStore(): Store<ContainerSettings> {
 
 export function getSettings(): ContainerSettings {
   return { ...DEFAULTS, ...(getStore().store as ContainerSettings) }
+}
+
+/** Has this page ever finished a start? Drives the boot overlay's first-boot hint. */
+export function hasBooted(pageId: string): boolean {
+  return (getStore().get('bootedPages') || []).includes(pageId)
+}
+
+/** Record a successful start (idempotent; only the first one writes). */
+export function markBooted(pageId: string): void {
+  const s = getStore()
+  const list = s.get('bootedPages') || []
+  if (list.includes(pageId)) return
+  s.set('bootedPages', [...list, pageId] as never)
 }
 
 export function updateSettings(

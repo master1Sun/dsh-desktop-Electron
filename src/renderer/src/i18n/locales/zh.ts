@@ -512,6 +512,7 @@ const zh: Dict = {
   },
   boot: {
     firstBootHint: '首次启动需下载并初始化依赖，可能需要 1-2 分钟，请稍候…',
+    bootHint: '服务正在启动，通常需要十几秒，请稍候…',
     viewLogs: '查看日志',
     hideLogs: '收起日志',
     elapsed: '已等待 {n}s',

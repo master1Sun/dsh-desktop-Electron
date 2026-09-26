@@ -21,8 +21,11 @@ const props = defineProps<{
   phaseText?: string
   /** Tail of the booting page's logs, shown behind an expand toggle. */
   logs?: string[]
-  /** Boot has taken long enough to warrant a "first launch is slow" expectation-setter. */
+  /** Boot has taken long enough to warrant a "this is slower than usual" expectation-setter. */
   slow?: boolean
+  /** The booting page is doing its very first start (deps still download) — picks which hint
+      `slow` shows: the long 首次启动 note vs. the ordinary 启动中 description. */
+  firstBoot?: boolean
   /** Elapsed-time chip text (e.g. "已等待 12s"). */
   elapsedText?: string
   /** Show the market view as an overlay ON TOP of the webview — the embedded page
@@ -378,7 +381,9 @@ defineExpose({
           </span>
         </div>
 
-        <p v-if="props.slow" class="boot-slow">{{ t('boot.firstBootHint') }}</p>
+        <p v-if="props.slow" class="boot-slow">
+          {{ t(props.firstBoot ? 'boot.firstBootHint' : 'boot.bootHint') }}
+        </p>
 
         <div class="boot-actions">
           <button

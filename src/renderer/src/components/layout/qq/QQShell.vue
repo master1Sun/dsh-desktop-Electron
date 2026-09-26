@@ -4,6 +4,7 @@ import MenuPanelContent from '@renderer/components/panels/MenuPanelContent.vue'
 import { buildNav, type QQGroup } from './qqNav'
 import { parseAppPanel } from '@shared/types'
 import type { PageState } from '@renderer/stores/pages'
+import { reduceMotion } from '@renderer/stores/settings'
 import { t } from '@renderer/i18n'
 
 /**
@@ -41,6 +42,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   'open-panel': [group: string | null]
+  'dock-open': [open: boolean]
   'toggle-theme': []
   'open-palette': []
   'apply-theme': [mode: 'auto' | 'light' | 'dark']
@@ -61,11 +63,7 @@ function groupLabel(g: QQGroup): string {
 
 /** Tooltips open toward the content: the edge modes sit opposite, the bottom pill points up. */
 const tooltipPlacement = computed(() =>
-  props.sidebarPosition === 'bottom'
-    ? 'top'
-    : props.sidebarPosition === 'right'
-      ? 'left'
-      : 'right'
+  props.sidebarPosition === 'bottom' ? 'top' : props.sidebarPosition === 'right' ? 'left' : 'right'
 )
 
 function onIconClick(g: QQGroup): void {
@@ -75,8 +73,8 @@ function onIconClick(g: QQGroup): void {
 const shellRef = ref<HTMLElement | null>(null)
 const POP_MARGIN = 10
 /**
- * Bottom dock geometry, mirrored by the CSS below. The strip is an in-flow hover row (13px — the
- * content gives up only its 4px home indicator) and the pill floats 3px clear of its top edge;
+ * Bottom dock geometry, mirrored by the CSS below. The strip floats over the content (13px tall,
+ * hit-testing only on the handle itself) and the pill floats 3px clear of its top edge;
  * DOCK_FLOOR is the open pill's top measured from the window's bottom edge: the pill (38px icons +
  * 2×6 padding + 2 border) sits with its bottom 16px off the edge, and the card clears it by 10px —
  * so the bubble never covers the dock it was opened from.
@@ -84,34 +82,152 @@ const POP_MARGIN = 10
 const DOCK_FLOOR = 78
 const isBottom = computed(() => props.sidebarPosition === 'bottom')
 /**
- * Bottom mode is an iOS-style dock: it rests as a bare home indicator on the bottom edge (a
- * transparent, in-flow row — the content keeps everything but those few pixels) and expands into
- * the icon pill while the pointer dwells on it. The dwell/leave delays below are the whole
- * interaction — hovering past the dock with a short pass must not flicker it open, and leaving
- * must not snap it shut mid-reach.
+ * Bottom mode is an iOS-style dock: it rests as a bare home indicator floating over the bottom
+ * edge (the strip reserves no layout space and passes pointer events through — only the handle is
+ * live) and expands into the icon pill while the pointer dwells on the handle. The dwell/leave
+ * delays below are the whole interaction — hovering past the dock with a short pass must not
+ * flicker it open, and leaving must not snap it shut mid-reach.
  */
 const railCollapsed = ref(props.sidebarPosition === 'bottom')
 /** Grace before expanding on hover: filters accidental fly-throughs of the bottom edge. */
 const RAIL_EXPAND_DELAY = 120
 /** Dwell after the pointer leaves before it collapses back to the indicator. */
 const RAIL_COLLAPSE_DELAY = 700
+/** Rest time after which the bare indicator dims to a near-invisible state. It shouldn't fade
+ *  on a mere pause — and once dim the flash loop below keeps re-revealing it anyway. */
+const RAIL_DIM_DELAY = 3000
 let expandTimer: ReturnType<typeof setTimeout> | null = null
 let collapseTimer: ReturnType<typeof setTimeout> | null = null
-/** Is the pointer currently on the strip / inside the pill? Tracked so a retract scheduled the
- *  moment a bubble closes can't yank the dock out from under a hand that is still on it. */
-let pointerOnRail = false
+/** The resting indicator dims away while untouched and repaints on hover (bottom mode only). */
+const railDimmed = ref(props.sidebarPosition === 'bottom')
+let dimTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleDim(): void {
+  if (dimTimer) clearTimeout(dimTimer)
+  dimTimer = setTimeout(() => {
+    dimTimer = null
+    railDimmed.value = true
+    // Resting dimmed is not "finished": the bar pulses back to full strength every so often so
+    // it keeps announcing itself — counted off each dim edge, so a paused/stale interval from an
+    // earlier rest never fires out of phase.
+    scheduleRailFlash()
+  }, RAIL_DIM_DELAY)
+}
+function clearDim(): void {
+  if (dimTimer) clearTimeout(dimTimer)
+  dimTimer = null
+  clearRailFlash()
+  railDimmed.value = false
+}
+/** Pulse period off the last dim edge, and how long one pulse stays lit before it fades back. */
+const RAIL_FLASH_PERIOD = 15000
+const RAIL_FLASH_HOLD = 450
+let flashTimer: ReturnType<typeof setInterval> | null = null
+let flashReset: ReturnType<typeof setTimeout> | null = null
+function pulseRailFlash(): void {
+  if (!railDimmed.value) return
+  railDimmed.value = false
+  if (flashReset) clearTimeout(flashReset)
+  flashReset = setTimeout(() => {
+    flashReset = null
+    railDimmed.value = true
+  }, RAIL_FLASH_HOLD)
+}
+function scheduleRailFlash(): void {
+  if (flashTimer) clearInterval(flashTimer)
+  flashTimer = setInterval(pulseRailFlash, RAIL_FLASH_PERIOD)
+  flashTimer.unref?.()
+}
+function clearRailFlash(): void {
+  if (flashTimer) clearInterval(flashTimer)
+  flashTimer = null
+  if (flashReset) clearTimeout(flashReset)
+  flashReset = null
+}
+/**
+ * Last pointer position, captured document-wide. The dock's own enter/leave bookkeeping and
+ * even `:hover` go stale at a guest webview's edge (the guest eats the boundary event, and the
+ * host's hover chain lingers under the pointer), which left a dock that never retracted once
+ * the pointer slid off it through the page. This tracker is the arbiter: a retract re-checks
+ * the real coordinates against the rail/pill rects before hiding the dock.
+ */
+const lastPointer = ref<{ x: number; y: number } | null>(null)
+function onPointerTrack(e: PointerEvent): void {
+  if (!isBottom.value) return
+  lastPointer.value = { x: e.clientX, y: e.clientY }
+  if (railCollapsed.value) {
+    // The resting bar itself is a dock surface: pointer contact lifts its dim and holds the
+    // countdown clock (dim + flash pulses) until it steps off again — the host gets no moves at
+    // all while the pointer sits inside a guest webview, so this pauses cleanly.
+    if (railHovered()) {
+      if (railDimmed.value) clearDim()
+    } else if (railDimmed.value && !expandTimer) {
+      clearRailFlash()
+      scheduleDim()
+    }
+    return
+  }
+  // Back over the dock: call off a pending retract (the dwell-open stays armed by its own
+  // pointerenter; the pill never sits under the cursor without a pointer being on it).
+  if (railHovered()) {
+    clearRailFlash()
+    if (collapseTimer) {
+      clearTimeout(collapseTimer)
+      collapseTimer = null
+    }
+    return
+  }
+  // An open dock the pointer just stepped off — even if the rail never saw a leave (a guest
+  // webview ate the boundary event): schedule the normal dwell-delayed retract (a no-op while a
+  // bubble pins it, see scheduleRailClose).
+  if (!collapseTimer && !expandTimer) scheduleRailClose(null)
+}
+function onPointerGone(e: PointerEvent): void {
+  // `pointerout` also bubbles on every element-to-element hop; only a null relatedTarget means
+  // the pointer left the window entirely (no host surface under it to report a position).
+  if (e.relatedTarget) return
+  lastPointer.value = null
+  // Gone is a departure like any other: hand the open dock back to its dwell-delayed retract
+  // (no-op while collapsed or while a bubble pins it).
+  scheduleRailClose(null)
+}
+/** Geometric point-in-rect test; `pad` bridges the few px gap between the strip and the pill.
+ *  left/top/right/bottom are derived off x/y/width/height (with a fallback each way) so the
+ *  test also works against a stubbed — or jsdom's sparse — DOMRect. */
+function pointerInRect(x: number, y: number, el: Element | null, pad = 0): boolean {
+  if (!el) return false
+  const r = el.getBoundingClientRect()
+  const left = r.left ?? r.x
+  const top = r.top ?? r.y
+  const right = r.right ?? left + r.width
+  const bottom = r.bottom ?? top + r.height
+  return x >= left - pad && x <= right + pad && y >= top - pad && y <= bottom + pad
+}
+function railHovered(): boolean {
+  const shell = shellRef.value
+  if (!shell) return false
+  const p = lastPointer.value
+  if (!p) return false
+  // The pointer is on the dock only if it is over the strip or the open pill — the flag and
+  // `:hover` may both be stale, so the coordinates alone decide it.
+  const onRail = pointerInRect(p.x, p.y, shell.querySelector<HTMLElement>('.qq-rail'))
+  const onPill = pointerInRect(p.x, p.y, shell.querySelector<HTMLElement>('.rail-scroll'), 8)
+  return onRail || onPill
+}
 function clearRailTimers(): void {
   if (expandTimer) clearTimeout(expandTimer)
   if (collapseTimer) clearTimeout(collapseTimer)
-  expandTimer = collapseTimer = null
+  if (dimTimer) clearTimeout(dimTimer)
+  expandTimer = collapseTimer = dimTimer = null
+  clearRailFlash()
 }
 function openRail(): void {
   clearRailTimers()
+  railDimmed.value = false
   railCollapsed.value = false
 }
 /**
  * Debounce for the retract. Several surfaces can request it for one real departure (leaving the
- * strip, leaving the bubble, a click-away, and Chromium's spurious leave when the pill
+ * handle, leaving the bubble, a click-away, and Chromium's spurious leave when the pill
  * materialises under the cursor with its `visibility`/`pointer-events` flip). They all funnel
  * through here, so they coalesce into a single pending timer instead of arming one per event, and
  * a request whose pointer is still inside the shell is dropped as noise.
@@ -130,15 +246,28 @@ function scheduleRailClose(source?: Event | null): void {
   // Still inside the shell (the pill, the bubble): not a departure at all.
   const next = (source as PointerEvent | undefined | null)?.relatedTarget as Node | null
   if (next && shellRef.value?.contains(next)) return
+  // A leave that lands outside the shell is a confirmed departure onto page content — most often
+  // an out-of-process <webview>, which eats every later host pointermove. Without this the tracked
+  // coordinate would freeze at its last on-dock value and the callback's arbiter would veto the
+  // retract forever. Drop it: if the pointer really comes back over the dock, the host sees the
+  // next move and the tracker re-arms the dwell-open on its own.
+  if (next) lastPointer.value = null
   clearRailTimers()
   collapseTimer = setTimeout(() => {
-    railCollapsed.value = true
     collapseTimer = null
+    // A pointer still resting on the rail (handle / open pill) owns the dock: drop this retract
+    // — the pointermove tracker will schedule the next one the moment it steps off. Geometric
+    // truth wins over the flag/`:hover`, both of which go stale at a webview's edge.
+    if (railHovered()) return
+    railCollapsed.value = true
+    // Back at rest as a bare indicator: start its idle dim countdown.
+    scheduleDim()
   }, RAIL_COLLAPSE_DELAY)
 }
 function onRailEnter(): void {
   if (!isBottom.value) return
-  pointerOnRail = true
+  // The pointer found the handle: bring the indicator back to full strength.
+  clearDim()
   if (expandTimer || collapseTimer) clearRailTimers()
   else if (!railCollapsed.value) return // already dwelled open — nothing pending
   expandTimer = setTimeout(() => {
@@ -147,10 +276,6 @@ function onRailEnter(): void {
   }, RAIL_EXPAND_DELAY)
 }
 function onRailLeave(e?: PointerEvent): void {
-  // Only a departure that lands outside the rail itself counts; hopping into the pill doesn't.
-  const next = e?.relatedTarget as Node | null
-  const rail = shellRef.value?.querySelector<HTMLElement>('.qq-rail')
-  if (!(next && rail?.contains(next))) pointerOnRail = false
   scheduleRailClose(e ?? null)
 }
 /** Indicator tap = same expand dwell, just without needing to hover-and-wait. */
@@ -158,6 +283,58 @@ function toggleRail(): void {
   if (!isBottom.value) return
   openRail()
 }
+/**
+ * Immediate collapse for the click-away scrim (App.vue): a page click is a deliberate dismissal,
+ * not an ambiguous hover exit, so it skips the dwell timer. Safe to call from anywhere — edge
+ * modes have no retract, and an already-collapsed dock has nothing to do.
+ */
+function collapseRail(): void {
+  if (!isBottom.value || railCollapsed.value) return
+  clearRailTimers()
+  railCollapsed.value = true
+  scheduleDim()
+}
+// ---- macOS-style dock magnification (bottom mode) -------------------------------------------
+// The pill's signature interaction: as the pointer travels along it, the icons nearest the cursor
+// swell on a gaussian falloff (peak `MAG_PEAK` right under the pointer, easing back to 1 further
+// out) and rise out of the dock base, exactly like the macOS Dock. It has to be JS because the
+// curve depends on the live pointer x against every tile's centre. transform-origin: bottom center
+// (see the CSS) anchors the growth so tiles pop upward, not sideways. 减少动效 skips it whole.
+const MAG_PEAK = 0.45
+const MAG_SIGMA = 46
+function pillBtns(): HTMLElement[] {
+  const pill = shellRef.value?.querySelector<HTMLElement>('.rail-scroll')
+  return pill ? Array.from(pill.querySelectorAll<HTMLElement>('.rail-btn')) : []
+}
+function resetMagnify(): void {
+  for (const b of pillBtns()) b.style.removeProperty('--mag')
+}
+function onPillMove(e: PointerEvent): void {
+  if (!isBottom.value || railCollapsed.value || reduceMotion.value) return
+  const x = e.clientX
+  for (const b of pillBtns()) {
+    const r = b.getBoundingClientRect()
+    const d = x - (r.left + r.width / 2)
+    const s = 1 + MAG_PEAK * Math.exp(-(d * d) / (2 * MAG_SIGMA * MAG_SIGMA))
+    b.style.setProperty('--mag', s.toFixed(3))
+  }
+}
+function onPillLeave(): void {
+  resetMagnify()
+}
+
+// The scrim lives in App.vue (the guest page does too — the dock can't cover it itself), so the
+// shell publishes its expanded state and App arms the click-away catcher on it.
+watch(
+  railCollapsed,
+  (v) => {
+    if (!isBottom.value) return
+    emit('dock-open', !v)
+    if (v) resetMagnify() // collapsed pill has nothing to un-magnify; clear stale inline scales
+  },
+  { immediate: true }
+)
+defineExpose({ collapseRail })
 // A bubble owns the dock: opening one (icon, palette, deep link) forces the pill out; closing it
 // hands the dock back to the leave dwell — unless the pointer is still resting on it.
 watch(
@@ -166,8 +343,8 @@ watch(
     if (pos !== 'bottom') return
     if (cur) openRail()
     // Closed: back to the leave dwell — but never yank the pill out from under a pointer that is
-    // still resting on it; its own pointerleave will do that.
-    else if (!pointerOnRail) scheduleRailClose(null)
+    // still resting on it; the coordinate check (not the flag) decides.
+    else if (!railHovered()) scheduleRailClose(null)
   },
   { immediate: true }
 )
@@ -188,6 +365,10 @@ watch(
   (pos) => {
     clearRailTimers()
     railCollapsed.value = pos === 'bottom'
+    railDimmed.value = pos === 'bottom'
+    // Entering bottom at rest: the bar is dimmed straight away, so start its periodic reveal
+    // now (the initial mount does the same in onMounted).
+    if (pos === 'bottom') scheduleRailFlash()
   }
 )
 /**
@@ -221,8 +402,8 @@ const caretStyle = computed<Record<string, string>>(() => {
 function layoutPop(): void {
   const shell = shellRef.value
   if (!shell) return
-  // Bottom mode turns the shell into a short in-flow strip, so the bubble's box is measured
-  // against the row it floats in (shell-body), not against the shell itself.
+  // Bottom mode: the shell is a zero-height overlay pinned to the row's bottom edge, so the
+  // bubble's box is measured against the row it floats over (shell-body).
   const avail = shell.parentElement?.clientHeight || shell.clientHeight || window.innerHeight
   // Shorter fixed box than a full-height column: the panel scrolls inside it rather than growing
   // (a content-driven height was what made the anchored card jitter as async content landed).
@@ -274,8 +455,18 @@ onMounted(() => {
   layoutPop()
   window.addEventListener('resize', layoutPop)
   if (props.current) document.addEventListener('pointerdown', onDocPointerDown, true)
+  // Capture-phase pointer tracking for the dock's coordinate arbiter: capture sees the move even
+  // when a host surface (or its own handler) would stop it, and a `pointerout` with no target
+  // means the pointer physically left the window — no last position to trust anymore.
+  window.addEventListener('pointermove', onPointerTrack, true)
+  document.addEventListener('pointerout', onPointerGone)
+  // A fresh bottom-mode bar is born dimmed at rest: arm its periodic reveal so it keeps
+  // announcing itself until the pointer finds it.
+  if (props.sidebarPosition === 'bottom') scheduleRailFlash()
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('pointermove', onPointerTrack, true)
+  document.removeEventListener('pointerout', onPointerGone)
   window.removeEventListener('resize', layoutPop)
   document.removeEventListener('pointerdown', onDocPointerDown, true)
   clearRailTimers()
@@ -291,13 +482,12 @@ onBeforeUnmount(() => {
       { 'rail-collapsed': railCollapsed, 'rail-open': !railCollapsed && isBottom }
     ]"
   >
-    <nav
-      class="qq-rail"
-      aria-label="IM navigation"
-      @pointerenter="onRailEnter"
-      @pointerleave="onRailLeave"
-    >
-      <div class="rail-scroll">
+    <!-- The leave is tracked on the whole dock, not the handle: once open, the pointer rests on
+         the pill, and a child-level leave (which doesn't bubble) would never reach the handle.
+         `pointerleave` fires only when the pointer exits the entire subtree, so pill↔handle hops
+         stay silent. -->
+    <nav class="qq-rail" aria-label="IM navigation" @pointerleave="onRailLeave">
+      <div class="rail-scroll" @pointermove="onPillMove" @pointerleave="onPillLeave">
         <el-tooltip
           v-for="g in groups"
           :key="g.group"
@@ -322,8 +512,9 @@ onBeforeUnmount(() => {
       </div>
       <!-- Bottom dock's resting affordance: an iOS home-indicator bar. It stays mounted in both
            states so the swap is one continuous animation — collapsed it is a slim centred bar,
-           expanded it shrinks away as the icon row grows out of it. Tapping it dwells the dock
-           open for anyone who can't hover the exact bottom edge. -->
+           expanded it shrinks away as the icon row grows out of it. It is also the strip's only
+           hover trigger: dwelling on the bar (not the empty row beside it) expands the dock, and
+           tapping does the same for anyone who can't hover the exact bottom edge. -->
       <el-tooltip
         v-if="isBottom"
         :content="t('menu.railExpand')"
@@ -332,42 +523,47 @@ onBeforeUnmount(() => {
       >
         <button
           class="rail-handle"
+          :class="{ dimmed: railDimmed }"
           type="button"
           :aria-label="t('menu.railExpand')"
           :aria-expanded="!railCollapsed"
+          @pointerenter="onRailEnter"
+          @pointerleave="onRailLeave"
           @click="toggleRail"
         />
       </el-tooltip>
     </nav>
 
-    <div v-if="current" class="qq-pop-wrap" :style="wrapStyle">
-      <section
-        class="qq-pop glass"
-        role="dialog"
-        aria-modal="false"
-        @mouseenter="onBubbleMouseEnter"
-        @pointerdown="onBubblePointerDown"
-        @mouseleave="onBubbleLeave"
-      >
-        <span class="qq-caret" :style="caretStyle" aria-hidden="true" />
-        <div class="qq-pop-body">
-          <MenuPanelContent
-            :panel="current"
-            tab-position="top"
-            :runtime="runtime"
-            :running-count="runningCount"
-            :total-count="totalCount"
-            :initial-tab="initialTab ?? undefined"
-            @apply-theme="(m) => emit('apply-theme', m)"
-            @preview-site="(u) => emit('preview-site', u)"
-            @check-updates="emit('check-updates')"
-            @open-page="(id) => emit('open-page', id)"
-            @open-terminal="(id) => emit('open-terminal', id)"
-            @close="emit('open-panel', null)"
-          />
-        </div>
-      </section>
-    </div>
+    <Transition name="qqpop">
+      <div v-if="current" class="qq-pop-wrap" :style="wrapStyle">
+        <section
+          class="qq-pop glass"
+          role="dialog"
+          aria-modal="false"
+          @mouseenter="onBubbleMouseEnter"
+          @pointerdown="onBubblePointerDown"
+          @mouseleave="onBubbleLeave"
+        >
+          <span class="qq-caret" :style="caretStyle" aria-hidden="true" />
+          <div class="qq-pop-body">
+            <MenuPanelContent
+              :panel="current"
+              tab-position="top"
+              :runtime="runtime"
+              :running-count="runningCount"
+              :total-count="totalCount"
+              :initial-tab="initialTab ?? undefined"
+              @apply-theme="(m) => emit('apply-theme', m)"
+              @preview-site="(u) => emit('preview-site', u)"
+              @check-updates="emit('check-updates')"
+              @open-page="(id) => emit('open-page', id)"
+              @open-terminal="(id) => emit('open-terminal', id)"
+              @close="emit('open-panel', null)"
+            />
+          </div>
+        </section>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -403,11 +599,11 @@ onBeforeUnmount(() => {
   /* One frosted edge-chrome recipe with the classic top bar (`.menubar`) and every `.glass` panel:
      full tint, full blur radius, the same saturate curve. The dock used to sit on the lighter
      `.glass-soft` numbers, which made the two bars frost differently at the same 毛玻璃 setting. */
-  background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.82));
+  /* background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.82)); */
   -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
     saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
-  backdrop-filter: blur(var(--glass-blur, 30px))
-    saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
+  /* backdrop-filter: blur(var(--glass-blur, 30px))
+    saturate(calc(1.2 + var(--glass-blur-n, 30) / 80)); */
   border-right: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
   /* The bottom dock fades its chrome between the resting handle and the hovered card. */
   transition:
@@ -506,7 +702,25 @@ onBeforeUnmount(() => {
     var(--shadow),
     0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent) inset,
     0 18px 60px color-mix(in srgb, var(--accent) 16%, transparent);
-  animation: qq-pop-in 0.24s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  /* Open/close is a Vue <Transition name="qqpop"> on the wrap, but it transforms THIS card (which
+     carries no base transform of its own), so it never fights the wrap's centring / top placement.
+     The card grows out of whichever edge it is anchored to — origin below, per dock mode. */
+  transform-origin: left center;
+}
+.qqpop-enter-active .qq-pop {
+  transition:
+    opacity 0.16s ease,
+    transform 0.3s cubic-bezier(0.34, 1.42, 0.5, 1);
+}
+.qqpop-leave-active .qq-pop {
+  transition:
+    opacity 0.13s ease,
+    transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.qqpop-enter-from .qq-pop,
+.qqpop-leave-to .qq-pop {
+  opacity: 0;
+  transform: scale(0.96);
 }
 /* Scroll host. Panels WITHOUT tabs scroll the body. Panels WITH tabs instead fill the body and let
    only the tab pane scroll (see the `:has(.el-tabs)` block) — so the vertical tab rail stays put and
@@ -687,16 +901,6 @@ onBeforeUnmount(() => {
   border-left: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
 }
-@keyframes qq-pop-in {
-  from {
-    opacity: 0;
-    transform: translateX(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
 
 /* ---- rail docking modes (设置 ▸ 布局 ▸ 侧边栏位置; 'left' is every base rule above) ---- */
 
@@ -718,17 +922,7 @@ onBeforeUnmount(() => {
 .qq-shell.pos-right .qq-pop {
   margin-left: 0;
   margin-right: 10px;
-  animation-name: qq-pop-in-right;
-}
-@keyframes qq-pop-in-right {
-  from {
-    opacity: 0;
-    transform: translateX(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  transform-origin: right center;
 }
 .qq-shell.pos-right .qq-caret {
   left: auto;
@@ -738,34 +932,23 @@ onBeforeUnmount(() => {
   border-right: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
 }
 
-/* Bottom: an in-flow strip across the window's bottom edge (13px; DOCK_FLOOR in the script mirrors
-   the rest of the geometry) — it reserves its own height instead of floating over the page. The row
-   behind the indicator is a themed plate on the same opacity curve as the classic top bar
-   (`--glass-tint-a`, so the 毛玻璃 slider moves both together), fading out at *both* edges. The
-   bottom fade is not decoration: dark theme paints a window-edge marquee ring (`.win-edge`, fixed,
-   `z-index: 9999`, 1px inset / 2px stroke) straight through this row and the plate can never
-   out-stack the frame — starting the colour above that line keeps the ring reading as the window
-   frame instead of being sliced by the dock. The plate deliberately carries no `backdrop-filter`:
-   it sits on `.qq-shell`, which is the containing block of the pill and the bubble, and a
-   `backdrop-filter` here would turn that into a backdrop root and clip *their* frosting to this
-   13px band. The iOS home indicator inside it is the accent graded across, and both follow the
+/* Bottom: a hover strip floating over the window's bottom edge (13px; DOCK_FLOOR in the script
+   mirrors the rest of the geometry) — it reserves no layout space, so the page keeps the full
+   height and the 13px band belongs to the content. The strip is fully transparent at rest: the
+   home indicator (and, once open, the icon pill) are its only paint, so nothing but the bar
+   itself ever covers the page. The iOS home indicator is the accent graded across and follows the
    runtime theme with no JS. The icon rail is a pill that rises out of the strip on hover, so
    opening it never reflows the content. */
 .qq-shell.pos-bottom {
   width: 100%;
   height: auto;
   flex: none;
-  background: linear-gradient(
-    to top,
-    transparent 20%,
-    rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.82)) 45%,
-    transparent
-  );
 }
 .qq-shell.pos-bottom .qq-rail {
-  position: relative;
-  left: auto;
-  bottom: auto;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   transform: none;
   z-index: 69;
   flex-direction: row;
@@ -775,15 +958,13 @@ onBeforeUnmount(() => {
   height: 13px;
   padding: 0;
   border: none;
+  /* Fully transparent at rest — the handle and the open pill are the strip's only paint. */
   background: transparent;
-  /* The rail's frosting is for the edge columns only. A `backdrop-filter` blurs whatever is behind
-     the element regardless of its own background, so leaving it on here would smudge a 13px band
-     across the transparent strip; the plate above it owns the bottom-mode surface instead. */
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-  box-shadow: none;
-  /* The strip is window chrome at the bottom edge, not a drag handle. */
+  /* The strip is chrome floating over the page, not a drag handle — and it must not eat the page's
+     hover either: only the handle and the open pill are hit-test targets, so the empty row beside
+     the indicator passes the pointer through to the content below. */
   -webkit-app-region: no-drag;
+  pointer-events: none;
 }
 .qq-shell.pos-bottom .rail-scroll {
   position: absolute;
@@ -800,13 +981,12 @@ onBeforeUnmount(() => {
   max-width: calc(100vw - 32px);
   height: auto;
   padding: 6px 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  /* The row can outgrow the cap once many app panels are registered. Scroll it, but never show a
-     bar: the pill is 52px tall, so a classic scrollbar would eat half of it and flash in and out
-     as the row opens. `contain` stops a trackpad swipe from chaining onto the window. */
-  scrollbar-width: none;
-  overscroll-behavior-x: contain;
+  /* The tiles magnify on pointer proximity (see onPillMove) and, like the macOS Dock, swell UP out
+     of the pill — so it cannot clip them. `overflow: visible` (was overflow-x:auto/hidden) is the
+     one change that lets a tile pop above the glass; the trade is that a pathologically long list
+     of registered app panels no longer scrolls inside the pill. With the usual ~10 groups it fits
+     the max-width cap untouched, so this only bites in extreme configurations. */
+  overflow: visible;
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
   border-radius: 14px;
   /* Same material as the bubble card it belongs to (`.glass` in glass.css): full tint, full blur
@@ -815,8 +995,7 @@ onBeforeUnmount(() => {
   background: rgb(var(--glass-tint-rgb) / var(--glass-tint-a, 0.82));
   -webkit-backdrop-filter: blur(var(--glass-blur, 30px))
     saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
-  backdrop-filter: blur(var(--glass-blur, 30px))
-    saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
+  backdrop-filter: blur(var(--glass-blur, 30px)) saturate(calc(1.2 + var(--glass-blur-n, 30) / 80));
   box-shadow:
     var(--shadow),
     0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset;
@@ -825,24 +1004,26 @@ onBeforeUnmount(() => {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  /* DOCK_FLOOR (78px from the window's bottom edge) minus the 13px strip this is measured from:
-     the card starts above the open pill instead of burying it. */
-  bottom: calc(100% + 65px);
+  /* Measured off the shell's bottom-anchored zero-height edge now (the strip is no longer in
+     flow): DOCK_FLOOR (78px from the window's bottom edge) plus the 13px strip band the pill
+     floats above, minus the 10px gap the card keeps under it — so the card never covers the dock. */
+  bottom: 81px;
   top: auto;
 }
 .qq-shell.pos-bottom .qq-pop {
   margin-left: 0;
-  animation-name: qq-pop-in-bottom;
+  transform-origin: bottom center;
 }
-@keyframes qq-pop-in-bottom {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+/* macOS dock magnification: the JS (onPillMove) writes a per-tile `--mag` from the gaussian of the
+   pointer distance; here it grows ONLY the glyph (transform-origin bottom center so it swells UP out
+   of the pill), NOT the whole button. Scaling the button had ballooned its hover/active wash tile
+   into an oversized "highlight box" at peak; the icon carries the swell while the tile keeps its
+   normal footprint. The custom property inherits from the button down to the icon. */
+.qq-shell.pos-bottom .rail-ico {
+  transform: scale(var(--mag, 1));
+  transform-origin: bottom center;
+  transition: transform 0.12s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
 }
 /* The caret hangs off the card's bottom edge pointing down at the dock (SE/SW diamond faces). */
 .qq-shell.pos-bottom .qq-caret {
@@ -865,12 +1046,27 @@ onBeforeUnmount(() => {
    home indicator, graded across the accent (dim at both ends so it tapers into the strip instead of
    ending in a hard chip). Hovering saturates it and adds a glow as feedback that it is live. Both
    states read off `--accent` / `--accent-strong`, so a theme or accent change repaints it with no
-   JS. */
+   JS. It is also the dock's only hover trigger, so its hit box grows past the visible 4px bar —
+   the full 13px strip height, centred — while the drawn bar stays slim. */
 .rail-handle {
   width: 100px;
-  height: 4px;
+  height: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
+  padding: 0;
   border: none;
+  border-radius: 2px;
+  background: transparent;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+.rail-handle::after {
+  content: '';
+  width: 100px;
+  height: 4px;
   border-radius: 2px;
   background: linear-gradient(
     90deg,
@@ -879,14 +1075,17 @@ onBeforeUnmount(() => {
     var(--accent-strong) 68%,
     color-mix(in srgb, var(--accent) 28%, transparent)
   );
-  cursor: pointer;
-  -webkit-app-region: no-drag;
   transition:
     background 0.18s linear,
     box-shadow 0.18s linear,
     opacity 0.18s linear;
 }
-.rail-handle:hover {
+/* Untouched for a few seconds the bar dims to a near-invisible state so it stops nagging the
+   page; the pointer finding it (or the dock opening) paints it back at full strength. */
+.rail-handle.dimmed::after {
+  opacity: 0.15;
+}
+.rail-handle:hover::after {
   background: linear-gradient(
     90deg,
     var(--accent),
@@ -897,32 +1096,36 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 /* The pill's open/closed travel is one pure `translateY` + `opacity` pair — both interpolate on
-   the compositor, so the slide reads as a single linear lift instead of stepping. Two things that
-   used to live here caused the jitter: a `scaleY` (rescaling a backdrop-filtered box is recomputed
-   per frame and looks like it wobbles), and a per-icon fade+lift on its own delay curve, which
-   made ten tiles drift independently inside the moving pill. Both are gone; `will-change` keeps
-   the pill on its own layer so the blur underneath isn't re-rasterised as a layout pass.
+   the compositor, so the slide reads as a single lift instead of stepping. Two things that used to
+   live here caused the jitter: a `scaleY` on the pill box itself (rescaling a backdrop-filtered box
+   is recomputed per frame and wobbles), and a per-icon fade+lift on its own delay curve (ten tiles
+   drifting independently inside the moving pill). Both are gone — the per-tile scaling now happens
+   only on pointer PROXIMITY (see .rail-btn / onPillMove), never during the slide. `will-change`
+   keeps the pill on its own layer so the blur underneath isn't re-rasterised as a layout pass.
    `translateX(-50%)` rides along in both states because a transform transition replaces the whole
-   property, centring included. Visibility is discrete, so it is switched with a delay on the way
-   out (keeps the slide painted) and immediately on the way in. */
+   property, centring included. The open uses an overshoot (back-out) curve so the pill pops past its
+   resting line and settles — the macOS dock spring; the close is a plain ease-in, no bounce out.
+   Visibility is discrete, so it is switched with a delay on the way out (keeps the slide painted)
+   and immediately on the way in. */
 .qq-shell.pos-bottom .rail-scroll {
   opacity: 0;
   visibility: hidden;
-  transform: translate3d(-50%, 14px, 0);
+  transform: translate3d(-50%, 16px, 0);
   pointer-events: none;
   will-change: transform, opacity;
   transition:
-    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.2s linear,
-    visibility 0s linear 0.3s;
+    transform 0.24s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.18s linear,
+    visibility 0s linear 0.24s;
 }
 .qq-shell.pos-bottom:not(.rail-collapsed) .rail-scroll {
   opacity: 1;
   visibility: visible;
   transform: translate3d(-50%, 0, 0);
+  /* The strip itself passes the pointer through (see `.qq-rail`); an open pill must take it back. */
   pointer-events: auto;
   transition:
-    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.38s cubic-bezier(0.34, 1.56, 0.64, 1),
     opacity 0.16s linear,
     visibility 0s;
 }
@@ -932,5 +1135,27 @@ onBeforeUnmount(() => {
   width: 0;
   height: 0;
   display: none;
+}
+/* Damped when 减少动效 is in effect (see stores/settings.applyReduceMotion): the bubble just
+   fades in/out in place, the pill only toggles visibility with a plain opacity fade, and the
+   magnification is pinned off (onPillMove also early-returns, so no `--mag` is ever written). */
+html.reduce-motion .qqpop-enter-active .qq-pop,
+html.reduce-motion .qqpop-leave-active .qq-pop {
+  transition: opacity 0.12s linear;
+}
+html.reduce-motion .qqpop-enter-from .qq-pop,
+html.reduce-motion .qqpop-leave-to .qq-pop {
+  transform: none;
+}
+html.reduce-motion .qq-shell.pos-bottom .rail-scroll,
+html.reduce-motion .qq-shell.pos-bottom:not(.rail-collapsed) .rail-scroll {
+  transform: none;
+  transition:
+    opacity 0.12s linear,
+    visibility 0s;
+}
+html.reduce-motion .qq-shell.pos-bottom .rail-ico {
+  transform: none;
+  will-change: auto;
 }
 </style>

@@ -7,7 +7,7 @@ import { get as httpsGet } from 'node:https'
 import { nativeTheme } from 'electron'
 import { getNodeExePath, bundledEnv } from '../cli/node-runtime'
 import { splitCommandArgs } from '../terminal/command-line'
-import { resolvePageEnv, resolvePageTextEnv, expandHome, getSettings, resolvePageCustomEnvs } from '../../shell/store'
+import { resolvePageEnv, resolvePageTextEnv, expandHome, getSettings, resolvePageCustomEnvs, hasBooted, markBooted } from '../../shell/store'
 import { logPageLine } from '../../shell/logger'
 import { logEvent } from '../../shell/events'
 import { findPortHolder } from '../diagnostics/port-holder'
@@ -129,6 +129,8 @@ interface RuntimeEntry {
   logs: string[]
   /** last time a progress event was streamed for this entry (throttles log-tail spam). */
   lastProgAt?: number
+  /** this run is the page's first-ever start (no `running` record before it); pinned per run. */
+  firstBoot?: boolean
   /** abnormal exits counted since the last stable run (health-guard budget). */
   crashes: number
   /** pending scheduled auto-restart after a crash; cleared by stop/start/quit. */
@@ -550,6 +552,9 @@ export class PageRegistry extends EventEmitter {
     e.resolvedPort = undefined
     e.launchUrl = undefined
     e.portHolder = null
+    // Pin the first-boot fact once per run: the boot overlay only shows the long
+    // "下载并初始化依赖 1-2 分钟" expectation on a page's very first successful start.
+    e.firstBoot = !hasBooted(e.meta.id)
     this.emitProgress(e, 'spawning')
 
     // dsh/openclaw kinds don't run through buildPageEnv (they pin their own homes), so the
@@ -686,6 +691,8 @@ export class PageRegistry extends EventEmitter {
         }
       }, STABLE_RESET_MS)
       e.stableTimer.unref?.()
+      // The run succeeded: from now on this page's starts are ordinary, not first boots.
+      markBooted(e.meta.id)
       this.emitProgress(e, 'ready')
       this.emitChanged()
       return this.toState(e)
@@ -733,7 +740,8 @@ export class PageRegistry extends EventEmitter {
     this.emit('progress', {
       pageId: e.meta.id,
       phase,
-      logs: e.logs.slice(-12)
+      logs: e.logs.slice(-12),
+      firstBoot: e.firstBoot
     } satisfies PageProgress)
   }
 

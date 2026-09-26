@@ -51,8 +51,30 @@ const isIm = computed(
   () => !isPopout.value && (settingsStore.settings.layoutMode ?? 'classic') === 'im'
 )
 
-/** 效率布局 + 侧边栏位置=底部居中: the rail docks as an in-flow bottom strip (see .body-bottom). */
+/** 效率布局 + 侧边栏位置=底部居中: the rail floats over the page bottom (see .body-bottom). */
 const railAtBottom = computed(() => (settingsStore.settings.sidebarPosition ?? 'left') === 'bottom')
+
+/** Bottom-dock expanded state, published by QQShell (`dock-open`). */
+const dockOpen = ref(false)
+const qqShellRef = ref<InstanceType<typeof QQShell> | null>(null)
+/**
+ * Bottom-mode dock expanded, per QQShell's `dock-open` publish. While true the content scrim
+ * (see .panel-clickaway in the template) also serves as the dock's click-away catcher — the
+ * guest <webview> eats host pointerdowns, so the dock can only learn about a page click that
+ * way. An open bubble panel skips it: the scrim's own panel branch closes the bubble first,
+ * and the bubble keeps pinning the dock for the pointer to land on.
+ */
+const dockClickaway = computed(() => isIm.value && railAtBottom.value && dockOpen.value)
+function onContentClickaway(): void {
+  // A bubble owns the dismiss while it is up (it also pins the dock); otherwise the content click
+  // collapses the expanded bottom dock. Both reach here from the same scrim because that scrim is
+  // the one host layer a guest <webview> actually lets the pointerdown through to.
+  if (activePanel.value) activePanel.value = null
+  else {
+    qqShellRef.value?.collapseRail()
+    dockOpen.value = false // the emit round-trip is next-tick; the scrim should vanish at once
+  }
+}
 
 /**
  * Vertical tab a panel should open on, set by a palette command (「查看事件动态」→ help/events).
@@ -552,12 +574,14 @@ const popoutUrl = (p: PageState): string => (p.external ? p.externalUrl || pageU
 /**
  * Pages the dual-pane secondary screen can show: every running web page (with a live URL)
  * plus the configured external sites. CLI/terminal pages are excluded (they own the full
- * surface elsewhere). HomeView filters out the page already shown in the main pane.
+ * surface elsewhere), and pages disabled in the Pages panel drop out too (they can't be
+ * started, so offering them would only host a dead pane). HomeView filters out the page
+ * already shown in the main pane.
  */
 const secondaryChoices = computed<{ id: string; label: string; url: string }[]>(() => {
   const out: { id: string; label: string; url: string }[] = []
   for (const p of pagesStore.pages) {
-    if (p.kind === 'terminal') continue
+    if (p.kind === 'terminal' || p.disabled) continue
     const url = p.external ? p.externalUrl || pageUrl(p) : pageUrl(p)
     if (url) out.push({ id: `p-${p.id}`, label: p.name, url })
   }
@@ -637,8 +661,11 @@ const bootLogs = computed(() => pendingProgress.value?.logs ?? [])
 const bootElapsedText = computed(() =>
   t('boot.elapsed', { n: Math.floor(bootElapsed.value / 1000) })
 )
-/** Past this the overlay stops implying "any second now" and sets a first-boot expectation. */
+/** Past this the overlay stops implying "any second now" and sets an expectation — but which
+ * line it sets is the page's first-boot flag from main: only a genuine first install still
+ * downloads and initializes deps, an ordinary start just gets the short 启动中 description. */
 const bootSlow = computed(() => bootElapsed.value > 15000)
+const bootFirst = computed(() => pendingProgress.value?.firstBoot === true)
 
 function stopBootTimer(): void {
   if (bootTimer) {
@@ -1700,6 +1727,7 @@ const showNav = computed(() =>
              rail click and the switcher stay in sync. Classic mode renders no rail. -->
         <QQShell
           v-if="isIm"
+          ref="qqShellRef"
           :pages="pagesStore.pages"
           :current="activePanel"
           :sidebar-position="settingsStore.settings.sidebarPosition ?? 'left'"
@@ -1710,6 +1738,7 @@ const showNav = computed(() =>
           :outdated-count="updatesStore.outdated.length"
           :is-dark="isDark"
           @open-panel="activePanel = $event"
+          @dock-open="dockOpen = $event"
           @toggle-theme="quickThemeToggle"
           @open-palette="paletteOpen = true"
           @apply-theme="applyTheme"
@@ -1744,6 +1773,7 @@ const showNav = computed(() =>
               :phase-text="bootPhaseText"
               :logs="bootLogs"
               :slow="bootSlow"
+              :first-boot="bootFirst"
               :elapsed-text="bootElapsedText"
               :market-active="!isPopout && !webviewActive && !activeTerminalPage"
               :external-view="externalView"
@@ -1757,10 +1787,18 @@ const showNav = computed(() =>
             <!-- Click-away catcher (see .panel-clickaway): a page is an out-of-process <webview>
                  that swallows host pointerdown, so once it fills the content area a click there
                  never reaches any document listener — neither QQShell's nor MenuBar's — and the
-                 rail bubble / floating panel lingers. This transparent host layer, sitting above
-                 the webview but below the popups, turns a content click into a dismiss; it stops
-                 at .content-main so the rail, title bar and window controls stay clickable. -->
-            <div v-if="activePanel" class="panel-clickaway" @pointerdown="activePanel = null" />
+                 rail bubble / floating panel / expanded bottom dock lingers. This transparent host
+                 layer, sitting above the webview but below the popups (the ONLY slot proven to
+                 receive clicks over the guest surface), turns a content click into a dismiss; it
+                 stops at .content-main so the rail, title bar and window controls stay live.
+                 Armed for both dismissals: an open bubble panel (classic + IM) or an expanded
+                 bottom-mode dock. When a bubble is up it pins the dock too, so the panel gets the
+                 dismiss and the dock follows it back down via QQShell's `current` watch. -->
+            <div
+              v-if="activePanel || dockClickaway"
+              class="panel-clickaway"
+              @pointerdown="onContentClickaway"
+            />
           </div>
           <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
                v-show, not v-if: unmounting drops the global onPtyData subscription, which
@@ -1833,16 +1871,22 @@ const showNav = computed(() =>
 }
 
 /* Body row under the title bar. Classic mode: only .content (fills width). IM mode: the QQShell
-   rail + sidebar dock to the left and .content takes the rest, so the webview reflows narrower. */
+   rail + sidebar dock to the left and .content takes the rest, so the webview reflows narrower.
+   Also the containing block for the bottom mode's floating dock (`.qq-shell` is absolute to this
+   row's bottom edge). */
 .shell-body {
   display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
+  /* Containing block for the absolutely positioned overlays of the bottom mode (the dock shell
+     and its click-away scrim). */
+  position: relative;
 }
-/* Bottom-centred rail: the rail becomes a real flow row under the page (an iOS home-indicator
-   strip that reserves its own height) instead of floating over the content, so stacking the two
-   vertically is what keeps the bar truly 占位. The bubble still floats over the page. */
+/* Bottom-centred rail: the dock is a zero-height overlay row sitting on the page's bottom edge
+   instead of a flow row under it — the content keeps the full height and the home indicator
+   floats over it (its strip passes hover through except on the handle). The bubble still floats
+   over the page. */
 .shell-body.body-bottom {
   flex-direction: column;
   /* The dock pill and the bubble float out of the bottom strip, so clip the row: on a very short
@@ -1855,7 +1899,12 @@ const showNav = computed(() =>
 }
 .shell-body.body-bottom > .qq-shell {
   order: 2;
-  flex: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* Zero height: the strip inside paints upward from this edge (`.qq-rail` in QQShell). */
+  height: 0;
 }
 .shell-body > .content {
   min-width: 0;
