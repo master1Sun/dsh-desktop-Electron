@@ -353,18 +353,18 @@ defineExpose({ close })
 }
 
 .drop-item:hover {
-  /* Translucent accent wash + frosted glass, so the hover reads in dark mode
-     without turning into an opaque block. */
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  -webkit-backdrop-filter: blur(8px) saturate(125%);
-  backdrop-filter: blur(8px) saturate(125%);
+  /* Shared translucent accent wash + frosted glass (see --dsh-wash-hover), so the hover
+     reads identically here and in the menu-bar / tab rails without an opaque block. */
+  background: var(--dsh-wash-hover);
+  -webkit-backdrop-filter: var(--dsh-wash-frost);
+  backdrop-filter: var(--dsh-wash-frost);
   color: var(--accent);
 }
 
 .drop-item.active {
   /* The on-screen page keeps a faint accent wash + its row leading check, so 「当前」
      survives hovering other rows. */
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  background: var(--dsh-wash);
   color: var(--accent);
 }
 

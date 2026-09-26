@@ -365,6 +365,41 @@ html.dark:not(.no-marquee) .el-dialog::after {
   box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 38%, transparent);
 }
 
+/* ---- shared interactive wash -----------------------------------------------------------
+   ONE hover/active recipe for every clickable row/glyph in the app (tab rail items, menu
+   dropdown rows, rail icons, icon-button tiles). Components reference the vars instead of
+   re-picking their own accent percentage, so "hover" looks identical on a top-bar button,
+   a settings tab and an IM rail icon. 12% = resting/active wash, 14% = hover (reads on
+   both frosted surfaces and plain ones), and the light frost keeps the translucency.
+   Defined on :root (not .glass) so scoped component rules can resolve them anywhere. */
+:root {
+  --dsh-wash: color-mix(in srgb, var(--accent) 12%, transparent);
+  --dsh-wash-hover: color-mix(in srgb, var(--accent) 14%, transparent);
+  --dsh-wash-frost: blur(6px) saturate(125%);
+  /* Softer wash for wide form/list ROW hovers (a whole el-form-item / key row lights up, so a
+     little goes further than a compact button/tab). One value across Settings / DSH / Pages. */
+  --dsh-wash-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* ---- icon action tiles ----------------------------------------------------------------
+   Icon-only `text` buttons in tool surfaces (Pages / MCP / workspace / board / DSH /
+   OpenClaw rows) used to be bare glyphs in most panels while the Pages table alone got a
+   tinted, rounded tile — same action, two looks. Give every small text button that wraps
+   exactly one icon the Pages tile treatment app-wide (14% currentColor wash = the same
+   presence as --dsh-wash-hover, deepening on hover); the type color (primary/danger) still
+   drives both the glyph and the tile. Buttons with text keep their normal pill shape.
+   `:only-of-type` (not :only-child) so an attached loading spinner — EP renders it as a
+   sibling svg, not an .el-icon — doesn't drop the tile the instant the row goes busy. */
+.el-button.is-text:has(.el-icon:only-of-type) {
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  box-shadow: 0 4px 14px color-mix(in srgb, currentColor 35%, transparent);
+}
+.el-button.is-text:has(.el-icon:only-of-type):hover {
+  background: color-mix(in srgb, currentColor 26%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, currentColor 55%, transparent);
+}
+
 /* ---- keyframes -------------------------------------------------------------- */
 @keyframes reveal-up {
   from {
@@ -562,8 +597,11 @@ html.dark .el-dialog .el-dialog__title {
   width: 6px;
 }
 .el-message__content::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--text-dim) 40%, transparent);
+  background: var(--scroll-thumb);
   border-radius: 3px;
+}
+.el-message__content::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
 }
 .el-message .el-message__icon {
   font-size: 14px;
@@ -642,22 +680,28 @@ html.dark .el-dialog .el-dialog__title {
   /* Vertical rail only: this stack spacing would stagger a horizontal row's first item. */
   margin-top: 8px;
 }
+/* Single-line tab highlight (classic Element Plus), NOT a filled pill: the active
+   tab is marked only by its label colour + the native active-bar line below/beside
+   it, and hover just lifts the label colour. This is the Settings reference look,
+   shared by every panel via `.v-tabs`. */
 .v-tabs .el-tabs__item:hover {
   color: var(--text);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .v-tabs .el-tabs__item.is-active {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
   font-weight: 600;
 }
 .v-tabs .el-tabs__active-bar {
-  display: none;
+  /* Keep EP's active-bar (the one line) and theme it to the accent. */
+  background-color: var(--accent);
 }
 .v-tabs .el-tabs__content {
   flex: 1;
   overflow: hidden;
 }
+/* `.tab-label` is the shared icon+label row of every tab rail (Settings / Help / Pages /
+   DSH / board) — sized once here so all panels show the same 15px glyph with the same
+   7px gap instead of each component re-declaring it. */
 .tab-label {
   display: inline-flex;
   align-items: center;

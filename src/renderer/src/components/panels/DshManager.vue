@@ -364,14 +364,17 @@ const sourceLabel = (p: DshPluginInfo): string =>
 const versionLabel = (p: DshPluginInfo): string =>
   p.present === false ? t('dshMgr.versionMissing') : p.version
 
-/* Cap the plugin table so the list scrolls INSIDE the table body while the install card + toolbar
-   stay fixed above it. The cap is viewport-relative (not a fixed px) so "card + toolbar + table"
-   always fits the panel — otherwise the outer `.panel-body` grows a second scrollbar (the card
-   would scroll away too). The `max()` floor keeps a usable list on short windows. */
+/**
+ * Cap the plugin table so the list scrolls INSIDE the table body while the install card + toolbar
+ * stay fixed above it. The cap is viewport-relative (not a fixed px) so "card + toolbar + table"
+ * always fits the panel — otherwise the outer `.panel-body` grows a second scrollbar (the card
+ * would scroll away too). The `max()` floor keeps a usable list on short windows.
+ * 效率（IM）popup 例外：气泡是 JS 定高的容器（上限 420px），100vh 算出来的封顶比气泡本身还高，
+ * pane 与表格会同时出滚动条（双滚动条）。popup 下改走 max-height:100% + QQShell 的绝对定位 pane
+ * （flex 列）：表格精确吃满 pane 剩余高度，仍是卡片/工具栏固定、只有表体滚动，且只剩一条滚动条。
+ */
 const pluginsTableMax = computed(() =>
-  props.tabPosition === 'top'
-    ? 'max(140px, calc(100vh - 440px))'
-    : 'max(160px, calc(100vh - 420px))'
+  props.tabPosition === 'top' ? '100%' : 'max(160px, calc(100vh - 420px))'
 )
 </script>
 
@@ -475,7 +478,7 @@ const pluginsTableMax = computed(() =>
           </div>
         </el-tab-pane>
 
-        <el-tab-pane name="plugins">
+        <el-tab-pane name="plugins" class="dsh-plugins-pane">
           <template #label>
             <span class="tab-label"
               ><el-icon><Operation /></el-icon>{{ t('dshMgr.tabPlugins') }}</span
@@ -959,9 +962,9 @@ const pluginsTableMax = computed(() =>
   line-height: 1.6;
 }
 /* The install form rows and the plugin list read on hover with a
-   glassy accent wash instead of an opaque block — mirrors the other panels. */
+   glassy accent wash instead of an opaque block — mirrors the other panels (shared tokens). */
 .dsh-manager :deep(.el-form-item):hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: var(--dsh-wash-soft);
   border-radius: 8px;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
   transition:
@@ -969,7 +972,7 @@ const pluginsTableMax = computed(() =>
     box-shadow 0.15s ease;
 }
 .dsh-manager :deep(.el-table__body tr:hover > td) {
-  background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
+  background: var(--dsh-wash-hover) !important;
   -webkit-backdrop-filter: blur(4px) saturate(125%);
   backdrop-filter: blur(4px) saturate(125%);
 }

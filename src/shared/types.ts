@@ -71,6 +71,9 @@ export type PageStatus = 'stopped' | 'starting' | 'running' | 'error'
 /** 'terminal' = a CLI-only project: no HTTP port, runs inside the embedded terminal */
 export type PageKind = 'page' | 'dsh' | 'openclaw' | 'terminal'
 
+/** Where the IM (效率) layout docks its icon rail: left / right edge column, or a bottom-centred pill. */
+export type SidebarPosition = 'left' | 'right' | 'bottom'
+
 /** default port openclaw's gateway listens on (matches `openclaw gateway --port`) */
 export const OPENCLAW_DEFAULT_PORT = 18789
 
@@ -261,6 +264,24 @@ export function parseAppPanel(panel: string | null | undefined): string | null {
   return panel && panel.startsWith(APP_PANEL_PREFIX) ? panel.slice(APP_PANEL_PREFIX.length) : null
 }
 
+/**
+ * Whether a built-in manager panel (DSH 管理 / OpenClaw 管理) should surface in the nav (IM rail,
+ * classic menu bar, command palette). The manager is meaningless once the user switches its page
+ * off in the Pages panel (`disabled`) or when the on-demand CLI runtime was never provisioned into
+ * userData (`runtimeMissing`) — both mean "nothing to manage yet", so the entry hides. An absent
+ * page row leaves the manager visible (the built-in pages are always registered in production; the
+ * two flags, not presence, are the gate). One predicate keeps every nav surface in sync off the one
+ * `PageState` list the registry joins.
+ */
+export function managerPageVisible(
+  pages: Pick<PageState, 'kind' | 'disabled' | 'runtimeMissing'>[],
+  kind: 'dsh' | 'openclaw'
+): boolean {
+  const p = pages.find((x) => x.kind === kind)
+  if (!p) return true
+  return !p.disabled && !p.runtimeMissing
+}
+
 /** Resolved "环境目录" info surfaced to the renderer's env-dir rows. */
 export interface EnvRootInfo {
   /** effective (fixed) root every runtime's install-choice dir lands under: userData/env */
@@ -321,6 +342,12 @@ export interface ContainerSettings {
    * hosts the same panels. Layout only — the frosted-glass surfaces are unchanged.
    */
   layoutMode?: 'classic' | 'im'
+  /**
+   * IM (效率) shell rail placement. 'left' (default) = docked column on the left edge, bubble to
+   * its right; 'right' = docked column on the right edge, bubble opens right→left; 'bottom' = a
+   * floating icon pill centred over the bottom edge (no content reflow), bubble bottom-centred.
+   */
+  sidebarPosition?: SidebarPosition
   /** legacy: the env root used to be a two-choice pick here; resolveEnvRoot() now always returns userData/env */
   envRoot: string
   /** dsh home choice; ''/'@install' (default) = container-owned <envRoot>/.dsh, '@system' = the tool's own ~/.dsh (legacy free paths read as default) */

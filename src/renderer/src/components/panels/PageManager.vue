@@ -30,7 +30,12 @@ import { usePagesStore, type PageState } from '@renderer/stores/pages'
 import { useSettingsStore } from '@renderer/stores/settings'
 import { useRuntimesStore } from '@renderer/stores/runtimes'
 import { useEnvDirs } from '@renderer/composables/useEnvDirs'
-import { CONTAINER_REPO_URL, DISPLAY_TIME_ZONE, DISPLAY_TIME_ZONE_LABEL } from '@shared/types'
+import {
+  CONTAINER_REPO_URL,
+  DISPLAY_TIME_ZONE,
+  DISPLAY_TIME_ZONE_LABEL,
+  managerPageVisible
+} from '@shared/types'
 import { detectSourceKind, expandGitSource, type SourceKind } from '@shared/smartSource'
 import type { PageMetrics, PortCheckResult } from '@shared/types'
 import { t } from '@renderer/i18n'
@@ -389,7 +394,14 @@ const envSections = computed<EnvSection[]>(() =>
       (p) =>
         !p.external &&
         p.envVars?.length &&
-        (!p.manageAsApp || p.kind === 'dsh' || p.kind === 'openclaw')
+        (!p.manageAsApp || p.kind === 'dsh' || p.kind === 'openclaw') &&
+        /* A built-in dsh/openclaw runtime that has been switched off (disabled) or was never
+           provisioned (runtimeMissing) has nothing to configure here, so drop its 环境目录 rows —
+           the same `managerPageVisible` gate the nav surfaces use. Imported node pages are
+           unaffected, and when every section drops out the tab itself hides (see the pane). */
+        (p.kind === 'dsh' || p.kind === 'openclaw'
+          ? managerPageVisible(pagesStore.pages, p.kind)
+          : true)
     )
     .map((p) => ({
       pageId: p.id,
@@ -403,6 +415,12 @@ const envSections = computed<EnvSection[]>(() =>
       }))
     }))
 )
+/* The 环境目录 tab hides once nothing is left to configure; if it was the open tab (e.g. the
+   user just disabled the last built-in runtime), fall back to the first pane so the rail never
+   points at a removed tab. */
+watch(envSections, (sections) => {
+  if (!sections.length && activeTab.value === 'env') activeTab.value = 'install'
+})
 const envDrafts = reactive<Record<string, string>>({})
 const envDraftKey = (pageId: string, key: string): string => `${pageId}::${key}`
 
@@ -798,6 +816,21 @@ const switcherEntries = computed<
     disabled: false
   }))
 ])
+/**
+ * 效率（IM）布局下宿主（QQShell）传 tabPosition='top'：气泡是 JS 定高容器，视口相对封顶会算出
+ * 比气泡还高的表格 → pane 与表体各出一条滚动条。此时表格改走 100%，定高链见 QQShell 的
+ * `.pm-switcher-pane` 规则（与 DSH 插件表同一手法）。
+ */
+const isTopTabs = computed(() => props.tabPosition === 'top')
+/**
+ * 顶栏显示表格封顶：提示行、提示条、批量按钮固定在上方，滚动条只出现在表体（表头一并固定）。
+ * 经典模式外层 `.panel-body` 会跟着内容一起滚，所以封顶取视口相对值，扣掉固定区经验高度
+ * （卡片头 + 内边距 + 提示行 + 提示条 + 按钮行 + 表头 ≈ 280px）；`max()` 下限保住极矮窗口下
+ * 仍有一条可用列表，宁可少用几像素也不再长出第二条滚动条。
+ */
+const switcherTableMax = computed(() =>
+  isTopTabs.value ? '100%' : 'max(160px, calc(100vh - 280px))'
+)
 function switcherVisible(id: string): boolean {
   return !(settingsStore.settings.hiddenSwitcherPages ?? []).includes(id)
 }
@@ -994,7 +1027,7 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
                        remains the fallback (no letter glyph to fight the status dot with). -->
                   <img v-if="row.iconUrl" class="cell-icon" :src="row.iconUrl" alt="" />
                   {{ row.name }}
-                  <span v-if="row.disabled" class="disabled-tag">
+                  <span v-if="row.disabled" class="disabled-tag is-danger">
                     {{ t('pageMgr.disabledTag') }}
                   </span>
                 </div>
@@ -1316,7 +1349,7 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
       </el-tab-pane>
 
       <!-- 顶栏显示：逐条控制页面/外部站点是否在顶栏「选择页面」切换器中显示；全部隐藏时顶栏切换器与角标一并收起。 -->
-      <el-tab-pane name="switcher">
+      <el-tab-pane name="switcher" class="pm-switcher-pane">
         <template #label>
           <span class="tab-label"
             ><el-icon><Monitor /></el-icon>{{ t('pageMgr.tabSwitcher') }}</span
@@ -1339,7 +1372,12 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
               {{ t('pageMgr.switcherHideAll') }}
             </el-button>
           </div>
-          <el-table v-if="switcherEntries.length" :data="switcherEntries" size="small">
+          <el-table
+            v-if="switcherEntries.length"
+            :data="switcherEntries"
+            size="small"
+            :max-height="switcherTableMax"
+          >
             <el-table-column :label="t('pageMgr.switcherColName')" min-width="180">
               <template #default="{ row }">
                 <div class="cell-name">
@@ -1347,7 +1385,7 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
                   <span v-if="row.external" class="disabled-tag">
                     {{ t('settings.tagExternal') }}
                   </span>
-                  <span v-if="row.disabled" class="disabled-tag">
+                  <span v-if="row.disabled" class="disabled-tag is-danger">
                     {{ t('pageMgr.disabledTag') }}
                   </span>
                 </div>
@@ -1367,8 +1405,9 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
         </div>
       </el-tab-pane>
 
-      <!-- 环境目录：从「设置」搬来的集中式每页目录开关，与齿轮里的配置同源（写 pageEnvs）。 -->
-      <el-tab-pane name="env">
+      <!-- 环境目录：从「设置」搬来的集中式每页目录开关，与齿轮里的配置同源（写 pageEnvs）。
+           v-if 让整卡在无可配置目录（dsh/openclaw 均禁用/未装且无 node 项目声明）时彻底隐藏。 -->
+      <el-tab-pane v-if="envSections.length" name="env">
         <template #label>
           <span class="tab-label"
             ><el-icon><FolderOpened /></el-icon>{{ t('settings.tabEnv') }}</span
@@ -1569,8 +1608,8 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
 .page-manager.single-pane :deep(.v-tabs > .el-tabs__header) {
   display: none;
 }
-/* Next to a disabled built-in's name: the same quiet pill language as the switcher's
-   未安装 tag, so a switched-off row reads as "deliberately off", not "broken". */
+/* Next to a page's name: the same quiet pill language as the switcher's 外部站点 tag, so a
+   switched-off row reads as "deliberately off", not "broken". */
 .disabled-tag {
   flex: none;
   margin-left: 6px;
@@ -1581,6 +1620,14 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
   color: var(--text-dim);
   border: 1px solid var(--border);
   background: var(--glass-chip);
+}
+/* 已禁用 is the one tag that must be findable at a glance in a long list (starting a page by
+   mistake is the usual dead end), so it keeps the pill skin but lights up in --err. The wash
+   stays faint: a red-outlined tag, not an alarm. */
+.disabled-tag.is-danger {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 55%, var(--border));
+  background: color-mix(in srgb, var(--err) 10%, var(--glass-chip));
 }
 .hint {
   color: var(--text-dim);
@@ -1814,21 +1861,9 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
   padding: 4px 5px;
   height: auto;
 }
-/* Highlight chip: every action sits on a soft tile tinted with its own semantic color
-   (currentColor mixes down to a pale wash), so start/stop/remove/disable read as
-   highlighted buttons instead of bare glyphs — and the hover state deepens the tile.
-   The neon glow used to come only from glass.css's `.el-button--primary` shadow, so
-   success/warning/danger rows looked flat next to the primary ones — cast it from
-   currentColor instead and every semantic type glows in its own hue. */
-.installed :deep(.col-actions .el-button.is-text) {
-  background: color-mix(in srgb, currentColor 14%, transparent);
-  border-radius: 8px;
-  box-shadow: 0 4px 14px color-mix(in srgb, currentColor 35%, transparent);
-}
-.installed :deep(.col-actions .el-button.is-text:hover) {
-  background: color-mix(in srgb, currentColor 26%, transparent);
-  box-shadow: 0 6px 18px color-mix(in srgb, currentColor 55%, transparent);
-}
+/* Highlight tile + currentColor glow now come from the global `.el-button.is-text:has(.el-icon)`
+   rule in glass.css (applied identically to every panel's icon actions), so this scoped copy was
+   removed. Only the table's tighter sizing and larger 18px glyph stay component-specific. */
 .installed :deep(.col-actions .el-icon) {
   font-size: 18px;
 }
@@ -1992,7 +2027,7 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
     box-shadow 0.15s ease;
 }
 .env-list :deep(.el-form-item):hover {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: var(--dsh-wash-soft);
   border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent) inset;
 }

@@ -451,7 +451,7 @@ html.dark .cli-term-surface {
    与主题一致；轨道透明，不遮挡终端内容。 */
 .cli-term-surface :deep(.xterm-viewport) {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--text-dim) 40%, transparent) transparent;
+  scrollbar-color: var(--scroll-thumb) transparent;
 }
 .cli-term-surface :deep(.xterm-viewport::-webkit-scrollbar) {
   width: 8px;
@@ -460,13 +460,13 @@ html.dark .cli-term-surface {
   background: transparent;
 }
 .cli-term-surface :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
-  background: color-mix(in srgb, var(--text-dim) 35%, transparent);
+  background: var(--scroll-thumb);
   border: 2px solid transparent;
   border-radius: 8px;
   background-clip: content-box;
 }
 .cli-term-surface :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) {
-  background: color-mix(in srgb, var(--text-dim) 60%, transparent);
+  background: var(--scroll-thumb-hover);
   background-clip: content-box;
 }
 

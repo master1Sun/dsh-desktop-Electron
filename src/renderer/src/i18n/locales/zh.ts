@@ -24,6 +24,7 @@ const zh: Dict = {
   },
   menu: {
     view: '视图',
+    railExpand: '展开图标栏',
     system: '系统',
     pages: '页面',
     apps: '应用',
@@ -111,7 +112,7 @@ const zh: Dict = {
     accentTip: '覆盖高亮色（白天/黑夜均生效）；恢复默认则各自使用内置主题色。',
     glassFx: '毛玻璃效果',
     glassFxTip:
-      '一个滑条同时调节磨砂模糊与背景通透度：0 = 实心（不透明、无模糊），40 = 容器允许的最强磨砂（再高会糊成一片，已限制在此）。',
+      '同时调节磨砂模糊与背景通透度：0 = 实心（不透明、无模糊），数值越大越通透、磨砂越强，40 为最强档。',
     language: '语言',
     langZh: '中文',
     langEn: 'English',
@@ -119,7 +120,11 @@ const zh: Dict = {
     layoutClassic: '经典',
     layoutIm: '效率',
     layoutModeTip:
-      '经典：顶部菜单 + 居中浮层面板；效率：紧凑标题栏 + 左侧图标栏 + 停靠面板。仅切换布局，毛玻璃质感、主题与背景不变。',
+      '决定菜单与页面面板靠在哪个边。顶部：菜单在窗口顶部，面板在中间浮出。左侧 / 右侧：图标栏贴在窗口左/右边，面板靠在图标栏旁浮出。底部：图标栏收在窗口底部，平时只留一条细横条，鼠标停留展开、移开自动收起，面板从底部向上浮出。',
+    dockTop: '顶部',
+    sidebarPosLeft: '左侧',
+    sidebarPosRight: '右侧',
+    sidebarPosBottom: '底部',
     behavior: '行为',
     minimizeToTray: '最小化到托盘',
     minimizeOn: '关闭主窗口将隐藏到任务栏托盘，node 进程继续运行',
@@ -134,7 +139,7 @@ const zh: Dict = {
       '页面启动后异常退出时自动重试（2s/5s/15s 退避）；稳定运行 5 分钟后清零。关闭后崩溃仅标红、不自动重启。',
     systemNotifications: '系统通知',
     systemNotificationsTip:
-      '勾选后：所有 toast 提示改走系统通知中心（不再弹窗口右下角角标），崩溃放弃重启、在线更新就绪等也一并发系统通知；关闭后 toast 恢复为窗口内角标提示。',
+      '开启后所有提示走系统通知中心，不在窗口右下角显示角标；崩溃放弃重启、在线更新就绪等也以系统通知送达。关闭时提示显示在窗口右下角角标。',
     containerMcpServer: '对外 MCP 服务',
     containerMcpServerTip:
       '开启后容器自身会在回环地址（127.0.0.1）启动一个 Streamable HTTP 的 MCP 服务，任意外部/托管 agent 可持令牌驱动容器：列出/启停托管页、读日志、读写共享任务队列。默认关闭，关闭时无监听、也不向 agent 导出地址。',
@@ -575,7 +580,7 @@ const zh: Dict = {
     tabSwitcher: '顶栏显示',
     switcherHeading: '选择顶栏“选择页面”下拉里显示的条目',
     switcherTip:
-      '关闭某项后它不再出现在顶栏切换器里（仅影响显示，不影响启停）；当全部关闭时，顶栏的切换器与运行数角标会一并隐藏。',
+      '决定哪些条目出现在顶栏「选择页面」下拉里；只影响显示，不影响页面启停。全部关闭时，顶栏不显示切换器与运行数角标。',
     switcherColName: '页面 / 站点',
     switcherColShow: '在顶栏显示',
     switcherShowAll: '全部显示',

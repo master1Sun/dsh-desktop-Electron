@@ -26,6 +26,8 @@ const DEFAULTS: ContainerSettings = {
   locale: 'zh',
   // shell layout: 'classic' (top menu + floating panels) is the default; 'im' = rail + bubbles
   layoutMode: 'classic',
+  // IM rail docking side; 'left' keeps the original column-on-the-edge behaviour
+  sidebarPosition: 'left',
   // env root is no longer user-configurable: fixed at userData/env (the system-common spot).
   // The field only survives in old settings files; resolveEnvRoot() ignores it. '@system' was
   // also a persisted choice there and resolves to the same place, so nothing needs migrating.

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { QuestionFilled, Download, Connection, Document, Tickets, TrendCharts } from '@element-plus/icons-vue'
+// `Help` (线框 ?)而非 `QuestionFilled`（实心圆盘）：tab rail 其余图标（Download/Connection/
+// Document/Tickets/TrendCharts）都是轮廓风格，实心填充在 hover/active 的 accent 底色上格格不入。
+import { Help, Download, Connection, Document, Tickets, TrendCharts } from '@element-plus/icons-vue'
 import PageManager from '@renderer/components/panels/PageManager.vue'
 import DshManager from '@renderer/components/panels/DshManager.vue'
 import OpenclawManager from '@renderer/components/panels/OpenclawManager.vue'
@@ -642,12 +644,18 @@ async function loadHistory(): Promise<void> {
 const historyRows = computed(() => {
   const h = history.value
   if (!h) return []
-  const rows: { label: string; version: string; pending?: boolean }[] = []
-  rows.push({ label: t('panel.historyRunning'), version: h.running })
+  // `tone` drives the timeline dot/label colour per role: 当前运行 / 待重启生效 / 可回退备份 / 上次回退自.
+  const rows: {
+    label: string
+    version: string
+    tone: 'running' | 'pending' | 'backup' | 'rollback'
+  }[] = []
+  rows.push({ label: t('panel.historyRunning'), version: h.running, tone: 'running' })
   if (h.current && h.current !== h.running)
-    rows.push({ label: t('panel.historyPending'), version: h.current, pending: true })
-  if (h.backup) rows.push({ label: t('panel.historyBackup'), version: h.backup })
-  if (h.rollbackFrom) rows.push({ label: t('panel.historyRollbackFrom'), version: h.rollbackFrom })
+    rows.push({ label: t('panel.historyPending'), version: h.current, tone: 'pending' })
+  if (h.backup) rows.push({ label: t('panel.historyBackup'), version: h.backup, tone: 'backup' })
+  if (h.rollbackFrom)
+    rows.push({ label: t('panel.historyRollbackFrom'), version: h.rollbackFrom, tone: 'rollback' })
   return rows
 })
 
@@ -888,11 +896,15 @@ async function doImportSnapshot(): Promise<void> {
 
     <!-- Help: 关于 + 更新 + 诊断 + 日志 merged into one panel, split by a vertical tab rail. -->
     <section v-else-if="props.panel === 'help'" class="sec help" :class="{ 'single-pane': !!pane }">
-      <el-tabs v-model="helpTab" class="help-tabs" :tab-position="tabPosition || 'left'">
+      <el-tabs
+        v-model="helpTab"
+        class="help-tabs v-tabs"
+        :tab-position="tabPosition || 'left'"
+      >
         <el-tab-pane name="about">
           <template #label>
             <span class="tab-label"
-              ><el-icon><QuestionFilled /></el-icon>{{ t('panel.tabAbout') }}</span
+              ><el-icon><Help /></el-icon>{{ t('panel.tabAbout') }}</span
             >
           </template>
           <div class="kv">
@@ -1209,17 +1221,22 @@ async function doImportSnapshot(): Promise<void> {
             </el-table-column>
           </el-table>
 
-          <!-- #17 container OTA version history -->
+          <!-- #17 container OTA version history: one compact timeline well — dots on a joined spine
+               read the rows as an update chain (当前 → 待生效 → 备份), colour carries the role. -->
           <template v-if="historyRows.length">
             <div class="line" />
             <div class="head">
               <span>{{ t('panel.historyTitle') }}</span>
             </div>
             <div class="history-grid">
-              <div v-for="r in historyRows" :key="r.label" class="history-row">
-                <span class="history-label" :class="{ 'history-pending': r.pending }">{{
-                  r.label
-                }}</span>
+              <div
+                v-for="r in historyRows"
+                :key="r.label"
+                class="history-node"
+                :class="`tone-${r.tone}`"
+              >
+                <span class="history-dot" aria-hidden="true" />
+                <span class="history-label">{{ r.label }}</span>
                 <code class="history-ver">{{ r.version }}</code>
               </div>
             </div>
@@ -1504,17 +1521,11 @@ async function doImportSnapshot(): Promise<void> {
   padding: 2px;
 }
 
-/* Vertical (left) tab rail for the Help panel, mirroring SettingsPanel: a compact
-   icon+label column, active item gets a soft accent wash, the EP hairline between the
-   nav and the content is dropped so the two columns read as one card. */
-.help-tabs {
-  display: flex;
-  align-items: stretch;
-  min-height: 240px;
-}
-/* IM popup: tabs run across the top instead of a left rail. The base block forces a row flex for
-   the vertical rail, so flip to a column and move the header margin under the content. The
-   `.is-left` alignment rule above is inert here (top items are `.is-top`). */
+/* Vertical (left) tab rail for the Help panel. The shared look (item sizing, accent wash,
+   hairline removal, `.tab-label` glyph size) now comes from the global `.v-tabs` skin in
+   glass.css — the el-tabs carries `class="help-tabs v-tabs"` — so this block only keeps
+   what is genuinely help-specific: the IM top-tab variant, the single-pane rail hiding,
+   and the doubled-class trick that beats EP's right-aligned `.el-tabs--left .is-left`. */
 .help-tabs.el-tabs--top {
   flex-direction: column;
   align-items: stretch;
@@ -1548,57 +1559,15 @@ async function doImportSnapshot(): Promise<void> {
 .sec.help.single-pane .help-tabs {
   min-height: 0;
 }
-.help-tabs :deep(.el-tabs__header) {
-  margin: 0 16px 0 0;
-}
-.help-tabs :deep(.el-tabs__nav-wrap)::after {
-  display: none;
-}
-.help-tabs :deep(.el-tabs__nav) {
-  padding: 2px;
-}
 /* EP defaults vertical tabs to right-aligned (`.el-tabs--left .el-tabs__item.is-left`,
    specificity 0,3,0); stack a second component class to beat it so icon+label sit left. */
 .help-tabs.help-tabs :deep(.el-tabs__item.is-left) {
   justify-content: flex-start;
   text-align: left;
 }
-.help-tabs :deep(.el-tabs__item) {
-  height: auto;
-  padding: 12px 12px;
-  border-radius: 8px;
-  font-size: 12.5px;
-  line-height: 1.4;
-  white-space: nowrap;
-  color: var(--text-dim);
-}
-.help-tabs:not(.el-tabs--top) :deep(.el-tabs__item + .el-tabs__item) {
-  /* Vertical rail only: this stack spacing would stagger a horizontal row's first item. */
-  margin-top: 8px;
-}
-.help-tabs :deep(.el-tabs__item:hover) {
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-.help-tabs :deep(.el-tabs__item.is-active) {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  font-weight: 600;
-}
-.help-tabs :deep(.el-tabs__active-bar) {
-  display: none;
-}
 .help-tabs :deep(.el-tabs__content) {
   flex: 1;
   overflow: hidden;
-}
-.tab-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
-.tab-label .el-icon {
-  font-size: 15px;
 }
 
 .head {
@@ -1699,9 +1668,9 @@ async function doImportSnapshot(): Promise<void> {
   font-size: 12.5px;
   margin-bottom: 6px;
 }
-/* Update-list rows (关于与更新) get a glassy accent wash on hover, like the other lists. */
+/* Update-list rows (关于与更新) get a glassy accent wash on hover, like the other lists (shared token). */
 .help :deep(.el-table__body tr:hover > td) {
-  background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
+  background: var(--dsh-wash-hover) !important;
   -webkit-backdrop-filter: blur(4px) saturate(125%);
   backdrop-filter: blur(4px) saturate(125%);
 }
@@ -1761,28 +1730,94 @@ async function doImportSnapshot(): Promise<void> {
   color: var(--err);
 }
 
-/* #17 version history mini-table */
+/* #17 version history: a compact timeline well (same dot-on-spine language as the log timeline).
+   Per-row spine segments join into one continuous rail, capped at the first/last dot centres; the
+   dot colour encodes the role and the version sits in a mono chip, so the chain scans at a glance. */
 .history-grid {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-}
-.history-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
+  padding: 4px 10px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--glass-well);
   font-size: 12.5px;
+  user-select: text;
+}
+.history-node {
+  position: relative;
+  display: grid;
+  grid-template-columns: 14px 96px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+}
+/* Vertical rail; the dot column centre sits at x≈11px (node pad 4 + half the 14px column). */
+.history-node::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+/* Endpoint caps: single-line rows centre their dot at 50%, so start/stop the spine there. */
+.history-node:first-child::before {
+  top: 50%;
+}
+.history-node:last-child::before {
+  top: auto;
+  bottom: 50%;
+}
+.history-node:only-child::before {
+  display: none;
+}
+.history-dot {
+  position: relative;
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  justify-self: center;
+  border-radius: 50%;
+  background: var(--text-dim);
+  /* opaque ring so the rail reads as passing *behind* the dot, not through it */
+  box-shadow: 0 0 0 3px var(--surface-2);
+}
+.tone-running .history-dot {
+  background: var(--accent);
+  box-shadow:
+    0 0 0 3px var(--surface-2),
+    0 0 6px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.tone-pending .history-dot {
+  background: var(--warn);
+}
+.tone-backup .history-dot {
+  background: var(--ok);
 }
 .history-label {
   color: var(--text-dim);
-  width: 96px;
-  flex: none;
 }
-.history-label.history-pending {
+.tone-running .history-label {
+  color: var(--text);
+  font-weight: 600;
+}
+.tone-pending .history-label {
   color: var(--warn);
 }
 .history-ver {
+  justify-self: start;
   font-family: var(--font-mono, ui-monospace, monospace);
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--glass-chip);
+  color: var(--text);
+}
+.tone-running .history-ver {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
 }
 
 /* #21 network diagnostic results */

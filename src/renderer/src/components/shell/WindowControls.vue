@@ -264,9 +264,11 @@ async function close(): Promise<void> {
 }
 
 .win-btn.view:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: var(--dsh-wash-hover);
   border-color: var(--accent);
   color: var(--accent);
+  -webkit-backdrop-filter: var(--dsh-wash-frost);
+  backdrop-filter: var(--dsh-wash-frost);
 }
 
 .win-btn.view:disabled {

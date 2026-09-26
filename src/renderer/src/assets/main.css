@@ -42,6 +42,11 @@
   --ok: #2fbf71;
   --warn: #f5a623;
   --err: #e5484d;
+  /* Single scrollbar recipe shared by every scroll surface (panels, tables, xterm, toasts)
+     so thumb colour / hover / radius read identically app-wide. Components override only the
+     *width* (thin in tight spots); the thumb tint always comes from these tokens. */
+  --scroll-thumb: color-mix(in srgb, var(--text-dim) 35%, transparent);
+  --scroll-thumb-hover: color-mix(in srgb, var(--text-dim) 60%, transparent);
 }
 
 html.dark {
@@ -243,12 +248,20 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--text-dim) 35%, transparent);
+  background: var(--scroll-thumb);
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
+/* Hover gives the thumb more presence, matching the feedback every other interactive
+   surface has — the old static thumb looked dead next to the accent-washed rows. */
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+}
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 

@@ -24,6 +24,7 @@ const en: Dict = {
   },
   menu: {
     view: 'View',
+    railExpand: 'Expand icon rail',
     system: 'System',
     pages: 'Pages',
     apps: 'Apps',
@@ -113,7 +114,7 @@ const en: Dict = {
       'Overrides the highlight color (applies in both light and dark); Reset falls back to each theme’s built-in accent.',
     glassFx: 'Frosted glass',
     glassFxTip:
-      'One slider drives both the frost blur and see-through: 0 = solid (opaque, no blur), 40 = the strongest frost the container allows (beyond that it smudges, so the scale stops here).',
+      'Drives both the frost blur and the see-through: 0 = solid (opaque, no blur); the higher the value, the clearer and frostier, 40 being the strongest.',
     language: 'Language',
     langZh: '中文',
     langEn: 'English',
@@ -121,7 +122,11 @@ const en: Dict = {
     layoutClassic: 'Classic',
     layoutIm: 'Efficiency',
     layoutModeTip:
-      'Classic: top menu bar + centered floating panels. Efficiency: a compact title bar + a left icon rail + a docked panel. Layout only — frosted surfaces, theme and background are unchanged.',
+      'Which edge the menu and the page panels sit on. Top: the menu runs across the window top and panels float in the middle. Left / Right: an icon rail docks to that edge and the panel floats beside it. Bottom: the rail rests as a thin bar on the bottom edge, expands while the pointer dwells on it and retracts when it leaves, and the panel rises from the bottom.',
+    dockTop: 'Top',
+    sidebarPosLeft: 'Left',
+    sidebarPosRight: 'Right',
+    sidebarPosBottom: 'Bottom',
     behavior: 'Behavior',
     minimizeToTray: 'Minimize to tray',
     minimizeOn: 'Closing the main window hides it to the tray; the node process keeps running',
@@ -136,7 +141,7 @@ const en: Dict = {
       'Retries a page that exits abnormally after it has started (2s/5s/15s backoff); the counter clears after 5 min stable. When off, crashes only flag red and never auto-restart.',
     systemNotifications: 'System notifications',
     systemNotificationsTip:
-      'When on, every in-app toast is routed to the OS notification center (no corner toast); crash give-up and update-ready notify there too. When off, toasts show in-app again.',
+      'When on, every in-app notice is delivered through the OS notification center instead of a corner badge, including crash give-up and update-ready. When off, notices show as a badge in the window corner.',
     containerMcpServer: 'Expose as MCP server',
     containerMcpServerTip:
       'When on, the container runs its own Streamable-HTTP MCP server on loopback (127.0.0.1); any external/hosted agent holding the bearer token can drive the container — list/start/stop pages, read logs, read/write the shared task queue. Off by default: no listener and no URL is exported to agents when off.',
@@ -589,7 +594,7 @@ const en: Dict = {
     tabSwitcher: 'Top Bar',
     switcherHeading: 'Choose which entries show in the top-bar “Select page” dropdown',
     switcherTip:
-      'Turning an entry off removes it from the top-bar switcher (display only — it doesn’t affect start/stop). When every entry is off, the switcher and its running-count badge hide together.',
+      'Chooses which entries appear in the top-bar page switcher; display only — it doesn’t affect start/stop. With every entry off, the switcher and its running-count badge are hidden from the top bar.',
     switcherColName: 'Page / site',
     switcherColShow: 'Show in top bar',
     switcherShowAll: 'Show all',

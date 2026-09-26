@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import MenuBar, { type PanelKind } from '@renderer/components/layout/classic/MenuBar.vue'
 import {
   appPanelKey,
+  managerPageVisible,
   DEFAULT_KEYBINDINGS,
   GLASS_FROST_MAX_BLUR_PX,
   GLASS_FROST_MIN_ALPHA_PCT,
@@ -49,6 +50,9 @@ const activePanel = ref<string | null>(null)
 const isIm = computed(
   () => !isPopout.value && (settingsStore.settings.layoutMode ?? 'classic') === 'im'
 )
+
+/** 效率布局 + 侧边栏位置=底部居中: the rail docks as an in-flow bottom strip (see .body-bottom). */
+const railAtBottom = computed(() => (settingsStore.settings.sidebarPosition ?? 'left') === 'bottom')
 
 /**
  * Vertical tab a panel should open on, set by a palette command (「查看事件动态」→ help/events).
@@ -365,6 +369,13 @@ const commands = computed<Command[]>(() => {
     }
   }
   for (const panel of PANEL_COMMANDS) {
+    // DSH / OpenClaw manager commands hide in lockstep with the nav (rail / menu bar): their page
+    // being disabled or its runtime not installed leaves nothing to manage.
+    if (
+      (panel.kind === 'dsh' || panel.kind === 'openclaw') &&
+      !managerPageVisible(pagesStore.pages, panel.kind)
+    )
+      continue
     list.push({
       id: `panel-${panel.kind}`,
       title: t(panel.key),
@@ -1683,7 +1694,7 @@ const showNav = computed(() =>
         </div>
       </div>
 
-      <div class="shell-body">
+      <div class="shell-body" :class="{ 'body-bottom': isIm && railAtBottom }">
         <!-- IM layout: the left rail + docked sidebar replace the menu bar's group triggers and
              the centered floating panel. It shares `activePanel` with the compact title bar, so a
              rail click and the switcher stay in sync. Classic mode renders no rail. -->
@@ -1691,6 +1702,7 @@ const showNav = computed(() =>
           v-if="isIm"
           :pages="pagesStore.pages"
           :current="activePanel"
+          :sidebar-position="settingsStore.settings.sidebarPosition ?? 'left'"
           :runtime="pagesStore.nodeInfo"
           :running-count="runningCount"
           :total-count="pageContainerCount"
@@ -1827,6 +1839,23 @@ const showNav = computed(() =>
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+/* Bottom-centred rail: the rail becomes a real flow row under the page (an iOS home-indicator
+   strip that reserves its own height) instead of floating over the content, so stacking the two
+   vertically is what keeps the bar truly 占位. The bubble still floats over the page. */
+.shell-body.body-bottom {
+  flex-direction: column;
+  /* The dock pill and the bubble float out of the bottom strip, so clip the row: on a very short
+     window they would otherwise grow a window-level scrollbar that flickers with the dock. */
+  overflow: hidden;
+}
+.shell-body.body-bottom > .content {
+  order: 1;
+  flex: 1 1 auto;
+}
+.shell-body.body-bottom > .qq-shell {
+  order: 2;
+  flex: none;
 }
 .shell-body > .content {
   min-width: 0;

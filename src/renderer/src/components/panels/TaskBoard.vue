@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, toRaw, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Plus, Delete, ArrowRight, ArrowLeft, Check } from '@element-plus/icons-vue'
+import {
+  Plus,
+  Delete,
+  ArrowRight,
+  ArrowLeft,
+  Check,
+  Help,
+  Grid,
+  Share,
+  DataAnalysis
+} from '@element-plus/icons-vue'
 import { t } from '@renderer/i18n'
 import { useSettingsStore } from '@renderer/stores/settings'
 import { usePagesStore } from '@renderer/stores/pages'
@@ -154,7 +164,12 @@ onMounted(() => {
   <div v-loading="loading && !tasks.length" class="task-board">
     <el-tabs v-model="activeTab" class="v-tabs" :tab-position="props.tabPosition || 'left'">
       <!-- Tab 1: the editable queue, with the #1 autopilot arming controls on top. -->
-      <el-tab-pane name="board" :label="t('wsMgr.board')">
+      <el-tab-pane name="board">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Grid /></el-icon>{{ t('wsMgr.board') }}</span
+          >
+        </template>
         <section class="autopilot-bar glass-soft">
           <div class="ap-row">
             <el-switch
@@ -168,7 +183,7 @@ onMounted(() => {
               :show-after="120"
               popper-class="dsh-tip-popper"
             >
-              <span class="ap-help">?</span>
+              <el-icon class="ap-help"><Help /></el-icon>
             </el-tooltip>
           </div>
           <div class="ap-row">
@@ -202,7 +217,7 @@ onMounted(() => {
               :show-after="120"
               popper-class="dsh-tip-popper"
             >
-              <span class="ap-help">?</span>
+              <el-icon class="ap-help"><Help /></el-icon>
             </el-tooltip>
             <el-input
               v-model="promptDraft"
@@ -306,12 +321,22 @@ onMounted(() => {
       </el-tab-pane>
 
       <!-- Tab 2: #4 dependency topology (boot order for the same queue). -->
-      <el-tab-pane name="deps" :label="t('depGraph.title')">
+      <el-tab-pane name="deps">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Share /></el-icon>{{ t('depGraph.title') }}</span
+          >
+        </template>
         <DependencyGraph :pages="pagesStore.pages" />
       </el-tab-pane>
 
       <!-- Tab 3: the MCP hub's live tool-call feed, same 看板 surface. -->
-      <el-tab-pane name="calls" :label="t('mcpMgr.callsTitle')">
+      <el-tab-pane name="calls">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><DataAnalysis /></el-icon>{{ t('mcpMgr.callsTitle') }}</span
+          >
+        </template>
         <div class="feed-tab">
           <McpCallFeed />
         </div>
@@ -358,15 +383,12 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-dim);
 }
+/* The autopilot help affordance uses the same outline `Help` glyph (a ? in a circle) as the
+   IM rail / tab rails, sized to the row text — no hand-drawn border circle to drift from them. */
 .autopilot-bar .ap-help {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  border: 1px solid var(--border);
-  font-size: 10px;
+  font-size: 14px;
   color: var(--text-dim);
   cursor: help;
 }

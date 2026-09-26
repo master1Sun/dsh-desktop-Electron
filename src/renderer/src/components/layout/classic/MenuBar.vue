@@ -6,7 +6,7 @@ import PageSwitcher from '@renderer/components/shell/PageSwitcher.vue'
 import WindowControls from '@renderer/components/shell/WindowControls.vue'
 import TopProgressBar from '@renderer/components/shell/TopProgressBar.vue'
 import NetIndicator from '@renderer/components/shell/NetIndicator.vue'
-import { appPanelKey, parseAppPanel, type ExternalSite } from '@shared/types'
+import { appPanelKey, parseAppPanel, managerPageVisible, type ExternalSite } from '@shared/types'
 import type { PageState } from '@renderer/stores/pages'
 import { useDualStore } from '@renderer/stores/dual'
 import { useSettingsStore } from '@renderer/stores/settings'
@@ -140,8 +140,14 @@ const groups = computed<MenuGroup[]>(() => {
       // MCP 服务 / 共享上下文 are reached from here too (their panels stay mounted via the
       // slots below); the Ctrl+K palette offers the same two.
       actions: [
-        { id: 'dsh', title: t('menu.appDsh'), panel: 'dsh' as string },
-        { id: 'openclaw', title: t('menu.appOpenclaw'), panel: 'openclaw' as string },
+        // DSH / OpenClaw managers hide when their page is disabled or its runtime isn't installed
+        // (mirrors the IM rail's buildNav filter) — nothing to manage in those states.
+        ...(managerPageVisible(props.pages, 'dsh')
+          ? [{ id: 'dsh', title: t('menu.appDsh'), panel: 'dsh' as string }]
+          : []),
+        ...(managerPageVisible(props.pages, 'openclaw')
+          ? [{ id: 'openclaw', title: t('menu.appOpenclaw'), panel: 'openclaw' as string }]
+          : []),
         { id: 'external', title: t('menu.externalAddress'), panel: 'external' as string },
         { id: 'mcp', title: t('menu.appMcp'), panel: 'mcp' as string },
         { id: 'workspace', title: t('menu.workspace'), panel: 'workspace' as string },
@@ -908,9 +914,9 @@ onBeforeUnmount(() => {
 }
 
 .group-trigger:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  -webkit-backdrop-filter: blur(6px) saturate(125%);
-  backdrop-filter: blur(6px) saturate(125%);
+  background: var(--dsh-wash-hover);
+  -webkit-backdrop-filter: var(--dsh-wash-frost);
+  backdrop-filter: var(--dsh-wash-frost);
 }
 
 .group-trigger.active {
@@ -962,9 +968,9 @@ onBeforeUnmount(() => {
 }
 
 .act-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  -webkit-backdrop-filter: blur(6px) saturate(125%);
-  backdrop-filter: blur(6px) saturate(125%);
+  background: var(--dsh-wash-hover);
+  -webkit-backdrop-filter: var(--dsh-wash-frost);
+  backdrop-filter: var(--dsh-wash-frost);
 }
 
 .act-btn:disabled {
@@ -998,15 +1004,17 @@ onBeforeUnmount(() => {
 }
 
 .dual-btn:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: var(--dsh-wash-hover);
   border-color: var(--accent);
   color: var(--accent);
+  -webkit-backdrop-filter: var(--dsh-wash-frost);
+  backdrop-filter: var(--dsh-wash-frost);
 }
 
 .dual-btn.is-active {
   border-color: var(--accent);
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: var(--dsh-wash);
 }
 
 .dual-btn:disabled {
@@ -1062,9 +1070,9 @@ onBeforeUnmount(() => {
 }
 
 .drop-item:hover {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  -webkit-backdrop-filter: blur(8px) saturate(125%);
-  backdrop-filter: blur(8px) saturate(125%);
+  background: var(--dsh-wash-hover);
+  -webkit-backdrop-filter: var(--dsh-wash-frost);
+  backdrop-filter: var(--dsh-wash-frost);
   color: var(--text);
 }
 

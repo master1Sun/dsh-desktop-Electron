@@ -10,6 +10,7 @@ import {
   Bell,
   Key,
   Coin,
+  // ⓘ 提示符用轮廓 `InfoFilled`（EP 无纯线框 info 变体），与 PageManager 的环境行 ⓘ 保持一致。
   InfoFilled
 } from '@element-plus/icons-vue'
 import { usePagesStore } from '@renderer/stores/pages'
@@ -302,6 +303,22 @@ async function patch(
 function onThemeChange(mode: 'auto' | 'light' | 'dark'): void {
   emit('apply-theme', mode)
   patch({ theme: mode }, t('settings.themeSwitched'))
+}
+
+/**
+ * 布局四档停靠位。经典布局本质上就是“顶部”这一档（顶栏 + 居中浮层），效率布局的侧边栏位置则是
+ * 其余三档，所以设置里合成一个选择器，底下仍是 `layoutMode` + `sidebarPosition` 两个键 —— 旧配置
+ * 无需迁移，命令面板的 经典⇄效率 开关也不受影响。选“顶部”时刻意不写 `sidebarPosition`：回到顶栏
+ * 不代表用户不想再回效率布局，上次的贴边位置得留着。
+ */
+type Dock = 'top' | 'left' | 'bottom' | 'right'
+const dock = computed<Dock>(() =>
+  (settingsStore.settings.layoutMode ?? 'classic') === 'classic'
+    ? 'top'
+    : ((settingsStore.settings.sidebarPosition ?? 'left') as Dock)
+)
+function onDockChange(next: Dock): void {
+  patch(next === 'top' ? { layoutMode: 'classic' } : { layoutMode: 'im', sidebarPosition: next })
 }
 
 /**
@@ -680,7 +697,11 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 
 <template>
   <div class="settings-panel" :class="{ 'single-pane': !!pane }">
-    <el-tabs v-model="activeTab" class="settings-tabs" :tab-position="props.tabPosition || 'left'">
+    <el-tabs
+      v-model="activeTab"
+      class="settings-tabs v-tabs"
+      :tab-position="props.tabPosition || 'left'"
+    >
       <el-tab-pane name="view">
         <template #label>
           <span class="tab-label"
@@ -771,17 +792,20 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             </el-radio-group>
           </el-form-item>
 
+          <!-- One row, four edges: 顶部 = 经典布局, 左侧/底部/右侧 = 效率布局的图标栏停靠位. -->
           <el-form-item>
             <template #label
               >{{ t('settings.layoutMode')
               }}<InfoTip :content="t('settings.layoutModeTip')"
             /></template>
             <el-radio-group
-              :model-value="settingsStore.settings.layoutMode ?? 'classic'"
-              @update:model-value="patch({ layoutMode: $event as 'classic' | 'im' })"
+              :model-value="dock"
+              @update:model-value="onDockChange($event as 'top' | 'left' | 'bottom' | 'right')"
             >
-              <el-radio-button value="classic">{{ t('settings.layoutClassic') }}</el-radio-button>
-              <el-radio-button value="im">{{ t('settings.layoutIm') }}</el-radio-button>
+              <el-radio-button value="top">{{ t('settings.dockTop') }}</el-radio-button>
+              <el-radio-button value="left">{{ t('settings.sidebarPosLeft') }}</el-radio-button>
+              <el-radio-button value="bottom">{{ t('settings.sidebarPosBottom') }}</el-radio-button>
+              <el-radio-button value="right">{{ t('settings.sidebarPosRight') }}</el-radio-button>
             </el-radio-group>
           </el-form-item>
         </el-form>
@@ -1456,9 +1480,11 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   --settings-slider-w: clamp(140px, calc(var(--settings-content-w) - 80px), 260px);
 }
 
-/* Vertical (left) tab rail: a compact icon+label column instead of a top strip. The active
-   item gets a soft accent background; the hairline EP would draw between the nav and the
-   content is removed so the two columns read as one card.
+/* Vertical (left) tab rail. The shared rail look (header margins, item sizing,
+   accent wash, hairline removal) comes from the global `.v-tabs` skin in glass.css —
+   the el-tabs carries `class="settings-tabs v-tabs"` — so this block only keeps the
+   settings-specific pieces: the top-tab (IM popup) variant, the single-pane rail
+   hiding, and the capped content column.
    The old `min-height` used `stretch`, which let tall tabs (环境目录 / 隐私数据) grow the
    whole panel; `flex-start` + a max-height on the content column caps it instead. */
 .settings-tabs {
@@ -1505,49 +1531,12 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   min-height: 0;
   padding: 0;
 }
-.settings-tabs :deep(.el-tabs__header) {
-  margin: 0 16px 0 0;
-}
-.settings-tabs :deep(.el-tabs__nav-wrap)::after {
-  display: none;
-}
-.settings-tabs :deep(.el-tabs__nav) {
-  padding: 2px;
-}
 /* EP 对竖排 tab 默认是 `justify-content:flex-end; text-align:right`（选择器
    `.el-tabs--left .el-tabs__item.is-left`，特异性 0,3,0），单类 :deep 规则压不过，
    这里再叠一个本组件类名把特异性抬到 0,4,0 确保图标+文字真正贴左。 */
 .settings-tabs.settings-tabs :deep(.el-tabs__item.is-left) {
   justify-content: flex-start;
   text-align: left;
-}
-.settings-tabs :deep(.el-tabs__item) {
-  height: auto;
-  /* 上下 padding 加大，让侧栏条目更透气 */
-  padding: 12px 12px;
-  border-radius: 8px;
-  font-size: 12.5px;
-  line-height: 1.4;
-  white-space: nowrap;
-  color: var(--text-dim);
-}
-.settings-tabs:not(.el-tabs--top) :deep(.el-tabs__item + .el-tabs__item) {
-  /* 仅竖排 rail：横排时它会错开首行 item */
-  margin-top: 8px;
-}
-.settings-tabs :deep(.el-tabs__item:hover) {
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  -webkit-backdrop-filter: blur(6px) saturate(125%);
-  backdrop-filter: blur(6px) saturate(125%);
-}
-.settings-tabs :deep(.el-tabs__item.is-active) {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  font-weight: 600;
-}
-.settings-tabs :deep(.el-tabs__active-bar) {
-  display: none;
 }
 .settings-tabs :deep(.el-tabs__content) {
   flex: 1;
@@ -1560,14 +1549,6 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   /* The column used to sit flush with the rail and the panel's own padding, so the row hover
      wash ran straight into both. A little air on all four sides keeps it off the edges. */
   padding: 6px 8px 8px 6px;
-}
-.tab-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
-.tab-label .el-icon {
-  font-size: 15px;
 }
 
 /* ---- one control column, one rhythm ----
@@ -1710,7 +1691,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 /* Every settings form row (incl. the 系统 page bottom / env-section lists) reads on
    hover with a glassy accent wash instead of an opaque block. */
 .settings-panel :deep(.el-form-item):hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: var(--dsh-wash-soft);
   border-color: var(--border);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent) inset;
 }
@@ -1871,7 +1852,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   border-radius: 8px;
 }
 .settings-panel .key-row:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: var(--dsh-wash-soft);
 }
 .settings-panel .key-name {
   overflow: hidden;
