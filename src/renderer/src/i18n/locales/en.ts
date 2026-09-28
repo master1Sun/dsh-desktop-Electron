@@ -142,6 +142,12 @@ const en: Dict = {
     systemNotifications: 'System notifications',
     systemNotificationsTip:
       'When on, every in-app notice is delivered through the OS notification center instead of a corner badge, including crash give-up and update-ready. When off, notices show as a badge in the window corner.',
+    startDoneNotifications: 'Startup-complete notice',
+    startDoneNotificationsTip:
+      'Fire one summary notice (ok / fail counts) once the boot auto-start chain settles; click it to jump to a failed page. Only applies while System notifications is on.',
+    diskLowNotifications: 'Low-disk-space notice',
+    diskLowNotificationsTip:
+      'Once a day when the volume\u2019s free space falls under the threshold (the smaller of 5% of total and 2 GB); click it to open the storage settings. Only applies while System notifications is on.',
     containerMcpServer: 'Expose as MCP server',
     containerMcpServerTip:
       'When on, the container runs its own Streamable-HTTP MCP server on loopback (127.0.0.1); any external/hosted agent holding the bearer token can drive the container — list/start/stop pages, read logs, read/write the shared task queue. Off by default: no listener and no URL is exported to agents when off.',
@@ -273,6 +279,7 @@ const en: Dict = {
       'Clear all embedded browsing data? Every embedded site signs you out and local page drafts are lost.',
     /* ---- #8: storage (disk-usage dashboard) ---- */
     tabStorage: 'Storage',
+    tabCleanup: 'Disk cleanup',
     diskUsed: 'Container uses {size}',
     diskVolume: 'Disk {pct}% used · {free} free / {total} total',
     diskEmpty: 'Not scanned yet. Press Refresh to measure.',
@@ -492,7 +499,8 @@ const en: Dict = {
     versionPickList: 'Pick from the list',
     versionInstall: 'Install',
     versionAppliesAll: 'Applied to every bundled MCP server — the batch fails if one lacks it',
-    mcpPkgName: 'MCP built-in components'
+    mcpPkgName: 'MCP built-in components',
+    tabPorts: 'Ports & processes'
   },
   app: {
     title: 'DesktopContainer',
@@ -564,6 +572,35 @@ const en: Dict = {
     downloads: 'Downloads',
     entry: 'Item',
     truncated: '(scan hit its cap)'
+  },
+  ports: {
+    title: 'Listening ports',
+    tip: 'Shows only this container’s processes (hosted page / container / conflict / orphan / spawned from a project dir), refreshed every 10s.',
+    colPort: 'Port',
+    colProcess: 'Process',
+    colOwner: 'Owner',
+    colAction: 'Action',
+    refresh: 'Refresh',
+    searchPlaceholder: 'Search port / process / command line',
+    onlyIssues: 'Conflicts & orphans only',
+    conflict: 'Conflict',
+    orphan: 'Orphan',
+    self: 'Container',
+    foreign: 'Third-party',
+    declaredFor: 'Reserved for: {name}',
+    tipPage: 'Held by a page this container hosts: “{name}”',
+    tipSelf: 'The container’s own listener — cannot be killed',
+    tipOrphan: 'Its page has stopped; a leftover a reclaim couldn’t clean up',
+    tipConflict: 'Reserved by page “{name}”, but currently held by another process',
+    tipForeign: 'An unrelated third-party listener outside this container',
+    openPage: 'Open page',
+    kill: 'Kill tree',
+    killTitle: 'Confirm kill',
+    killConfirm:
+      'This force-kills the process tree {name} (PID {pid}, holding port {port}) and its children. Continue?',
+    killYes: 'Kill',
+    killFailed: 'Kill failed',
+    empty: 'No matching listening ports'
   },
   pageMgr: {
     tabImport: 'Import project',
@@ -826,7 +863,8 @@ const en: Dict = {
     opElapsed: '{n}s elapsed',
     /** Inline plugin import area (mirrors PageManager's import style). */
     installTitle: 'Import plugin',
-    installDesc: 'Enter the plugin package name, a GitHub repository URL, or a local directory path.',
+    installDesc:
+      'Enter the plugin package name, a GitHub repository URL, or a local directory path.',
     installSpecPlaceholder: 'e.g. @deepseek-ai/dsh-experimental-auto-review',
     browseDir: 'Browse local directory',
     installNoOutput: 'No output yet…',
@@ -1018,6 +1056,8 @@ const en: Dict = {
     cmdPopoutPage: 'Open in its own window: {name}',
     cmdRestartPage: 'Restart: {name}',
     cmdEvents: 'Show activity timeline',
+    cmdPorts: 'Open ports & processes',
+    cmdCleanup: 'Disk cleanup',
     cmdAskOpenclaw: 'Ask OpenClaw (open the page)',
     cmdAskContext: 'Ask OpenClaw with the current page context',
     cmdOpenDshWeb: 'Open DSH (web)',
@@ -1207,14 +1247,14 @@ const en: Dict = {
     msgMemOn: 'Shared context memory enabled',
     msgMemOff: 'Disabled: newly started agents will not share this context',
     board: 'Task board',
-    boardHint:
-      'See the tasks agents claim and move, grouped into To do / In progress / Done.',
+    boardHint: 'See the tasks agents claim and move, grouped into To do / In progress / Done.',
     colTodo: 'To do',
     colDoing: 'In progress',
     colDone: 'Done',
     boardEmpty: 'No tasks yet',
     autopilot: 'Auto-dispatch',
-    autopilotTip: 'A todo task whose dependencies are done is auto-dispatched to the chosen CLI agent page.',
+    autopilotTip:
+      'A todo task whose dependencies are done is auto-dispatched to the chosen CLI agent page.',
     autopilotExecutor: 'Executor',
     autopilotNoExecutor: 'Pick an executor…',
     autopilotConcurrency: 'Concurrent',
@@ -1222,7 +1262,8 @@ const en: Dict = {
     autopilotPromptTip:
       'Template handed to the executor, supporting {title}/{id}/{deps}; empty uses the built-in default (which asks the agent to backfill its own result).',
     autopilotPromptPlaceholder: 'Leave empty for the built-in default prompt.',
-    autopilotNeedTerminal: 'A terminal (CLI) agent page is required as the executor; import one first.',
+    autopilotNeedTerminal:
+      'A terminal (CLI) agent page is required as the executor; import one first.',
     taskTitlePlaceholder: 'Add a task for agents to claim…',
     addTask: 'Add task',
     ownerLabel: 'Owner',

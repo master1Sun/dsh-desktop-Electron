@@ -56,6 +56,10 @@ const DEFAULTS: ContainerSettings = {
   crashAutoRestart: true,
   // rare user-action-needed events (guard gave up, staged update) go to the OS notification center
   systemNotifications: true,
+  // a batch/auto start chain pings one summary notification when it settles (gated by the above)
+  startDoneNotifications: true,
+  // low disk space on the userData volume pings once a day, deep-linked to the cleanup wizard
+  diskLowNotifications: true,
   // #25: '' keeps each theme's CSS-defined accent; a hex overrides it live in both modes.
   accentColor: '',
   // #25: frosted-blur px; the slider overrides --glass-blur live, clamped to GLASS_BLUR_MAX_PX

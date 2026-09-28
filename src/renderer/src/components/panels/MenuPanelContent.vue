@@ -3,7 +3,15 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus'
 // `Help` (线框 ?)而非 `QuestionFilled`（实心圆盘）：tab rail 其余图标（Download/Connection/
 // Document/Tickets/TrendCharts）都是轮廓风格，实心填充在 hover/active 的 accent 底色上格格不入。
-import { Help, Download, Connection, Document, Tickets, TrendCharts } from '@element-plus/icons-vue'
+import {
+  Help,
+  Download,
+  Connection,
+  Document,
+  Tickets,
+  TrendCharts,
+  Monitor
+} from '@element-plus/icons-vue'
 import PageManager from '@renderer/components/panels/PageManager.vue'
 import DshManager from '@renderer/components/panels/DshManager.vue'
 import OpenclawManager from '@renderer/components/panels/OpenclawManager.vue'
@@ -15,6 +23,7 @@ import SettingsPanel from '@renderer/components/panels/SettingsPanel.vue'
 import AppManager from '@renderer/components/panels/AppManager.vue'
 import LogViewer from '@renderer/components/monitor/LogViewer.vue'
 import ResourceTrend from '@renderer/components/monitor/ResourceTrend.vue'
+import PortTable from '@renderer/components/monitor/PortTable.vue'
 import { usePagesStore } from '@renderer/stores/pages'
 import { useUpdatesStore } from '@renderer/stores/updates'
 import { useTasksStore } from '@renderer/stores/tasks'
@@ -34,7 +43,8 @@ import type {
   SnapshotResult,
   SystemInfo,
   NetworkStats,
-  PageMetrics
+  PageMetrics,
+  PortRow
 } from '@shared/types'
 import { DISPLAY_TIME_ZONE, DISPLAY_TIME_ZONE_LABEL, parseAppPanel } from '@shared/types'
 import { t } from '@renderer/i18n'
@@ -374,7 +384,10 @@ watch(
    Cold read through IPC on demand + one live subscription while the tab is showing (the same
    lifecycle the network poll uses, so a closed panel never holds work). `events.jsonl` is the
    history; the subscription is what makes a crash appear the second it happens. */
-const events = ref<ContainerEvent[]>([])
+// Stale-while-revalidate like the ports tab: the panel is behind a v-if and remounts on every open,
+// so a plain ref would reset to [] and blank the list until listEvents lands. The cache paints the
+// last snapshot the instant the tab appears; loadEvents then revalidates it in the background.
+const events = useStaleCache<ContainerEvent[]>('panel.events', [])
 const eventFilters = reactive<{ level: '' | EventLevel; pageId: string }>({
   level: '',
   pageId: ''
@@ -434,11 +447,14 @@ watch(
     else stopEventStream()
     if (open && tab === 'trend') startTrend()
     else stopTrend()
+    if (open && tab === 'ports') startPorts()
+    else stopPorts()
   }
 )
 onBeforeUnmount(() => {
   stopEventStream()
   stopTrend()
+  stopPorts()
 })
 
 /* ---- B1 resource trend (帮助 → 资源趋势) ----
@@ -446,19 +462,21 @@ onBeforeUnmount(() => {
    history once on open. The panel owns the buffer (not a per-page config dialog now) so one tab
    shows any page's curve; it only subscribes while the tab is showing, mirroring the event stream. */
 const TREND_CAP = 120
-const trendHistory = reactive<Record<string, PageMetrics[]>>({})
-const trendPageId = ref('')
+// Same stale cache as events/ports: a remount paints the last curve instead of blanking until
+// getMetricsHistory re-lands. ref({}) deep-wraps the record, so per-page mutations stay reactive.
+const trendHistory = useStaleCache<Record<string, PageMetrics[]>>('panel.trendHistory', {})
+const trendPageId = useStaleCache<string>('panel.trendPageId', '')
 let offTrendMetrics: (() => void) | undefined
 
 /** Pages with samples, ordered by the page list so the dropdown is stable, not insertion-order. */
 const trendOptions = computed(() => {
-  const withData = new Set(Object.keys(trendHistory))
+  const withData = new Set(Object.keys(trendHistory.value))
   return pagesStore.pages.filter((p) => withData.has(p.id)).map((p) => ({ id: p.id, name: p.name }))
 })
-const trendRows = computed(() => trendHistory[trendPageId.value] ?? [])
+const trendRows = computed(() => trendHistory.value[trendPageId.value] ?? [])
 
 function mergeTrendSample(m: PageMetrics): void {
-  const arr = trendHistory[m.pageId] ?? (trendHistory[m.pageId] = [])
+  const arr = trendHistory.value[m.pageId] ?? (trendHistory.value[m.pageId] = [])
   if (arr.length && arr[arr.length - 1].ts === m.ts) return
   arr.push(m)
   if (arr.length > TREND_CAP) arr.splice(0, arr.length - TREND_CAP)
@@ -475,18 +493,22 @@ function ensureTrendSelection(): void {
 
 function startTrend(): void {
   stopTrend()
+  // Paint from the retained cache first: the history read is async, so re-point the selection at a
+  // page that already has samples (a remount would otherwise sit on an empty trendPageId until it lands).
+  ensureTrendSelection()
   window.container
     .getMetricsHistory?.()
     .then((res) => {
       if (!res?.ok) return
       const map = (res.data as Record<string, PageMetrics[]>) ?? {}
-      for (const [id, rows] of Object.entries(map)) trendHistory[id] = rows.slice(-TREND_CAP)
+      for (const [id, rows] of Object.entries(map)) trendHistory.value[id] = rows.slice(-TREND_CAP)
       ensureTrendSelection()
     })
     .catch(() => undefined)
   offTrendMetrics = window.container.onPageMetrics?.((list) => {
     const live = new Set((list as PageMetrics[]).map((m) => m.pageId))
-    for (const id of Object.keys(trendHistory)) if (!live.has(id)) delete trendHistory[id]
+    for (const id of Object.keys(trendHistory.value))
+      if (!live.has(id)) delete trendHistory.value[id]
     for (const m of list as PageMetrics[]) mergeTrendSample(m)
     ensureTrendSelection()
   })
@@ -494,6 +516,55 @@ function startTrend(): void {
 function stopTrend(): void {
   offTrendMetrics?.()
   offTrendMetrics = undefined
+}
+
+/* ---- port / process manager (帮助 → 端口与进程) ----
+   A full LISTENing snapshot pulled on open and re-pulled every 10 s while the tab shows; it is a
+   one-shot OS query (netstat / lsof), not a push stream, so a poll — like the diagnose tab — rather
+   than a subscription. Stopped the same way the trend/event tabs are, so a hidden panel spawns none. */
+const PORT_POLL_MS = 10_000
+// Stale-while-revalidate, like the diagnose tabs: the panel is behind a v-if and remounts on every
+// open, so a plain ref would reset to [] and leave the table blank while the one-shot netstat/lsof
+// query lands. A module-scoped cache paints the previous snapshot the instant the tab appears, then
+// the poll refreshes it.
+const portRows = useStaleCache<PortRow[]>('panel.portRows', [])
+const portsLoading = ref(false)
+// The tab owns the filter state (mirrors how the events tab keeps its selects here); PortTable
+// is a pure view that reads these and emits the row actions.
+const portsOnlyIssues = ref(false)
+const portsKeyword = ref('')
+let portTimer: ReturnType<typeof setInterval> | undefined
+
+async function refreshPorts(): Promise<void> {
+  portsLoading.value = true
+  try {
+    const res = await window.container.listListeningPorts?.()
+    if (res?.ok) portRows.value = (res.data as { rows: PortRow[] })?.rows ?? []
+  } catch {
+    /* a failed poll keeps the last snapshot rather than blanking the table */
+  } finally {
+    portsLoading.value = false
+  }
+}
+
+async function killPortProcess(row: PortRow): Promise<void> {
+  try {
+    const res = await window.container.killProcessTree?.(row.pid)
+    if (res?.ok) await refreshPorts()
+    else ElMessage.error((res as { error?: string })?.error || t('ports.killFailed'))
+  } catch (err) {
+    ElMessage.error((err as Error).message || t('ports.killFailed'))
+  }
+}
+
+function startPorts(): void {
+  stopPorts()
+  void refreshPorts()
+  portTimer = setInterval(() => void refreshPorts(), PORT_POLL_MS)
+}
+function stopPorts(): void {
+  if (portTimer) clearInterval(portTimer)
+  portTimer = undefined
 }
 
 /* Each event kind interpolates from `evt.<kind>`; an unknown kind (a newer container wrote it)
@@ -896,11 +967,7 @@ async function doImportSnapshot(): Promise<void> {
 
     <!-- Help: 关于 + 更新 + 诊断 + 日志 merged into one panel, split by a vertical tab rail. -->
     <section v-else-if="props.panel === 'help'" class="sec help" :class="{ 'single-pane': !!pane }">
-      <el-tabs
-        v-model="helpTab"
-        class="help-tabs v-tabs"
-        :tab-position="tabPosition || 'left'"
-      >
+      <el-tabs v-model="helpTab" class="help-tabs v-tabs" :tab-position="tabPosition || 'left'">
         <el-tab-pane name="about">
           <template #label>
             <span class="tab-label"
@@ -950,12 +1017,7 @@ async function doImportSnapshot(): Promise<void> {
                 placement="top"
                 popper-class="dsh-tip-popper"
               >
-                <el-button
-                  size="small"
-                  text
-                  :disabled="updates.nodeBusy"
-                  @click="doNodeRestore"
-                >
+                <el-button size="small" text :disabled="updates.nodeBusy" @click="doNodeRestore">
                   {{ t('panel.nodeRestoreBtn') }}
                 </el-button>
               </el-tooltip>
@@ -1446,6 +1508,40 @@ async function doImportSnapshot(): Promise<void> {
               </span>
             </div>
           </div>
+        </el-tab-pane>
+
+        <!-- Port / process manager: every LISTENing TCP socket on the host, annotated against the
+             page registry (owner / orphan / conflict). Polls while this tab is showing. -->
+        <el-tab-pane name="ports">
+          <template #label>
+            <span class="tab-label"
+              ><el-icon><Monitor /></el-icon>{{ t('panel.tabPorts') }}</span
+            >
+          </template>
+          <div class="head">
+            <span>{{ t('ports.title') }}</span>
+            <el-checkbox v-model="portsOnlyIssues" size="small">{{
+              t('ports.onlyIssues')
+            }}</el-checkbox>
+            <el-input
+              v-model="portsKeyword"
+              size="small"
+              :placeholder="t('ports.searchPlaceholder')"
+              clearable
+              style="width: 170px"
+            />
+            <el-button size="small" :loading="portsLoading" @click="refreshPorts">
+              {{ t('ports.refresh') }}
+            </el-button>
+          </div>
+          <div class="cell-sub evt-tip">{{ t('ports.tip') }}</div>
+          <PortTable
+            :rows="portRows"
+            :only-issues="portsOnlyIssues"
+            :keyword="portsKeyword"
+            @kill="killPortProcess"
+            @open-page="emit('open-page', $event)"
+          />
         </el-tab-pane>
       </el-tabs>
     </section>

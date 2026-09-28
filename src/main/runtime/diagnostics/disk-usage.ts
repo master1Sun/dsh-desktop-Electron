@@ -1,17 +1,20 @@
 import { app } from 'electron'
 import { promises as fs, type Dirent } from 'node:fs'
 import { join } from 'node:path'
+import Store from 'electron-store'
 import type { DiskReport, DiskScope } from '../../../shared/types'
 import {
   resolveCapabilitiesDir,
   resolveDownloadDir,
   resolveEnvRoot,
   resolvePagesDir,
-  resolveWorkspaceDir
+  resolveWorkspaceDir,
+  getSettings
 } from '../../shell/store'
 import { logsDir } from '../../shell/logger'
 import { CACHE_DIRS, STORAGE_DIRS, clearWebData } from '../../shell/webdata'
 import { bridgeDir } from '../mcp/mcp-bridge'
+import { notifyEvent } from '../../shell/notifications'
 
 /**
  * #8: the container's own disk-usage dashboard, surfaced in Settings ▸ 存储.
@@ -215,7 +218,48 @@ export async function getDiskReport(): Promise<DiskReport> {
       bytes: 0
     })
   }
+  maybeWarnLowSpace(report)
   return report
+}
+
+/* ---- low-space notification (once a day, gated by diskLowNotifications) ---- */
+
+/** Separate mini-store so the dedup timestamp never leaks into the user-facing settings bundle. */
+const notifyStore = new Store<{ lastNotifiedAt: number }>({
+  name: 'disk-notify',
+  defaults: { lastNotifiedAt: 0 }
+})
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/** 2 GiB hard floor; anything smaller than min(5% of total, 2 GiB) counts as "running out". */
+const LOW_SPACE_CEILING = 2 * 1024 * 1024 * 1024
+
+/**
+ * Nudge the user toward the cleanup wizard when the userData volume drops below a low-space mark.
+ * Fires at most once a day (dedup via `disk-notify` store) and only when `diskLowNotifications` is
+ * on. Never throws — a failed statfs (null free/total) simply skips the check.
+ */
+function maybeWarnLowSpace(report: DiskReport): void {
+  try {
+    if (getSettings().diskLowNotifications === false) return
+    const { freeBytes, totalBytes } = report
+    if (freeBytes === null || totalBytes === null || totalBytes <= 0) return
+    const threshold = Math.min(totalBytes * 0.05, LOW_SPACE_CEILING)
+    if (freeBytes >= threshold) return // plenty of room: nothing to warn about
+    const last = Number(notifyStore.get('lastNotifiedAt')) || 0
+    if (Date.now() - last < DAY_MS) return // already pinged within the past day
+    notifyStore.set('lastNotifiedAt', Date.now())
+    const gb = (n: number): string => (n / 1024 / 1024 / 1024).toFixed(1)
+    notifyEvent(
+      'notify.diskLowTitle',
+      'notify.diskLowBody',
+      { free: gb(freeBytes), threshold: gb(threshold) },
+      undefined,
+      { panel: 'settings', tab: 'storage' }
+    )
+  } catch (err) {
+    console.warn('[disk] low-space notify failed (ignored):', (err as Error).message)
+  }
 }
 
 /** Delete rotated `*.log.N` siblings and truncate the active logs in place (best-effort). */

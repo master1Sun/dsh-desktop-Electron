@@ -386,6 +386,16 @@ export interface ContainerSettings {
   /** OS notifications for out-of-band events (guard gave up restarting, staged update ready) */
   systemNotifications: boolean
   /**
+   * Fire an OS notification when a batch/auto start chain finishes (naming how many came up and
+   * how many failed). Only ever sent while {@link systemNotifications} is on; defaults to true.
+   */
+  startDoneNotifications?: boolean
+  /**
+   * Ping an OS notification once per day when the volume hosting userData drops below the low-space
+   * threshold, deep-linked to the disk-cleanup wizard. Gated by {@link systemNotifications}; default true.
+   */
+  diskLowNotifications?: boolean
+  /**
    * Custom accent color (#25). Empty/undefined keeps the CSS-defined default so light/dark
    * each retain their own; a set value overrides `--accent` at runtime in both modes.
    */
@@ -717,6 +727,64 @@ export interface DiskReport {
   scopes: DiskScope[]
   /** epoch ms the scan finished */
   generatedAt: number
+}
+
+/* ---- Port / process manager ---- */
+
+/**
+ * One LISTENing TCP socket enriched with its owning process and (when it maps onto a
+ * hosted page or a port the container reserved for one) an ownership/conflict annotation.
+ * Produced by `IPC.ListListeningPorts`.
+ */
+export interface PortRow {
+  port: number
+  /** raw local address column, e.g. '0.0.0.0:3000', '[::]:3000' */
+  address: string
+  family: 4 | 6
+  pid: number
+  /** process image name (node.exe / …), best-effort; 'PID <n>' when the lookup failed */
+  name: string
+  /** full command line when the platform query returned it */
+  cmdline: string
+  /** set when the holder is a page this container currently runs (its pid matches) */
+  pageId?: string
+  pageName?: string
+  /** the container's own Electron process (never offered a kill) */
+  self?: boolean
+  /** a node.exe holding a port a *stopped* page declared → a leftover the reclaim path couldn't reap */
+  orphan?: boolean
+  /** a page declares this port (containerPort/port) but its current holder is not that page */
+  conflict?: boolean
+  /** the declared-but-not-running page a conflict/orphan row is tied to, for a jump-to-page */
+  declaredPageId?: string
+  declaredPageName?: string
+  /**
+   * The holder belongs to this container's own world: a hosted page (running owner), the container
+   * itself, an orphan/conflict on a declared port, or any process whose command line is rooted in a
+   * container directory (pages / env / capabilities / workspace / install). The port panel shows
+   * these by default and hides the machine-wide foreign listeners (system ports, unrelated servers).
+   */
+  project?: boolean
+}
+
+/** `IPC.ListListeningPorts` result: the full LISTENing table + the app's own pid for self-tagging. */
+export interface PortTableResult {
+  rows: PortRow[]
+  appPid: number
+  generatedAt: number
+}
+
+/* ---- Notify deep link ---- */
+
+/**
+ * Payload of `IPC.OnNotifyOpen`: an OS notification the user clicked, carrying a deep link the
+ * renderer resolves — `pageId` opens (and focuses) that page, `panel`+`tab` opens a menu panel on
+ * a given vertical tab. Sent by the main process after focusing the window.
+ */
+export interface NotifyOpenSignal {
+  pageId?: string
+  panel?: string
+  tab?: string
 }
 
 export interface UpdateCheckResult {
@@ -1425,7 +1493,15 @@ export const IPC = {
    * suppresses its in-app corner toast and calls this only while `systemNotifications` is on;
    * resolves false when the platform can't notify, so the renderer falls back to the toast.
    */
-  ShowSystemToast: 'container:show-system-toast'
+  ShowSystemToast: 'container:show-system-toast',
+  /** port/process manager: full LISTENing table + ownership/conflict tags → PortTableResult */
+  ListListeningPorts: 'container:list-listening-ports',
+  /** tree-kill one pid the port table surfaced (guarded against the app's own pid) → boolean */
+  KillProcessTree: 'container:kill-process-tree',
+  /** a hosted page asks for an OS notification (its `notify` permission is checked in main) */
+  PageNotify: 'container:page-notify',
+  /** broadcast: the user clicked an OS notification carrying a deep link (NotifyOpenSignal) */
+  OnNotifyOpen: 'container:on-notify-open'
 } as const
 
 /** The four Element Plus toast severities a renderer message can carry. */

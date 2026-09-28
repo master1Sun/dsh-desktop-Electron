@@ -140,6 +140,12 @@ const zh: Dict = {
     systemNotifications: '系统通知',
     systemNotificationsTip:
       '开启后所有提示走系统通知中心，不在窗口右下角显示角标；崩溃放弃重启、在线更新就绪等也以系统通知送达。关闭时提示显示在窗口右下角角标。',
+    startDoneNotifications: '启动完成通知',
+    startDoneNotificationsTip:
+      '开机自动启动链跑完后发一条汇总通知（成功/失败个数），点击可直达失败页面。仅在“系统通知”开启时生效。',
+    diskLowNotifications: '磁盘空间紧张通知',
+    diskLowNotificationsTip:
+      '所在磁盘卷剩余空间低于阈值（总量 5% 与 2GB 取较小）时每日提醒一次，点击可打开存储页。仅在“系统通知”开启时生效。',
     containerMcpServer: '对外 MCP 服务',
     containerMcpServerTip:
       '开启后容器自身会在回环地址（127.0.0.1）启动一个 Streamable HTTP 的 MCP 服务，任意外部/托管 agent 可持令牌驱动容器：列出/启停托管页、读日志、读写共享任务队列。默认关闭，关闭时无监听、也不向 agent 导出地址。',
@@ -187,7 +193,8 @@ const zh: Dict = {
     terminalHeight: '终端高度',
     terminalHeightTip: '底部内嵌终端面板的默认高度；拖动面板上边缘后会自动更新这里的值。',
     terminalScrollback: '终端缓存行数',
-    terminalScrollbackTip: '每个终端窗口向上可回滚的历史行数（500–50000，默认 8000）；仅对新建的会话生效。',
+    terminalScrollbackTip:
+      '每个终端窗口向上可回滚的历史行数（500–50000，默认 8000）；仅对新建的会话生效。',
     cliIdleStop: '闲置终端自动停止',
     cliIdleStopTip:
       '智能体终端页被切走且连续 N 分钟没有任何输出时自动停止，切回该页会重新启动；0 为关闭。',
@@ -223,8 +230,7 @@ const zh: Dict = {
       '容器带动的安装（内置 Node / pnpm / dsh 插件 / 导入项目的依赖安装）都从这里拉包，改完下一次安装即生效。',
     registryProbe: '镜像测速',
     registryProbeBtn: '测速全部',
-    registryProbeTip:
-      '测速各镜像的响应延迟，测完可直接切到最快且可达的那个。',
+    registryProbeTip: '测速各镜像的响应延迟，测完可直接切到最快且可达的那个。',
     registryUseBest: '切到最快：{name}（{ms} ms）',
     registryProbed: '测速完成，最快 {ms} ms',
     registryProbeNone: '所有镜像都未响应，请检查网络或代理',
@@ -264,6 +270,7 @@ const zh: Dict = {
     webDataAllConfirm: '确定清除内嵌浏览的全部数据？所有内嵌站点会退出登录，页面本地草稿也会丢失。',
     /* ---- #8: 存储（磁盘占用仪表盘） ---- */
     tabStorage: '存储',
+    tabCleanup: '磁盘清理',
     diskUsed: '容器占用 {size}',
     diskVolume: '磁盘已用 {pct}% ・ 剩余 {free} / 共 {total}',
     diskEmpty: '尚未扫描。点“刷新”开始统计。',
@@ -448,8 +455,7 @@ const zh: Dict = {
     trendNoPage: '选择页面',
     /* ---- 事件动态 ---- */
     tabEvents: '事件动态',
-    eventsTip:
-      '页面启停、崩溃重启、端口冲突、更新与自检等关键动作会记在这里，保留最近 7 天。',
+    eventsTip: '页面启停、崩溃重启、端口冲突、更新与自检等关键动作会记在这里，保留最近 7 天。',
     eventsEmpty: '暂无事件',
     eventsLevel: '级别',
     eventsLevelAll: '全部级别',
@@ -480,7 +486,8 @@ const zh: Dict = {
     versionPickList: '从列表选择',
     versionInstall: '安装',
     versionAppliesAll: '该版本会装到全部内置 MCP 服务，任一服务缺此版本则整体失败',
-    mcpPkgName: 'MCP 内置组件'
+    mcpPkgName: 'MCP 内置组件',
+    tabPorts: '端口与进程'
   },
   app: {
     title: '桌面控制台',
@@ -551,6 +558,35 @@ const zh: Dict = {
     downloads: '下载目录',
     entry: '子项',
     truncated: '（扫描已触及上限）'
+  },
+  ports: {
+    title: '本机监听端口',
+    tip: '只列本容器相关的进程（托管页面 / 容器自身 / 冲突 / 孤儿 / 项目目录派生），每 10 秒自动刷新。',
+    colPort: '端口',
+    colProcess: '进程',
+    colOwner: '归属',
+    colAction: '操作',
+    refresh: '刷新',
+    searchPlaceholder: '搜索端口/进程/命令行',
+    onlyIssues: '仅看冲突与孤儿',
+    conflict: '冲突',
+    orphan: '孤儿',
+    self: '容器自身',
+    foreign: '第三方',
+    declaredFor: '该端口预留给：{name}',
+    tipPage: '由本容器托管的页面「{name}」正在监听',
+    tipSelf: '容器自身进程的监听端口，不可结束',
+    tipOrphan: '所属页面已停止，这是回收未能清理的残留进程',
+    tipConflict: '页面「{name}」保留的端口，当前被其他进程占用',
+    tipForeign: '与本容器无关的第三方监听进程',
+    openPage: '打开页面',
+    kill: '结束进程树',
+    killTitle: '确认结束进程',
+    killConfirm:
+      '将强制结束进程树 {name}（PID {pid}，占用端口 {port}），其子进程也会一并结束，确定吗？',
+    killYes: '结束',
+    killFailed: '结束失败',
+    empty: '没有匹配的监听端口'
   },
   pageMgr: {
     tabImport: '导入项目',
@@ -996,6 +1032,8 @@ const zh: Dict = {
     cmdPopoutPage: '独立窗口打开：{name}',
     cmdRestartPage: '重启：{name}',
     cmdEvents: '查看事件动态',
+    cmdPorts: '打开端口与进程面板',
+    cmdCleanup: '磁盘清理',
     cmdAskOpenclaw: '问 OpenClaw（打开页面）',
     cmdAskContext: '带上下文问 OpenClaw',
     cmdOpenDshWeb: '打开 DSH (web)',
@@ -1125,8 +1163,7 @@ const zh: Dict = {
     callOk: '✓ 成功（{ms}ms）',
     callIsError: '⚠ 服务报告错误：',
     callFailed: '调用失败：{err}',
-    bridgeHint:
-      '这里的 MCP 服务会自动同步给被托管的 Agent，供其启动时读取使用。',
+    bridgeHint: '这里的 MCP 服务会自动同步给被托管的 Agent，供其启动时读取使用。',
     copyPath: '复制路径',
     containerMcpTitle: '容器对外 MCP 服务',
     containerMcpRunning: '运行中',

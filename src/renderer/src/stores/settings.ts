@@ -24,6 +24,10 @@ export interface Settings {
   crashAutoRestart: boolean
   /** OS notifications for guard give-up / OTA-ready events */
   systemNotifications: boolean
+  /** 批量/依赖链启动完成后发一条 OS 通知；受 systemNotifications 门控，缺省视为开 */
+  startDoneNotifications?: boolean
+  /** userData 所在卷低于空间阈值时每天最多发一条 OS 通知，深链到磁盘清理向导；缺省视为开 */
+  diskLowNotifications?: boolean
   autoStartPages: string[]
   /** pages the user pinned auto-start on by hand (sticky vs. the 默认打开 coupling) */
   autoStartManual?: string[]

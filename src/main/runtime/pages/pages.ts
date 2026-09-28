@@ -25,6 +25,7 @@ import { listServers, listTools } from '../mcp/mcp-hub'
 import { m as msg } from '../../shell/i18n'
 import {
   type DshTokenResult,
+  type NotifyOpenSignal,
   type PageMeta,
   type PageProgress,
   type PageState,
@@ -1058,6 +1059,8 @@ export class PageRegistry extends EventEmitter {
     // Concurrent: each page boots its own child, so serializing just stacks their
     // (already slow) first-boot latencies. start() is self-guarding against a duplicate
     // in-flight call, and per-page failures are logged rather than aborting the batch.
+    let okCount = 0
+    const failed: string[] = []
     await Promise.all(
       ids.map(async (id): Promise<void> => {
         const entry = this.entries.get(id)
@@ -1072,7 +1075,9 @@ export class PageRegistry extends EventEmitter {
         }
         try {
           await this.startWithDeps(id)
+          okCount++
         } catch (err) {
+          failed.push(id)
           console.warn(`[pages] auto-start ${id} failed:`, (err as Error).message)
           // Make the failure visible in the activity timeline — a hidden cold-start that dies
           // with `code=1` was previously only a console.warn nobody saw.
@@ -1085,6 +1090,23 @@ export class PageRegistry extends EventEmitter {
         }
       })
     )
+    // A tray-resident boot is invisible: the user never sees pages that quietly came up or silently
+    // failed. Ping the notification center once with the tally, deep-linking a failed page (or just
+    // focusing the window on an all-clean start) so they can act without opening the panel first.
+    this.announceStartResult(okCount, failed)
+  }
+
+  /** Fire the batch-start summary notification, gated by `startDoneNotifications` (default on). */
+  private announceStartResult(okCount: number, failed: string[]): void {
+    if (getSettings().startDoneNotifications === false) return
+    if (!okCount && !failed.length) return // nothing attempted: stay silent
+    const deepLink: NotifyOpenSignal = failed.length
+      ? { pageId: this.entries.get(failed[0])?.meta.id }
+      : {}
+    notifyEvent('notify.startDoneTitle', 'notify.startDoneBody', {
+      ok: okCount,
+      fail: failed.length
+    }, undefined, deepLink)
   }
 
   /** Broadcast the current list after a settings-only change (e.g. disabledPages flipped on a

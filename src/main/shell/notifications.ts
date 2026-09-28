@@ -1,7 +1,7 @@
-import { Notification, shell } from 'electron'
+import { BrowserWindow, Notification, shell } from 'electron'
 import { getSettings } from './store'
 import { m } from './i18n'
-import type { ToastLevel } from '../../shared/types'
+import { IPC, type NotifyOpenSignal, type ToastLevel } from '../../shared/types'
 
 /**
  * Out-of-band OS notifications for a tray-resident container.
@@ -14,15 +14,66 @@ import type { ToastLevel } from '../../shared/types'
  *
  * Mirrors downloads.ts: never throws, no-op when the platform says no.
  */
-export function notifyEvent(titleKey: string, bodyKey: string, params?: Record<string, string | number>, revealPath?: string): void {
+
+/**
+ * Injected at boot from main/index.ts so a clicked notification can bring the container
+ * forward. Held as a hook (not an import of index.ts) to avoid a `notifications → index →
+ * notifications` cycle, exactly like the tray's show-window injection.
+ */
+let showWindowHook: () => void = () => undefined
+export function setNotifyShowWindow(fn: () => void): void {
+  showWindowHook = fn
+}
+
+/** Focus the main window (creating it if the user closed it to the tray), then route a deep link. */
+export function openDeepLink(sig: NotifyOpenSignal): void {
+  try {
+    showWindowHook()
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.OnNotifyOpen, sig)
+    }
+  } catch (err) {
+    console.warn('[notify] deep link failed (ignored):', (err as Error).message)
+  }
+}
+
+export function notifyEvent(
+  titleKey: string,
+  bodyKey: string,
+  params?: Record<string, string | number>,
+  revealPath?: string,
+  deepLink?: NotifyOpenSignal
+): void {
   try {
     if (getSettings().systemNotifications === false) return
     if (!Notification.isSupported()) return
     const n = new Notification({ title: m(titleKey), body: m(bodyKey, params) })
     if (revealPath) n.on('click', () => shell.showItemInFolder(revealPath))
+    else if (deepLink) n.on('click', () => openDeepLink(deepLink))
     n.show()
   } catch (err) {
     console.warn('[notify] failed (ignored):', (err as Error).message)
+  }
+}
+
+/**
+ * Show a verbatim (already-authored) title/body in the notification center — used for a hosted
+ * page's own `notify` request, where the text is the page's message rather than one of the
+ * container's i18n keys. Gated by `systemNotifications` and, when a `pageId` is passed, click
+ * deep-links back to that page. Never throws.
+ */
+export function notifyRaw(title: string, body: string, pageId?: string): void {
+  try {
+    if (getSettings().systemNotifications === false) return
+    if (!Notification.isSupported()) return
+    const t = (title || '').trim() || m('app.title')
+    const b = (body || '').trim()
+    if (!b) return
+    const n = new Notification({ title: t, body: b })
+    if (pageId) n.on('click', () => openDeepLink({ pageId }))
+    n.show()
+  } catch (err) {
+    console.warn('[notify] raw failed (ignored):', (err as Error).message)
   }
 }
 

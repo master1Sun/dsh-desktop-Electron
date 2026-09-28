@@ -1,13 +1,31 @@
 import { ipcMain } from 'electron'
-import { IPC, type ContainerReleaseChannel, type DefaultView, type DshReleaseChannel, type IpcResult, type ToastLevel, type WebDataClearArgs } from '../../../shared/types'
+import {
+  IPC,
+  type ContainerReleaseChannel,
+  type DefaultView,
+  type DshReleaseChannel,
+  type IpcResult,
+  type ToastLevel,
+  type WebDataClearArgs
+} from '../../../shared/types'
 import { probeRegistries } from '../../runtime/diagnostics/net-probe'
 import { getWebDataReport, clearWebData } from '../webdata'
 import { clearDiskScope, getDiskReport } from '../../runtime/diagnostics/disk-usage'
-import { startContainerMcpServer, stopContainerMcpServer } from '../../runtime/mcp/container-mcp-server'
+import {
+  startContainerMcpServer,
+  stopContainerMcpServer
+} from '../../runtime/mcp/container-mcp-server'
 import { kickAutopilot } from '../../runtime/autopilot/autopilot'
 import { resetBranchProbe } from '../../update/asar-updates'
 import { clearUpdateCache } from '../../update/update-service'
-import { applyLaunchAtStartup, applyNpmRegistryEnv, getSettings, setDefaultView, syncAutoStartForDefaultView, updateSettings } from '../store'
+import {
+  applyLaunchAtStartup,
+  applyNpmRegistryEnv,
+  getSettings,
+  setDefaultView,
+  syncAutoStartForDefaultView,
+  updateSettings
+} from '../store'
 import { rebuildTrayMenu } from '../tray'
 import { forgetWindowBounds } from '../window-bounds'
 import { notifyLocaleChanged, invalidateLocaleCache } from '../i18n'
@@ -24,8 +42,10 @@ export function registerSettingsIpc(ctx: IpcCtx): void {
   // A renderer toast forwarded to the OS notification center (systemNotifications on → the
   // renderer suppresses its corner toast and calls this). Resolves whether it actually showed,
   // so the renderer can fall back to the in-app toast when the platform can't notify.
-  ipcMain.handle(IPC.ShowSystemToast, (_e, payload: { level: ToastLevel; text: string }): Promise<boolean> =>
-    notifyToast(payload?.level, payload?.text || '')
+  ipcMain.handle(
+    IPC.ShowSystemToast,
+    (_e, payload: { level: ToastLevel; text: string }): Promise<boolean> =>
+      notifyToast(payload?.level, payload?.text || '')
   )
 
   // #26: latency of every candidate npm mirror, in parallel, for 设置 ▸ 网络镜像's 一键选优.
@@ -94,6 +114,8 @@ export function registerSettingsIpc(ctx: IpcCtx): void {
         pagePorts?: Record<string, number>
         crashAutoRestart?: boolean
         systemNotifications?: boolean
+        startDoneNotifications?: boolean
+        diskLowNotifications?: boolean
         accentColor?: string
         glassBlur?: number
         glassAlpha?: number

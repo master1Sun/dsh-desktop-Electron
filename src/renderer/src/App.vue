@@ -346,6 +346,21 @@ const commands = computed<Command[]>(() => {
     keywords: 'event events timeline crash activity 事件 动态 时间线 崩溃',
     run: () => openHelpTab('events')
   })
+  // Port / process manager (help ▸ 端口与进程) and the disk-usage dashboard (settings ▸ 存储).
+  list.push({
+    id: 'act-ports',
+    title: t('palette.cmdPorts'),
+    group: t('palette.groupPanels'),
+    keywords: 'port ports process listen kill 端口 进程 监听占用',
+    run: () => openHelpTab('ports')
+  })
+  list.push({
+    id: 'act-cleanup',
+    title: t('palette.cmdCleanup'),
+    group: t('palette.groupPanels'),
+    keywords: 'disk cleanup reclaim space 磁盘 清理 释放空间 存储',
+    run: () => openSettingsTab('storage')
+  })
   /* D2: agent entry points. Only offered when the page is actually hosted — a CLI-only
      openclaw install has no web UI to jump to, and the clipboard hand-off needs one. */
   const claw = agentPage('openclaw')
@@ -422,14 +437,26 @@ function openSettingsTab(tab: string): void {
 
 /** Settings rows reachable by keyword → the tab that hosts them + a match-only keyword set. */
 const SETTINGS_SEARCH_INDEX: { tab: string; labelKey: string; kw: string }[] = [
-  { tab: 'view', labelKey: 'settings.tabView', kw: 'theme 主题 language 语言 layout 布局 accent 配色' },
-  { tab: 'behavior', labelKey: 'settings.tabBehavior', kw: 'startup 启动 autostart 自启 tray 托盘 crash 崩溃 terminal 终端' },
+  {
+    tab: 'view',
+    labelKey: 'settings.tabView',
+    kw: 'theme 主题 language 语言 layout 布局 accent 配色'
+  },
+  {
+    tab: 'behavior',
+    labelKey: 'settings.tabBehavior',
+    kw: 'startup 启动 autostart 自启 tray 托盘 crash 崩溃 terminal 终端'
+  },
   { tab: 'alerts', labelKey: 'settings.tabAlerts', kw: 'notify 通知 memory 内存 warn 告警' },
   { tab: 'keys', labelKey: 'settings.tabKeys', kw: 'shortcut 快捷键 keybind 绑定' },
   { tab: 'download', labelKey: 'settings.tabDownload', kw: 'download 下载 dir 目录' },
   { tab: 'network', labelKey: 'settings.tabNetwork', kw: 'registry 镜像 npm network 网络' },
   { tab: 'privacy', labelKey: 'settings.tabPrivacy', kw: 'privacy 隐私 cookie 缓存 clear 清理' },
-  { tab: 'storage', labelKey: 'settings.tabStorage', kw: 'disk 磁盘 storage 存储 space 占用 clean 清理' }
+  {
+    tab: 'storage',
+    labelKey: 'settings.tabStorage',
+    kw: 'disk 磁盘 storage 存储 space 占用 clean 清理'
+  }
 ]
 
 /** One fuzzy token match: does the query appear in the label text or the keyword bag? */
@@ -459,7 +486,9 @@ async function deepSearch(q: string): Promise<Command[]> {
   // 2) live MCP tool catalog (only connected servers report tools).
   try {
     const res = await window.container.mcpListTools?.()
-    const tools = (res?.ok ? (res.data as { name: string; serverId: string; description?: string }[]) : []) || []
+    const tools =
+      (res?.ok ? (res.data as { name: string; serverId: string; description?: string }[]) : []) ||
+      []
     for (const tool of tools) {
       if (!matches(`${tool.name} ${tool.description ?? ''}`, query)) continue
       out.push({
@@ -546,7 +575,8 @@ function stopActiveCli(): void {
 watch(
   activePageId,
   (id) => {
-    if (id && isTerminalId(id) && !cliTermSessions.value.includes(id)) cliTermSessions.value.push(id)
+    if (id && isTerminalId(id) && !cliTermSessions.value.includes(id))
+      cliTermSessions.value.push(id)
   },
   { immediate: true }
 )
@@ -556,8 +586,7 @@ watch(
   () => pagesStore.pages,
   () => {
     cliTermSessions.value = cliTermSessions.value.filter(
-      (id) =>
-        isTerminalId(id) && pagesStore.pages.find((p) => p.id === id)?.disabled !== true
+      (id) => isTerminalId(id) && pagesStore.pages.find((p) => p.id === id)?.disabled !== true
     )
   }
 )
@@ -1067,7 +1096,10 @@ watchEffect(() => {
 // `.no-marquee` class on <html> that every ring's selector keys `:not(.no-marquee)` off of, so
 // disabling it needs no JS touching the SVG — the CSS just stops matching. Default (undefined) is on.
 watchEffect(() => {
-  document.documentElement.classList.toggle('no-marquee', settingsStore.settings.marqueeBorder === false)
+  document.documentElement.classList.toggle(
+    'no-marquee',
+    settingsStore.settings.marqueeBorder === false
+  )
 })
 /** #26: the OS query whose change we follow while the setting is 'auto'; torn down with the view. */
 let osMotionMq: MediaQueryList | null = null
@@ -1106,7 +1138,9 @@ watchEffect(() => {
 // forwarded to the OS notification center instead of the corner toast. Held off until settings
 // load so an early toast still renders in-app rather than vanishing into an unrouted forward.
 watchEffect(() => {
-  setToastSystemRouting(settingsStore.loaded && settingsStore.settings.systemNotifications !== false)
+  setToastSystemRouting(
+    settingsStore.loaded && settingsStore.settings.systemNotifications !== false
+  )
 })
 
 // Keep the OS window/taskbar caption in the active language (index.html holds the zh default
@@ -1194,6 +1228,22 @@ function runAction(action: KeybindingAction): void {
 function openHelpTab(tab: string): void {
   panelTab.value = tab
   activePanel.value = 'help'
+}
+
+/**
+ * Resolve a clicked OS notification's deep link. `pageId` opens (and starts) that page; a
+ * `panel`+`tab` pair opens the matching menu panel on that vertical tab; an empty signal just
+ * leaves the focused window (main already raised it before broadcasting). Runs in whichever
+ * window received the broadcast, so a detached popout ignores panel links it cannot host.
+ */
+function applyNotifyDeepLink(sig: { pageId?: string; panel?: string; tab?: string }): void {
+  if (!sig) return
+  if (sig.pageId) {
+    void openPage(sig.pageId)
+    return
+  }
+  if (sig.panel === 'help') openHelpTab(sig.tab || 'about')
+  else if (sig.panel === 'settings') openSettingsTab(sig.tab || 'view')
 }
 
 /**
@@ -1288,6 +1338,7 @@ let disposeMaximized: (() => void) | null = null
 let disposeOpenTerminal: (() => void) | null = null
 let disposeQuitConfirm: (() => void) | null = null
 let disposeHotkey: (() => void) | null = null
+let disposeNotifyOpen: (() => void) | null = null
 let quitDialogOpen = false
 
 /**
@@ -1319,6 +1370,8 @@ onMounted(async () => {
     disposeOpenTerminal = window.container.onOpenTerminalPage((id) => void openPage(id))
     // A container shortcut pressed inside a hosted page: main matched it and says what to run.
     disposeHotkey = window.container.onHotkey?.((sig) => runAction(sig.action))
+    // The user clicked an OS notification carrying a deep link: open the page or panel tab it names.
+    disposeNotifyOpen = window.container.onNotifyOpen?.((sig) => applyNotifyDeepLink(sig))
     // D2: every "复制并问 AI" entry point hands the jump-to-agent step to this window.
     registerAskAiJump(() => askAgent('openclaw'))
     // Load persisted settings BEFORE probing the OS scheme: applyTheme('auto') needs
@@ -1390,6 +1443,7 @@ onBeforeUnmount(() => {
   disposeOpenTerminal?.()
   disposeQuitConfirm?.()
   disposeHotkey?.()
+  disposeNotifyOpen?.()
   unregisterAskAiJump()
 })
 
@@ -1662,7 +1716,11 @@ const showNav = computed(() =>
             placement="bottom-end"
             popper-class="dsh-tip-popper"
           >
-            <button class="popout-win-btn" :aria-label="t('app.popoutMinimize')" @click="minimizePopout">
+            <button
+              class="popout-win-btn"
+              :aria-label="t('app.popoutMinimize')"
+              @click="minimizePopout"
+            >
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
                 <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" stroke-width="1.2" />
               </svg>
@@ -1678,7 +1736,13 @@ const showNav = computed(() =>
               :aria-label="isMaximized ? t('app.popoutRestore') : t('app.popoutMaximize')"
               @click="toggleMaximizePopout"
             >
-              <svg v-if="!isMaximized" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <svg
+                v-if="!isMaximized"
+                width="10"
+                height="10"
+                viewBox="0 0 10 10"
+                aria-hidden="true"
+              >
                 <rect
                   x="1.5"
                   y="1.5"
@@ -1755,9 +1819,9 @@ const showNav = computed(() =>
                  CLI is never unmounted (and its PTY reloaded) by a page switch. -->
             <CliTerminalView
               v-for="id in cliTermSessions"
+              v-show="id === activePageId"
               :key="id"
               :ref="(el) => setCliTermRef(id, el)"
-              v-show="id === activePageId"
               :page="pagesStore.pages.find((p) => p.id === id) || null"
               :active="id === activePageId"
               @exit="backToWorkbench"
@@ -1809,7 +1873,12 @@ const showNav = computed(() =>
         </main>
       </div>
 
-      <CommandPalette v-if="!isPopout" v-model="paletteOpen" :commands="commands" :async-search="deepSearch" />
+      <CommandPalette
+        v-if="!isPopout"
+        v-model="paletteOpen"
+        :commands="commands"
+        :async-search="deepSearch"
+      />
 
       <!-- First-run dependency gate: a blocking overlay until the built-in Node is present. -->
       <SetupGate v-if="!isPopout" />

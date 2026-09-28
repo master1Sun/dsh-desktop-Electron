@@ -569,8 +569,12 @@ const diskBusy = ref('')
 /** Rows with an explicit clear route in the main process; anything else has no wipe button. */
 const CLEARABLE_SCOPES = new Set(['webcache', 'logs'])
 /** The synthetic marker disk-usage appends when a scan cap was hit — never shown as a data row. */
-const diskTruncated = computed(() => disk.value?.scopes.some((s) => s.id === '__truncated__') ?? false)
-const diskScopes = computed(() => (disk.value?.scopes ?? []).filter((s) => s.id !== '__truncated__'))
+const diskTruncated = computed(
+  () => disk.value?.scopes.some((s) => s.id === '__truncated__') ?? false
+)
+const diskScopes = computed(() =>
+  (disk.value?.scopes ?? []).filter((s) => s.id !== '__truncated__')
+)
 /** Share of the scanned total, for the per-row proportion bar. */
 function diskPct(bytes: number): number {
   const total = disk.value?.usedBytes ?? 0
@@ -642,11 +646,15 @@ async function loadDisk(): Promise<void> {
 async function clearScope(scope: DiskScope): Promise<void> {
   if (!CLEARABLE_SCOPES.has(scope.id)) return
   try {
-    await ElMessageBox.confirm(t('settings.diskClearConfirm', { name: t(scope.labelKey) }), t('settings.diskClear'), {
-      type: 'warning',
-      confirmButtonText: t('common.ok'),
-      cancelButtonText: t('common.cancel')
-    })
+    await ElMessageBox.confirm(
+      t('settings.diskClearConfirm', { name: t(scope.labelKey) }),
+      t('settings.diskClear'),
+      {
+        type: 'warning',
+        confirmButtonText: t('common.ok'),
+        cancelButtonText: t('common.cancel')
+      }
+    )
   } catch {
     return
   }
@@ -669,7 +677,9 @@ async function clearScope(scope: DiskScope): Promise<void> {
 watch(
   activeTab,
   (tab) => {
-    if (tab === 'storage' && !diskLoading.value) void loadDisk()
+    if (tab === 'storage') {
+      if (!diskLoading.value) void loadDisk()
+    }
   },
   { immediate: true }
 )
@@ -795,8 +805,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
           <!-- One row, four edges: 顶部 = 经典布局, 左侧/底部/右侧 = 效率布局的图标栏停靠位. -->
           <el-form-item>
             <template #label
-              >{{ t('settings.layoutMode')
-              }}<InfoTip :content="t('settings.layoutModeTip')"
+              >{{ t('settings.layoutMode') }}<InfoTip :content="t('settings.layoutModeTip')"
             /></template>
             <el-radio-group
               :model-value="dock"
@@ -882,8 +891,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 
           <el-form-item>
             <template #label
-              >{{ t('settings.marqueeBorder')
-              }}<InfoTip :content="t('settings.marqueeBorderTip')"
+              >{{ t('settings.marqueeBorder') }}<InfoTip :content="t('settings.marqueeBorderTip')"
             /></template>
             <el-switch
               :model-value="settingsStore.settings.marqueeBorder !== false"
@@ -912,6 +920,28 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             />
           </el-form-item>
 
+          <el-form-item>
+            <template #label
+              >{{ t('settings.startDoneNotifications')
+              }}<InfoTip :content="t('settings.startDoneNotificationsTip')" />
+            </template>
+            <el-switch
+              :model-value="settingsStore.settings.startDoneNotifications !== false"
+              @update:model-value="patch({ startDoneNotifications: $event as boolean })"
+            />
+          </el-form-item>
+
+          <el-form-item>
+            <template #label
+              >{{ t('settings.diskLowNotifications')
+              }}<InfoTip :content="t('settings.diskLowNotificationsTip')" />
+            </template>
+            <el-switch
+              :model-value="settingsStore.settings.diskLowNotifications !== false"
+              @update:model-value="patch({ diskLowNotifications: $event as boolean })"
+            />
+          </el-form-item>
+
           <!-- #11: expose the container itself as an MCP server for external agents to drive. -->
           <el-form-item>
             <template #label
@@ -929,11 +959,12 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 
           <el-form-item>
             <template #label
-              >{{ t('settings.cliIdleStop')
-              }}<InfoTip :content="t('settings.cliIdleStopTip')" />
+              >{{ t('settings.cliIdleStop') }}<InfoTip :content="t('settings.cliIdleStopTip')" />
             </template>
             <el-input-number
-              :model-value="settingsStore.settings.cliIdleStopMinutes ?? CLI_IDLE_STOP_DEFAULT_MINUTES"
+              :model-value="
+                settingsStore.settings.cliIdleStopMinutes ?? CLI_IDLE_STOP_DEFAULT_MINUTES
+              "
               :min="0"
               :max="240"
               controls-position="right"
@@ -1378,7 +1409,13 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
               <div class="disk-bar-fill" :style="{ width: diskVolumePct + '%' }"></div>
             </div>
             <span class="disk-volume-text">
-              {{ t('settings.diskVolume', { pct: diskVolumePct, free: sizeText(disk.freeBytes ?? 0), total: disk.totalBytes ? sizeText(disk.totalBytes) : '—' }) }}
+              {{
+                t('settings.diskVolume', {
+                  pct: diskVolumePct,
+                  free: sizeText(disk.freeBytes ?? 0),
+                  total: disk.totalBytes ? sizeText(disk.totalBytes) : '—'
+                })
+              }}
             </span>
           </div>
 

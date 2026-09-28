@@ -27,6 +27,7 @@ type Dict = Record<string, string>
 const zh: Dict = {
   'app.title': '桌面控制台',
   'tray.show': '显示主界面',
+  'tray.ports': '端口与进程',
   'tray.stop': '停止 {name}',
   'tray.start': '启动 {name}',
   'tray.quit': '退出控制台',
@@ -99,13 +100,15 @@ const zh: Dict = {
   // container.json 轻校验：不致命，只作为「manifest 提示」展示
   'page.warnUnknownKey': '未知的 container.json 字段「{key}」，已忽略',
   'page.warnBadType': '字段「{key}」类型应为 {want}',
-  'page.warnUnknownPermission': '未支持的权限声明「{key}」，容器当前只识别 notify/downloads/externalShell',
+  'page.warnUnknownPermission':
+    '未支持的权限声明「{key}」，容器当前只识别 notify/downloads/externalShell',
   'page.warnIconBig': '图标过大（{size}KB，上限 64KB），已忽略',
   'page.warnIconPath': '图标路径无法使用（需为页面目录内的 png/jpg/svg/ico）：{path}',
   'page.warnIconMissing': '未找到图标文件：{path}',
   'page.portNotReady': '端口 {port} 在 {sec}s 内未就绪',
   'page.containerDesc': '容器主程序（git 更新检测对象）',
   'page.unknown': '未知 page: {id}',
+  'page.notifyNoPermission': '该页面未在 container.json 声明 notify 权限，无法发送通知',
   'page.externalNoStart': '{name} 是外部地址项目，无需启动进程',
   'page.disabled': '{name} 已禁用，请在页面管理中重新启用后再试',
   'page.disableExternal': '外部地址项目请在外部地址管理中删除，不支持禁用',
@@ -128,6 +131,10 @@ const zh: Dict = {
   'notify.giveUpBody': '{name} 连续异常退出 {max} 次，容器已停止自动重启，请在「页面」面板排查',
   'notify.updateReadyTitle': '更新已就绪',
   'notify.updateReadyBody': '桌面控制台 v{version} 已下载完成，重启后生效',
+  'notify.startDoneTitle': '启动完成',
+  'notify.startDoneBody': '自动启动已结束：成功 {ok} 个，失败 {fail} 个',
+  'notify.diskLowTitle': '磁盘空间不足',
+  'notify.diskLowBody': '剩余空间仅 {free} GB（低于 {threshold} GB），可在存储页清理以释放空间',
   'log.mainLabel': '主进程日志',
   'update.noRollback': '当前没有可回退的上一版本备份（仅在完成过一次在线更新后可用）',
   'update.hashMismatch': '更新包内容校验失败（SHA-512 不匹配），已丢弃本次下载，请重试',
@@ -256,7 +263,8 @@ const zh: Dict = {
   'upd.migrateRunning': '页面正在运行，请先停止后再执行迁移更新',
   'upd.manifestUnreadable': '无法读取页面的 container.json，迁移已中止',
   'upd.capabilityMigrated': '已迁移为容器能力并更新：{dir}',
-  'upd.capabilityMigratedPartial': '已迁移为容器能力并更新：{dir}（页面目录内部分旧文件被占用，未能清理）',
+  'upd.capabilityMigratedPartial':
+    '已迁移为容器能力并更新：{dir}（页面目录内部分旧文件被占用，未能清理）',
 
   // #15 配置快照 / 迁移包
   'snapshot.exportTitle': '导出迁移包',
@@ -284,6 +292,7 @@ const zh: Dict = {
 const en: Dict = {
   'app.title': 'Desktop Console',
   'tray.show': 'Show main window',
+  'tray.ports': 'Ports & processes',
   'tray.stop': 'Stop {name}',
   'tray.start': 'Start {name}',
   'tray.quit': 'Quit container',
@@ -305,7 +314,8 @@ const en: Dict = {
     'The desktop container hit a fatal error ({err}) and will exit. If it keeps happening, kill leftover processes in Task Manager and restart; if it persists, reinstall or roll back the latest update',
 
   'mcp.errNoId': 'missing server id',
-  'mcp.errBadId': 'invalid server id "{id}": use letters/digits/underscore/dash, starting with a letter or digit',
+  'mcp.errBadId':
+    'invalid server id "{id}": use letters/digits/underscore/dash, starting with a letter or digit',
   'mcp.errNoCommand': 'missing command',
   'mcp.errBadEnvKey': 'invalid env var name "{key}"',
   'mcp.errBadCwd': 'cwd must be a string',
@@ -318,7 +328,8 @@ const en: Dict = {
   'mcp.errClosed': 'MCP server process exited (crashed or killed externally)',
   'mcp.errBuiltinEdit': 'built-in MCP servers cannot be modified',
   'mcp.errBuiltinRemove': 'built-in MCP servers cannot be removed',
-  'mcp.errPkgMissing': "the component for '{name}' has not been downloaded yet — use the download button under the row to fetch it",
+  'mcp.errPkgMissing':
+    "the component for '{name}' has not been downloaded yet — use the download button under the row to fetch it",
   'mcp.builtin.sequential-thinking.name': 'Sequential Thinking',
   'mcp.builtin.memory.name': 'Knowledge-graph Memory',
   'mcp.builtin.everything.name': 'Everything (official demo)',
@@ -366,9 +377,12 @@ const en: Dict = {
   'page.portNotReady': 'Port {port} was not ready within {sec}s',
   'page.containerDesc': 'Container main program (git update-check target)',
   'page.unknown': 'Unknown page: {id}',
+  'page.notifyNoPermission':
+    'This page has no notify permission in container.json, so it cannot send notifications',
   'page.externalNoStart': '{name} is an external address project; no process to start',
   'page.disabled': '{name} is disabled; re-enable it in the Pages panel first',
-  'page.disableExternal': 'External address projects can be removed in the External Sites manager; they cannot be disabled',
+  'page.disableExternal':
+    'External address projects can be removed in the External Sites manager; they cannot be disabled',
   'page.invalidConfig': '{name} has an invalid config and cannot start (set a port first)',
   'page.noStartCommand': '{name} has no start command and cannot run in a terminal',
   'page.logStarting': '[container] Starting {name} (port {port})…',
@@ -392,6 +406,11 @@ const en: Dict = {
     '{name} exited abnormally {max} times in a row; the container stopped restarting it — investigate in the Pages panel',
   'notify.updateReadyTitle': 'Update ready',
   'notify.updateReadyBody': 'Desktop container v{version} downloaded — restart to apply',
+  'notify.startDoneTitle': 'Startup finished',
+  'notify.startDoneBody': 'Auto-start has settled: {ok} succeeded, {fail} failed',
+  'notify.diskLowTitle': 'Low disk space',
+  'notify.diskLowBody':
+    'Only {free} GB free (below {threshold} GB); open the storage settings to reclaim space',
   'log.mainLabel': 'Main process log',
   'update.noRollback':
     'No previous-version backup is available to roll back to (only offered after one OTA update has completed)',

@@ -2,12 +2,14 @@ import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { IPC, type ImportOptions, type ImportPreflight, type InstallProgress, type IpcResult, type PortCheckResult } from '../../../shared/types'
+import { IPC, type ImportOptions, type ImportPreflight, type InstallProgress, type IpcResult, type PortCheckResult, type PortTableResult } from '../../../shared/types'
 import { BUILTIN_PAGE_IDS } from '../../runtime/pages/pages'
 import { installFromGit, installFromLocalDir, installFromNpm, removePage } from '../../runtime/pages/installer'
 import { classifyProject, probeRemoteTier, npmSuggestionFor } from '../../runtime/pages/project-classify'
 import { clearUpdateCache } from '../../update/update-service'
-import { killPortHolder, findPortHolder, probePortBind } from '../../runtime/diagnostics/port-holder'
+import { killPortHolder, killPidTree, findPortHolder, probePortBind } from '../../runtime/diagnostics/port-holder'
+import { listPortTable } from '../../runtime/diagnostics/port-table'
+import { notifyRaw } from '../notifications'
 import { setDefaultView, getSettings, updateSettings, resolvePagesDir, isValidPort, resolveEnvRoot, resolveInstallDir, resolveDownloadDir, defaultDownloadDir, resolveCapabilitiesDir } from '../store'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from '../../runtime/cli/openclaw'
 import { m } from '../i18n'
@@ -344,6 +346,44 @@ export function registerPagesIpc(ctx: IpcCtx): void {
       }
     }
   )
+
+  // Port/process manager: the full LISTENing table annotated against the registry. Read-only, so
+  // no gating; the panel polls it and offers a tree-kill per row (KillProcessTree, guarded below).
+  ipcMain.handle(IPC.ListListeningPorts, async (): Promise<IpcResult<PortTableResult>> => {
+    try {
+      return ok(await listPortTable(registry))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // Tree-kill one pid from the port table. Refuses the container's own pid (and any pid we can't
+  // see) so a misclick can't drop the app itself; the renderer also hides the button for self rows.
+  ipcMain.handle(IPC.KillProcessTree, async (_e, pid: number): Promise<IpcResult<boolean>> => {
+    try {
+      const n = Number(pid)
+      if (!Number.isFinite(n) || n <= 0) return fail(new Error('invalid pid'))
+      if (n === process.pid) return fail(new Error('cannot kill the container process itself'))
+      return ok(await killPidTree(n))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // A hosted page asks for an OS notification. Its `notify` permission (container.json) is the gate:
+  // the declared capability now means something, rather than being display-only. Text is verbatim.
+  ipcMain.handle(IPC.PageNotify, (_e, pageId: string, title: string, body: string): IpcResult => {
+    try {
+      const state = registry.get(String(pageId))
+      if (!state) return fail(new Error(m('page.unknown', { id: String(pageId) })))
+      if (!(state.permissions || []).includes('notify'))
+        return fail(new Error(m('page.notifyNoPermission')))
+      notifyRaw(String(title || ''), String(body || ''), state.id)
+      return ok(true)
+    } catch (err) {
+      return fail(err)
+    }
+  })
 
   // Env-root facts for the 环境目录 rows: the fixed root every '@install' dir lands under,
   // plus the OS home so the renderer can expand `~` in declared defaults.

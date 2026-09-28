@@ -5,6 +5,7 @@ import type { PageRegistry } from '../runtime/pages/pages'
 import { m } from './i18n'
 import { appIconPath } from './icon'
 import { getSettings } from './store'
+import { openDeepLink } from './notifications'
 
 /**
  * System tray: icon plus the show / per-page start-stop / quit context menu built from
@@ -126,7 +127,10 @@ export function rebuildTrayMenu(): void {
         }))
   const pageRows = [...runningRows, ...stoppedRows]
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: m('tray.show'), click: () => hooks.onShowWindow() }
+    { label: m('tray.show'), click: () => hooks.onShowWindow() },
+    // Port/process manager lives in the help panel's 端口与进程 tab; reuse the notification
+    // deep-link path so this and a clicked OS notification land the renderer the same way.
+    { label: m('tray.ports'), click: () => openDeepLink({ panel: 'help', tab: 'ports' }) }
   ]
   // Only separate the two groups when the page rows exist at all — two bare separators in a row
   // is what an 'off' setting used to render.

@@ -19,6 +19,7 @@ import {
   type UpdateProgress,
   type LogLineEvent,
   type NetSample,
+  type NotifyOpenSignal,
   type PageMetrics,
   type WebDataClearArgs,
   type WorkspaceNote,
@@ -103,6 +104,12 @@ const api = {
   // own listener when it is the one being edited
   checkPortFree: (port: number, pageId?: string) =>
     ipcRenderer.invoke(IPC.CheckPortFree, port, pageId),
+  // port/process manager: full LISTENing table (with ownership/conflict tags) + tree-kill a row
+  listListeningPorts: () => ipcRenderer.invoke(IPC.ListListeningPorts),
+  killProcessTree: (pid: number) => ipcRenderer.invoke(IPC.KillProcessTree, pid),
+  // a hosted page's own OS notification (its `notify` permission is checked in main)
+  pageNotify: (pageId: string, title: string, body: string) =>
+    ipcRenderer.invoke(IPC.PageNotify, pageId, title, body),
   // activity timeline (帮助 → 事件动态): cold read + live rows
   listEvents: (args: ListEventsArgs) => ipcRenderer.invoke(IPC.ListEvents, args),
   onEvent: (cb: (ev: ContainerEvent) => void) => {
@@ -119,6 +126,12 @@ const api = {
     const listener = (_e: Electron.IpcRendererEvent, sig: HotkeySignal): void => cb(sig)
     ipcRenderer.on(IPC.OnHotkey, listener)
     return () => ipcRenderer.removeListener(IPC.OnHotkey, listener)
+  },
+  // the user clicked an OS notification carrying a deep link → focus + open the target page/panel
+  onNotifyOpen: (cb: (sig: NotifyOpenSignal) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, sig: NotifyOpenSignal): void => cb(sig)
+    ipcRenderer.on(IPC.OnNotifyOpen, listener)
+    return () => ipcRenderer.removeListener(IPC.OnNotifyOpen, listener)
   },
   rollbackAsar: () => ipcRenderer.invoke(IPC.RollbackAsar),
   onUpdateResults: (cb: (results: UpdateCheckResult[]) => void) => {

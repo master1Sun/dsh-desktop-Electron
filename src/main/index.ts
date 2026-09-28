@@ -44,6 +44,7 @@ import { registerDownloadHandling } from './update/downloads'
 import { ensureAsciiUserData } from './shell/user-data'
 import { appIconPath } from './shell/icon'
 import { createTray, rebuildTrayMenu } from './shell/tray'
+import { setNotifyShowWindow } from './shell/notifications'
 import {
   flushWindowBounds,
   resolveBounds,
@@ -411,6 +412,9 @@ if (!gotLock) {
       onShowWindow: showWindow,
       onQuitRequest: quitNow
     })
+    // A clicked OS notification focuses the window and routes its deep link; inject the same
+    // show-window hook the tray uses (held as a hook, not an import of index.ts, to avoid a cycle).
+    setNotifyShowWindow(showWindow)
 
     // Node probing may spawn a process (seconds on cold starts) — never await it on the
     // first-frame path. A missing Node is already handled by the renderer SetupGate; the
