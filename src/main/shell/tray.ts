@@ -5,7 +5,6 @@ import type { PageRegistry } from '../runtime/pages/pages'
 import { m } from './i18n'
 import { appIconPath } from './icon'
 import { getSettings } from './store'
-import { openDeepLink } from './notifications'
 
 /**
  * System tray: icon plus the show / per-page start-stop / quit context menu built from
@@ -112,10 +111,12 @@ export function rebuildTrayMenu(): void {
   const running = registry.running()
   const stopped = registry.list().filter((p) => p.status !== 'running' && !p.external)
   const runningRows: Electron.MenuItemConstructorOptions[] =
-    mode === 'off' ? [] : running.map((p) => ({
-      label: m('tray.stop', { name: p.name }),
-      click: () => registry.stop(p.id)
-    }))
+    mode === 'off'
+      ? []
+      : running.map((p) => ({
+          label: m('tray.stop', { name: p.name }),
+          click: () => registry.stop(p.id)
+        }))
   const stoppedRows: Electron.MenuItemConstructorOptions[] =
     mode !== 'all'
       ? []
@@ -127,15 +128,15 @@ export function rebuildTrayMenu(): void {
         }))
   const pageRows = [...runningRows, ...stoppedRows]
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: m('tray.show'), click: () => hooks.onShowWindow() },
-    // Port/process manager lives in the help panel's 端口与进程 tab; reuse the notification
-    // deep-link path so this and a clicked OS notification land the renderer the same way.
-    { label: m('tray.ports'), click: () => openDeepLink({ panel: 'help', tab: 'ports' }) }
+    { label: m('tray.show'), click: () => hooks.onShowWindow() }
   ]
   // Only separate the two groups when the page rows exist at all — two bare separators in a row
   // is what an 'off' setting used to render.
   if (pageRows.length) template.push({ type: 'separator' }, ...pageRows)
-  template.push({ type: 'separator' }, { label: m('tray.quit'), click: () => hooks.onQuitRequest() })
+  template.push(
+    { type: 'separator' },
+    { label: m('tray.quit'), click: () => hooks.onQuitRequest() }
+  )
   const alert = stopped.some((p) => p.status === 'error')
   const level = badgeLevel(alert)
   // The caption follows the badge: suppressing the gold dot also stops claiming "over budget".

@@ -74,59 +74,77 @@ function select(value: string): void {
 </template>
 
 <style scoped>
-/* Two equal-width cards fill the control track; they wrap to a stacked pair when the
-   column narrows so long paths never clip. Selected card borrows the settings accent
-   language (tinted fill + accent border) so the pick reads at a glance. */
+/* Two equal-width cards fill the control track; they wrap to a stacked pair when the column
+   narrows so long paths never clip. The selected card speaks the console's accent language —
+   tinted fill + accent border + a soft focus ring (matching the segmented pills) — and the
+   resolved path sits in a quiet monospace chip so it reads as data, not a label. */
 .env-cards {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
 }
 .env-card {
-  flex: 1 1 150px;
+  position: relative;
+  flex: 1 1 200px;
   min-width: 0;
-  padding: 7px 9px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--glass-well);
+  border-radius: 12px;
+  background: var(--surface);
   cursor: pointer;
   user-select: none;
   transition:
-    border-color 0.15s ease,
-    background 0.15s ease;
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
 }
 .env-card:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.env-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 32%, transparent);
 }
 .env-card.on {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent),
+    0 6px 18px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 .ec-head {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 .ec-check {
-  font-size: 14px;
+  display: inline-flex;
+  font-size: 15px;
   color: var(--accent);
   flex-shrink: 0;
 }
 .ec-check .ec-off {
-  color: var(--text-dim);
+  color: color-mix(in srgb, var(--text-dim) 80%, transparent);
 }
 .ec-label {
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
 }
 .ec-path {
-  margin-top: 3px;
-  font-size: 11.5px;
-  line-height: 1.4;
+  margin-top: 6px;
+  padding: 3px 7px;
+  font-family: ui-monospace, 'Cascadia Code', 'Segoe UI Mono', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
   color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  border-radius: 6px;
   word-break: break-all;
 }
 </style>

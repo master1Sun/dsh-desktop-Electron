@@ -6,14 +6,11 @@ import {
   appPanelKey,
   managerPageVisible,
   DEFAULT_KEYBINDINGS,
-  GLASS_FROST_MAX_BLUR_PX,
-  GLASS_FROST_MIN_ALPHA_PCT,
   KEYBINDING_ACTIONS,
   type KeybindingAction
 } from '@shared/types'
 import { formatAccelerator, matchesAccelerator } from '@shared/accel'
-import MenuPanelContent from '@renderer/components/panels/MenuPanelContent.vue'
-import QQShell from '@renderer/components/layout/qq/QQShell.vue'
+import UnifiedConsole from '@renderer/components/panels/UnifiedConsole.vue'
 import CommandPalette, { type Command } from '@renderer/components/shell/CommandPalette.vue'
 import TerminalDrawer from '@renderer/components/terminal/TerminalDrawer.vue'
 import CliTerminalView from '@renderer/components/terminal/CliTerminalView.vue'
@@ -41,51 +38,44 @@ const dualStore = useDualStore()
 /** Panels float over the workbench instead of replacing it, so an embedded page never unmounts. */
 const activePanel = ref<string | null>(null)
 
-/* ---- shell layout mode -------------------------------------------------------------
-   'im' (default, 效率) uses a compact title bar and moves the panels into a QQ-like left rail +
-   docked sidebar (QQShell); 'classic' keeps the top menu bar + centered floating panels. It is a
-   layout switch only — the frosted surfaces, theme and aurora are untouched. Driven off the
-   reactive settings so the 设置 ▸ 布局 radio and the Ctrl+K command flip it live; an unset
-   (pre-setting) install defaults to 经典, and popout windows always render classic. */
-const isIm = computed(
-  () => !isPopout.value && (settingsStore.settings.layoutMode ?? 'classic') === 'im'
-)
-
-/** 效率布局 + 侧边栏位置=底部居中: the rail floats over the page bottom (see .body-bottom). */
-const railAtBottom = computed(() => (settingsStore.settings.sidebarPosition ?? 'left') === 'bottom')
-
-/** Bottom-dock expanded state, published by QQShell (`dock-open`). */
-const dockOpen = ref(false)
-const qqShellRef = ref<InstanceType<typeof QQShell> | null>(null)
+/* ---- unified console (classic-only) -------------------------------------------------
+   The QQ / 效率 layout (compact title bar + left icon rail + docked sidebar, QQShell) has been
+   removed: the shell is classic-only — the top menu bar with a single 「控制台」 entry whose left
+   nav lists every panel as a leaf. `openPanel` always routes to the unified console. */
 /**
- * Bottom-mode dock expanded, per QQShell's `dock-open` publish. While true the content scrim
- * (see .panel-clickaway in the template) also serves as the dock's click-away catcher — the
- * guest <webview> eats host pointerdowns, so the dock can only learn about a page click that
- * way. An open bubble panel skips it: the scrim's own panel branch closes the bubble first,
- * and the bubble keeps pinning the dock for the pointer to land on.
+ * Content click-away catcher (see .panel-clickaway in the template): a hosted page is an
+ * out-of-process <webview> that swallows host pointerdown, so a click over it never reaches the
+ * document listeners. This transparent host layer turns that click into a panel dismiss.
  */
-const dockClickaway = computed(() => isIm.value && railAtBottom.value && dockOpen.value)
 function onContentClickaway(): void {
-  // A bubble owns the dismiss while it is up (it also pins the dock); otherwise the content click
-  // collapses the expanded bottom dock. Both reach here from the same scrim because that scrim is
-  // the one host layer a guest <webview> actually lets the pointerdown through to.
   if (activePanel.value) activePanel.value = null
-  else {
-    qqShellRef.value?.collapseRail()
-    dockOpen.value = false // the emit round-trip is next-tick; the scrim should vanish at once
-  }
 }
 
-/**
- * Vertical tab a panel should open on, set by a palette command (「查看事件动态」→ help/events).
- * Cleared whenever the panel closes so the next ordinary menu click lands on its default tab.
- */
-const panelTab = ref<string | null>(null)
-watch(activePanel, (panel) => {
-  // help + settings both honor a palette deep-link tab; every other panel clears it so the next
-  // ordinary menu click lands on its default tab.
-  if (panel !== 'help' && panel !== 'settings') panelTab.value = null
-})
+/* ---- unified console ----------------------------------------------------------------
+   The classic menu bar collapses to a single 「控制台」 entry; every panel is a leaf in the
+   console's left nav. `openPanel` routes any panel request to the console. */
+const consoleTarget = ref<{ panel: string; tab?: string } | null>(null)
+/** Landing tab per tabbed panel, so a palette / notification deep link opens on a sane leaf. */
+const PANEL_DEFAULT_TAB: Record<string, string> = {
+  settings: 'view',
+  pages: 'install',
+  dsh: 'overview',
+  board: 'board',
+  help: 'about'
+}
+function openPanel(panel: string, tab?: string): void {
+  consoleTarget.value = { panel, tab: tab ?? PANEL_DEFAULT_TAB[panel] }
+  activePanel.value = 'console'
+}
+/** Top-bar 「控制台」 entry: open fresh, letting the console keep its own default leaf. */
+function openConsole(): void {
+  consoleTarget.value = null
+  activePanel.value = 'console'
+}
+function onMenuOpen(p: string | null): void {
+  if (p === 'console') openConsole()
+  else activePanel.value = p
+}
 
 /* ---- C2: detached page window ----
    The main process opens `?popout=<pageId>` in its own BrowserWindow; this renderer instance then
@@ -286,16 +276,6 @@ const commands = computed<Command[]>(() => {
       run: () => quickThemeToggle()
     },
     {
-      id: 'act-layout',
-      title: t('palette.actLayout'),
-      hint: t('palette.actLayoutHint', {
-        mode: isIm.value ? t('settings.layoutIm') : t('settings.layoutClassic')
-      }),
-      group: t('palette.groupActions'),
-      keywords: 'layout 布局 侧边栏 sidebar im classic',
-      run: () => toggleLayoutMode()
-    },
-    {
       id: 'act-detach',
       title: t('palette.actDetach'),
       group: t('palette.groupActions'),
@@ -317,7 +297,7 @@ const commands = computed<Command[]>(() => {
       // Open the Help panel (where the update table lives) and force a fresh check,
       // instead of running a check the user can't see.
       run: () => {
-        activePanel.value = 'help'
+        openPanel('help')
         updatesStore.check(true).catch(() => undefined)
       }
     },
@@ -404,7 +384,7 @@ const commands = computed<Command[]>(() => {
         title: t('palette.cmdAppSettings', { name: p.name }),
         group: t('palette.groupPanels'),
         keywords: p.name,
-        run: () => (activePanel.value = appPanelKey(p.id))
+        run: () => openPanel(appPanelKey(p.id))
       })
     }
   }
@@ -420,7 +400,7 @@ const commands = computed<Command[]>(() => {
       id: `panel-${panel.kind}`,
       title: t(panel.key),
       group: t('palette.groupPanels'),
-      run: () => (activePanel.value = panel.kind)
+      run: () => openPanel(panel.kind)
     })
   }
   return list
@@ -428,8 +408,7 @@ const commands = computed<Command[]>(() => {
 
 /** Open (or focus) the settings panel on a given vertical tab (a palette deep link). */
 function openSettingsTab(tab: string): void {
-  panelTab.value = tab
-  activePanel.value = 'settings'
+  openPanel('settings', tab)
 }
 
 /* ---- #5: command-palette deep search -------------------------------------------
@@ -500,7 +479,7 @@ async function deepSearch(q: string): Promise<Command[]> {
         hint: tool.serverId,
         group: t('palette.groupTools'),
         keywords: tool.description,
-        run: () => (activePanel.value = 'mcp')
+        run: () => openPanel('mcp')
       })
       if (out.length > 40) break
     }
@@ -1042,51 +1021,41 @@ function applyAccent(hex?: string): void {
   if (!hex) {
     root.style.removeProperty('--accent')
     root.style.removeProperty('--accent-strong')
+    root.style.removeProperty('--on-accent')
     return
   }
   root.style.setProperty('--accent', hex)
   root.style.setProperty('--accent-strong', `color-mix(in srgb, ${hex} 82%, #000)`)
+  root.style.setProperty('--on-accent', readableOnAccent(hex))
 }
 
-/** #25: frosted-blur strength — write the base token the glass surfaces scale off.
-    Set the px token (used by blur()) and its unitless mirror --glass-blur-n (used by the
-    tint/saturate ratios) together so they never drift.
-    Clamped to the frost slider's ceiling instead of rewritten: configs saved while the
-    slider still went to 100% (or 60px) keep their value on disk, they just never render
-    past GLASS_FROST_MAX_BLUR_PX. */
-function applyGlassBlur(px?: number): void {
-  const root = document.documentElement
-  if (typeof px !== 'number') {
-    root.style.removeProperty('--glass-blur')
-    root.style.removeProperty('--glass-blur-n')
-    return
-  }
-  const clamped = Math.min(Math.max(Math.round(px), 0), GLASS_FROST_MAX_BLUR_PX)
-  root.style.setProperty('--glass-blur', `${clamped}px`)
-  root.style.setProperty('--glass-blur-n', `${clamped}`)
+/**
+ * Foreground for a solid `--accent` fill. A user can pick any 主题色 from the color well; a light
+ * one (e.g. lime) makes the white selected-pill text unreadable, so pick dark ink when the accent
+ * is bright and white otherwise. YIQ luma is a perceptually good-enough binary classifier here.
+ */
+function readableOnAccent(hex: string): string {
+  const m = hex.replace('#', '')
+  const full =
+    m.length === 3
+      ? m
+          .split('')
+          .map((c) => c + c)
+          .join('')
+      : m
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16))
+  if ([r, g, b].some((v) => Number.isNaN(v))) return '#ffffff'
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000
+  return yiq >= 150 ? '#1b2434' : '#ffffff'
 }
 
-/** #25: background transparency — the frosted-surface opacity. A percentage (0–100, full
- range: 0 = fully transparent, 100 = fully opaque) is written onto --glass-tint-a, overriding
- the blur-coupled stylesheet default so blur and transparency are independent axes. Undefined
- removes the override and falls back to that coupling. Floored at the frost ceiling's opacity
- (GLASS_FROST_MIN_ALPHA_PCT): since the single 毛玻璃 slider merged both axes, a stale
- near-transparent value saved under the old 100% range must not outlive the cap either. */
-function applyGlassAlpha(pct?: number): void {
-  const root = document.documentElement
-  if (typeof pct !== 'number') {
-    root.style.removeProperty('--glass-tint-a')
-    return
-  }
-  const alpha = Math.min(1, Math.max(Math.max(pct, GLASS_FROST_MIN_ALPHA_PCT) / 100, 0))
-  root.style.setProperty('--glass-tint-a', alpha.toFixed(3))
-}
+/** #25: frosted-blur / surface-opacity are no longer applied from settings — the 毛玻璃 feature is
+    removed and the glass tokens are pinned solid in main.css, so only the accent override below
+    still writes runtime tokens. */
 
 watchEffect(() => {
   if (!settingsStore.loaded) return
   applyAccent(settingsStore.settings.accentColor)
-  applyGlassBlur(settingsStore.settings.glassBlur)
-  applyGlassAlpha(settingsStore.settings.glassAlpha)
 })
 
 // #26: reduced motion — one class resolves the tri-state setting and the OS hint; re-apply when
@@ -1162,14 +1131,6 @@ function quickThemeToggle(): void {
   settingsStore.patch({ theme: next }).catch(() => undefined)
 }
 
-/** Flip the shell layout (classic ⇄ 效率) and persist it; the change is instant and reversible. */
-function toggleLayoutMode(): void {
-  const current = settingsStore.settings.layoutMode ?? 'classic'
-  const next = current === 'im' ? 'classic' : 'im'
-  activePanel.value = null
-  settingsStore.patch({ layoutMode: next }).catch(() => undefined)
-}
-
 async function toggleDevTools(): Promise<void> {
   await window.container.toggleDevTools().catch(() => undefined)
 }
@@ -1229,8 +1190,7 @@ function runAction(action: KeybindingAction): void {
 
 /** Open (or focus) the help panel on a given vertical tab. */
 function openHelpTab(tab: string): void {
-  panelTab.value = tab
-  activePanel.value = 'help'
+  openPanel('help', tab)
 }
 
 /**
@@ -1247,9 +1207,8 @@ function applyNotifyDeepLink(sig: { pageId?: string; panel?: string; tab?: strin
   }
   if (sig.panel === 'help') openHelpTab(sig.tab || 'about')
   else if (sig.panel === 'settings') openSettingsTab(sig.tab || 'view')
-  // Any other known panel key (board / mcp / workspace …) opens as-is; its own internal tab
-  // state is component-scoped and resets per open, so `tab` only steers help/settings.
-  else if (sig.panel) activePanel.value = sig.panel
+  // Any other known panel key (board / mcp / workspace …) routes through the console.
+  else if (sig.panel) openPanel(sig.panel, sig.tab)
 }
 
 /**
@@ -1465,6 +1424,17 @@ watch(activePanel, (panel) => {
   }
 })
 
+// The floating terminal drawer lives inside `.content` (a z-index:1 stacking context), so its
+// z-index:2000 can't lift it above the console (z-70, inside the menubar's own context). Rather
+// than re-parent it and risk the webview/aurora layering, the two simply don't coexist: opening
+// the terminal collapses whatever panel is open, so the drawer is never hidden behind the console.
+watch(
+  () => store.open,
+  (open) => {
+    if (open && activePanel.value) activePanel.value = null
+  }
+)
+
 // A dsh page only reports its token-bearing URL after it boots, so re-point that session
 // (in place, never a remount) when the announcement lands.
 watch(
@@ -1573,7 +1543,7 @@ const showNav = computed(() =>
 
 <template>
   <el-config-provider :locale="currentEpLocale" :message="messageConfig">
-    <div class="shell" :class="{ 'layout-im': isIm }">
+    <div class="shell">
       <!-- Ambient aurora: fixed, non-interactive; glass chrome bleeds it through. -->
       <div class="aurora" aria-hidden="true">
         <span class="blob b1" />
@@ -1592,7 +1562,6 @@ const showNav = computed(() =>
       <MenuBar
         v-if="!isPopout"
         :current="activePanel"
-        :im-mode="isIm"
         :outdated-count="updatesStore.outdated.length"
         :is-dark="isDark"
         :theme-mode="themeMode"
@@ -1608,8 +1577,8 @@ const showNav = computed(() =>
         :terminal-mode="Boolean(activeTerminalPage)"
         :terminal-running="activeTerminalPage?.status === 'running'"
         :external-sites="settingsStore.settings.externalSites"
-        @open="activePanel = $event"
-        @open-panel="(p: string) => (activePanel = p)"
+        @open="onMenuOpen"
+        @open-panel="(p: string) => openPanel(p)"
         @toggle-theme="quickThemeToggle"
         @select-page="openPage"
         @start-page="startPage"
@@ -1624,103 +1593,19 @@ const showNav = computed(() =>
         @stop-terminal="stopActiveCli"
         @restart-app="restartContainer"
       >
-        <template #settings>
-          <MenuPanelContent
-            v-if="activePanel === 'settings'"
-            panel="settings"
+        <template #console>
+          <UnifiedConsole
+            v-if="activePanel === 'console'"
             :runtime="pagesStore.nodeInfo"
             :running-count="runningCount"
             :total-count="pageContainerCount"
-            :initial-tab="panelTab ?? undefined"
+            :initial="consoleTarget"
             @apply-theme="applyTheme"
             @preview-site="previewExternalUrl"
-          />
-        </template>
-        <template #pages>
-          <MenuPanelContent
-            v-if="activePanel === 'pages'"
-            panel="pages"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-            @close="activePanel = null"
-          />
-        </template>
-        <template #external>
-          <MenuPanelContent
-            v-if="activePanel === 'external'"
-            panel="external"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-            @preview-site="previewExternalUrl"
-          />
-        </template>
-        <template #dsh>
-          <MenuPanelContent
-            v-if="activePanel === 'dsh'"
-            panel="dsh"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-          />
-        </template>
-        <template #openclaw>
-          <MenuPanelContent
-            v-if="activePanel === 'openclaw'"
-            panel="openclaw"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-          />
-        </template>
-        <template #mcp>
-          <MenuPanelContent
-            v-if="activePanel === 'mcp'"
-            panel="mcp"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-          />
-        </template>
-        <template #workspace>
-          <MenuPanelContent
-            v-if="activePanel === 'workspace'"
-            panel="workspace"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-          />
-        </template>
-        <template #board>
-          <MenuPanelContent
-            v-if="activePanel === 'board'"
-            panel="board"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-          />
-        </template>
-        <template #app="{ pageId }">
-          <MenuPanelContent
-            v-if="pageId && activePanel === appPanelKey(pageId)"
-            :panel="appPanelKey(pageId)"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
             @open-page="openPage"
             @open-terminal="openPage"
-          />
-        </template>
-        <template #help>
-          <MenuPanelContent
-            v-if="activePanel === 'help'"
-            panel="help"
-            :runtime="pagesStore.nodeInfo"
-            :running-count="runningCount"
-            :total-count="pageContainerCount"
-            :initial-tab="panelTab ?? undefined"
             @check-updates="updatesStore.check(true)"
+            @close="activePanel = null"
           />
         </template>
       </MenuBar>
@@ -1813,33 +1698,7 @@ const showNav = computed(() =>
         </div>
       </div>
 
-      <div class="shell-body" :class="{ 'body-bottom': isIm && railAtBottom }">
-        <!-- IM layout: the left rail + docked sidebar replace the menu bar's group triggers and
-             the centered floating panel. It shares `activePanel` with the compact title bar, so a
-             rail click and the switcher stay in sync. Classic mode renders no rail. -->
-        <QQShell
-          v-if="isIm"
-          ref="qqShellRef"
-          :pages="pagesStore.pages"
-          :current="activePanel"
-          :sidebar-position="settingsStore.settings.sidebarPosition ?? 'left'"
-          :runtime="pagesStore.nodeInfo"
-          :running-count="runningCount"
-          :total-count="pageContainerCount"
-          :initial-tab="panelTab"
-          :outdated-count="updatesStore.outdated.length"
-          :is-dark="isDark"
-          @open-panel="activePanel = $event"
-          @dock-open="dockOpen = $event"
-          @toggle-theme="quickThemeToggle"
-          @open-palette="paletteOpen = true"
-          @apply-theme="applyTheme"
-          @preview-site="previewExternalUrl"
-          @check-updates="updatesStore.check(true)"
-          @open-page="openPage"
-          @open-terminal="openPage"
-          @close="activePanel = null"
-        />
+      <div class="shell-body">
         <main class="content">
           <div class="content-main">
             <!-- Workbench stays mounted for the whole session; only panels open and close above it. -->
@@ -1872,25 +1731,18 @@ const showNav = computed(() =>
               :secondary-choices="secondaryChoices"
               @nav-state="onNavState"
               @guest-stop-loading="webviewLoading = false"
-              @install-pages="activePanel = 'pages'"
-              @open-panel="(k: string) => (activePanel = k)"
+              @install-pages="openPanel('pages')"
+              @open-panel="(k: string) => openPanel(k)"
               @cancel-start="cancelStart"
             />
             <!-- Click-away catcher (see .panel-clickaway): a page is an out-of-process <webview>
                  that swallows host pointerdown, so once it fills the content area a click there
-                 never reaches any document listener — neither QQShell's nor MenuBar's — and the
-                 rail bubble / floating panel / expanded bottom dock lingers. This transparent host
-                 layer, sitting above the webview but below the popups (the ONLY slot proven to
-                 receive clicks over the guest surface), turns a content click into a dismiss; it
-                 stops at .content-main so the rail, title bar and window controls stay live.
-                 Armed for both dismissals: an open bubble panel (classic + IM) or an expanded
-                 bottom-mode dock. When a bubble is up it pins the dock too, so the panel gets the
-                 dismiss and the dock follows it back down via QQShell's `current` watch. -->
-            <div
-              v-if="activePanel || dockClickaway"
-              class="panel-clickaway"
-              @pointerdown="onContentClickaway"
-            />
+                 never reaches MenuBar's document listener and the floating panel lingers. This
+                 transparent host layer, sitting above the webview but below the popups (the ONLY
+                 slot proven to receive clicks over the guest surface), turns a content click into
+                 a dismiss; it stops at .content-main so the title bar and window controls stay
+                 live. -->
+            <div v-if="activePanel" class="panel-clickaway" @pointerdown="onContentClickaway" />
           </div>
           <!-- Plain-browser dev (vite URL without the preload bridge) has no PTY IPC.
                v-show, not v-if: unmounting drops the global onPtyData subscription, which
@@ -1957,51 +1809,21 @@ const showNav = computed(() =>
   overflow: hidden;
 }
 
-/* Click-away layer, shared by both layouts: transparent, above the webview / market / terminal
-   layers (z ≤ 20) but below the floating surfaces (the IM rail bubble and the classic panel both
-   sit at z 70, inside the menubar's own stacking context). It only fills .content-main, so a click
-   on a full-bleed page still dismisses the popup while the rail and window chrome stay live. */
+/* Click-away layer: transparent, above the webview / market / terminal layers (z ≤ 20) but below
+   the floating panel (z 70, inside the menubar's own stacking context). It only fills .content-main,
+   so a click on a full-bleed page still dismisses the panel while the window chrome stays live. */
 .panel-clickaway {
   position: absolute;
   inset: 0;
   z-index: 40;
 }
 
-/* Body row under the title bar. Classic mode: only .content (fills width). IM mode: the QQShell
-   rail + sidebar dock to the left and .content takes the rest, so the webview reflows narrower.
-   Also the containing block for the bottom mode's floating dock (`.qq-shell` is absolute to this
-   row's bottom edge). */
+/* Body row under the title bar: the single .content column fills the width. */
 .shell-body {
   display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
-  /* Containing block for the absolutely positioned overlays of the bottom mode (the dock shell
-     and its click-away scrim). */
-  position: relative;
-}
-/* Bottom-centred rail: the dock is a zero-height overlay row sitting on the page's bottom edge
-   instead of a flow row under it — the content keeps the full height and the home indicator
-   floats over it (its strip passes hover through except on the handle). The bubble still floats
-   over the page. */
-.shell-body.body-bottom {
-  flex-direction: column;
-  /* The dock pill and the bubble float out of the bottom strip, so clip the row: on a very short
-     window they would otherwise grow a window-level scrollbar that flickers with the dock. */
-  overflow: hidden;
-}
-.shell-body.body-bottom > .content {
-  order: 1;
-  flex: 1 1 auto;
-}
-.shell-body.body-bottom > .qq-shell {
-  order: 2;
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  /* Zero height: the strip inside paints upward from this edge (`.qq-rail` in QQShell). */
-  height: 0;
 }
 .shell-body > .content {
   min-width: 0;

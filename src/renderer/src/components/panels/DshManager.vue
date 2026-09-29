@@ -30,7 +30,9 @@ const activeTab = ref(props.pane || 'overview')
 watch(
   () => props.pane,
   (p) => {
-    if (p) activeTab.value = p
+    /* 控制台以 pane 驱动当前子 tab；pane 变空（回到无 pane 的入口）时回落到概览，
+       否则从「插件管理」切回「DSH管理器」会停在插件管理不重置。 */
+    activeTab.value = p || 'overview'
   }
 )
 

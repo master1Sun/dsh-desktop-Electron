@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
-import { ElIcon, ElMessage, ElMessageBox, ElTooltip } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Monitor,
   Operation,
@@ -10,8 +10,24 @@ import {
   Bell,
   Key,
   Coin,
-  // ⓘ 提示符用轮廓 `InfoFilled`（EP 无纯线框 info 变体），与 PageManager 的环境行 ⓘ 保持一致。
-  InfoFilled
+  Warning,
+  Brush,
+  MagicStick,
+  Sunny,
+  Moon,
+  ChatLineSquare,
+  Clock,
+  Odometer,
+  Postcard,
+  SwitchButton,
+  Position,
+  Select,
+  Mouse,
+  DataLine,
+  Files,
+  BellFilled,
+  Refresh,
+  Edit
 } from '@element-plus/icons-vue'
 import { usePagesStore } from '@renderer/stores/pages'
 import { useSettingsStore } from '@renderer/stores/settings'
@@ -24,8 +40,6 @@ import type {
   WebDataReport
 } from '@shared/types'
 import {
-  GLASS_BLUR_MAX_PX,
-  GLASS_FROST_MAX_PCT,
   NPM_REGISTRY_DEFAULT,
   REGISTRY_CANDIDATES,
   DEFAULT_KEYBINDINGS,
@@ -56,40 +70,16 @@ const pagesStore = usePagesStore()
 const settingsStore = useSettingsStore()
 
 /**
- * A compact ⓘ that reveals a row's full description on hover. Settings rows used to render a
- * permanent `<div class="tip">` paragraph under every control, which made the panel tall and
- * noisy; the wording lives here instead so each row stays on one line.
+ * A row's persistent description. The unified-console mockup shows every setting as a bold title
+ * with a dim one-line explanation beneath it (not a hover ⓘ), so this renders that second line
+ * directly. Used as `<template #label>{{ title }}<InfoTip :content=... /></template>` — the title
+ * is the preceding text node and this becomes the block `.row-desc` under it, which the console's
+ * `:deep(.el-form-item__label)` lays out as a two-line column.
  */
 const InfoTip = defineComponent({
   name: 'InfoTip',
   props: { content: { type: String, required: true } },
-  setup: (props) => () =>
-    h(
-      ElTooltip,
-      {
-        content: props.content,
-        placement: 'top',
-        showAfter: 120,
-        popperClass: 'settings-tip-popper dsh-tip-popper'
-      },
-      {
-        default: () =>
-          h(
-            ElIcon,
-            {
-              class: 'tip-icon',
-              style: {
-                fontSize: '14px',
-                color: 'var(--text-dim)',
-                marginLeft: '5px',
-                verticalAlign: 'middle',
-                cursor: 'help'
-              }
-            },
-            { default: () => h(InfoFilled) }
-          )
-      }
-    )
+  setup: (props) => () => h('div', { class: 'row-desc' }, props.content)
 })
 
 /** Which settings tab is open — one of view / behavior / alerts / keys / download / network / env / privacy / storage. */
@@ -306,22 +296,6 @@ function onThemeChange(mode: 'auto' | 'light' | 'dark'): void {
 }
 
 /**
- * 布局四档停靠位。经典布局本质上就是“顶部”这一档（顶栏 + 居中浮层），效率布局的侧边栏位置则是
- * 其余三档，所以设置里合成一个选择器，底下仍是 `layoutMode` + `sidebarPosition` 两个键 —— 旧配置
- * 无需迁移，命令面板的 经典⇄效率 开关也不受影响。选“顶部”时刻意不写 `sidebarPosition`：回到顶栏
- * 不代表用户不想再回效率布局，上次的贴边位置得留着。
- */
-type Dock = 'top' | 'left' | 'bottom' | 'right'
-const dock = computed<Dock>(() =>
-  (settingsStore.settings.layoutMode ?? 'classic') === 'classic'
-    ? 'top'
-    : ((settingsStore.settings.sidebarPosition ?? 'left') as Dock)
-)
-function onDockChange(next: Dock): void {
-  patch(next === 'top' ? { layoutMode: 'classic' } : { layoutMode: 'im', sidebarPosition: next })
-}
-
-/**
  * Switching language persists the choice; App.vue's watcher applies it reactively. No toast on
  * purpose: the whole panel re-renders immediately (self-evident feedback), and a toast raised
  * here would still carry the *previous* language's "saved" text.
@@ -330,48 +304,8 @@ function onLocaleChange(next: 'zh' | 'en'): void {
   settingsStore.patch({ locale: next }).catch((err) => ElMessage.error((err as Error).message))
 }
 
-/* #25: a single "frosted glass" slider drives BOTH axes at once — blur strength
-   (--glass-blur) and surface opacity (--glass-tint-a). frost 0 = solid (no blur, near-opaque),
-   100 = heavy frost (max blur, most see-through). It still persists into the two existing
-   settings (glassBlur / glassAlpha) so the main process, App.vue and the four frosted surfaces
-   keep consuming them unchanged. Local draft + @input live preview; @change talks to main once. */
-const FROST_BLUR_MAX_PX = GLASS_BLUR_MAX_PX // frost 100 → the shared blur ceiling (25px)
-const FROST_ALPHA_TOP = 96 // frost 0 → 96% opaque (near-solid)
-const FROST_ALPHA_BOTTOM = 8 // frost 100 → 8% opaque (very transparent)
-/** UI cap: the slider tops out at 40 (of the 0-100 frost scale) ≈ 10px blur / 61% opaque —
-    past that the frosting reads as a smudge, so the scale itself stops here. Shared with
-    App.vue's render clamps so stale settings can't outlive the ceiling either. Anything the
-    user drags or a stale setting carries above this level clamps on display. */
-const FROST_MAX = GLASS_FROST_MAX_PCT
-function blurFromFrost(f: number): number {
-  return Math.round((f / 100) * FROST_BLUR_MAX_PX)
-}
-function alphaFromFrost(f: number): number {
-  return Math.round(FROST_ALPHA_TOP - (f / 100) * (FROST_ALPHA_TOP - FROST_ALPHA_BOTTOM))
-}
-/** Derive the displayed frost level from the persisted blur (opacity is redundant now). */
-function frostFromSettings(): number {
-  const blur = settingsStore.settings.glassBlur ?? 30
-  return Math.min(FROST_MAX, Math.max(0, Math.round((blur / FROST_BLUR_MAX_PX) * 100)))
-}
-const frostDraft = ref(frostFromSettings())
-watch(
-  () => settingsStore.settings.glassBlur,
-  () => {
-    const next = frostFromSettings()
-    if (next !== frostDraft.value) frostDraft.value = next
-  }
-)
-function previewFrost(f: number): void {
-  const root = document.documentElement.style
-  const blur = blurFromFrost(f)
-  root.setProperty('--glass-blur', `${blur}px`)
-  root.setProperty('--glass-blur-n', `${blur}`)
-  root.setProperty('--glass-tint-a', (alphaFromFrost(f) / 100).toFixed(3))
-}
-function commitFrost(f: number): void {
-  void patch({ glassBlur: blurFromFrost(f), glassAlpha: alphaFromFrost(f) }, '')
-}
+/* #25 retired: the 毛玻璃 (frosted-glass) slider is gone. The feature is disabled globally
+   (glass tokens pinned solid in main.css), so there is no blur/opacity control here anymore. */
 
 /* ---- #26: 内存告警阈值 -------------------------------------------------------------
    memWarnMb drives the gold tray badge and the over-budget row colour. (Terminal height is set by
@@ -718,106 +652,131 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             ><el-icon><Monitor /></el-icon>{{ t('settings.tabView') }}</span
           >
         </template>
-        <el-form label-position="left" size="small">
-          <el-form-item>
-            <template #label
-              >{{ t('settings.defaultPage') }}<InfoTip :content="t('settings.defaultPageTip')"
-            /></template>
-            <el-select v-model="viewValue" class="set-ctl">
-              <el-option
-                v-for="opt in viewOptions.plain"
-                :key="opt.value"
-                :value="opt.value"
-                :label="opt.label"
-                :disabled="opt.disabled"
-              />
-              <el-option-group v-for="g in viewOptions.groups" :key="g.label" :label="g.label">
-                <el-option
-                  v-for="sub in g.options"
-                  :key="sub.value"
-                  :value="sub.value"
-                  :label="sub.label"
-                />
-              </el-option-group>
-            </el-select>
-          </el-form-item>
+        <!-- Design-mockup layout: two captioned cards, each row = icon tile · title + persistent
+             grey desc (left) · control (right), dashed hairlines between rows. Frosted-blur &
+             layout rows are intentionally gone (features removed). -->
+        <div class="view-groups">
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.groupAppearance') }}</h3>
+            <div class="group-card">
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Monitor /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.defaultPage') }}</span>
+                  <span class="row-desc">{{ t('settings.defaultPageDesc') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-select v-model="viewValue" class="set-ctl">
+                    <el-option
+                      v-for="opt in viewOptions.plain"
+                      :key="opt.value"
+                      :value="opt.value"
+                      :label="opt.label"
+                      :disabled="opt.disabled"
+                    />
+                    <el-option-group
+                      v-for="g in viewOptions.groups"
+                      :key="g.label"
+                      :label="g.label"
+                    >
+                      <el-option
+                        v-for="sub in g.options"
+                        :key="sub.value"
+                        :value="sub.value"
+                        :label="sub.label"
+                      />
+                    </el-option-group>
+                  </el-select>
+                </div>
+              </div>
 
-          <el-form-item :label="t('settings.theme')">
-            <el-radio-group
-              :model-value="settingsStore.settings.theme"
-              @update:model-value="onThemeChange($event as 'auto' | 'light' | 'dark')"
-            >
-              <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
-              <el-radio-button value="light">{{ t('settings.themeLight') }}</el-radio-button>
-              <el-radio-button value="dark">{{ t('settings.themeDark') }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Brush /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.theme') }}</span>
+                  <span class="row-desc">{{ t('settings.themeDesc') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-select
+                    class="theme-select"
+                    :model-value="settingsStore.settings.theme"
+                    @update:model-value="onThemeChange($event as 'auto' | 'light' | 'dark')"
+                  >
+                    <el-option value="auto" :label="t('settings.themeAuto')">
+                      <span class="theme-opt"
+                        ><el-icon><Operation /></el-icon>{{ t('settings.themeAuto') }}</span
+                      >
+                    </el-option>
+                    <el-option value="light" :label="t('settings.themeLight')">
+                      <span class="theme-opt"
+                        ><el-icon><Sunny /></el-icon>{{ t('settings.themeLight') }}</span
+                      >
+                    </el-option>
+                    <el-option value="dark" :label="t('settings.themeDark')">
+                      <span class="theme-opt"
+                        ><el-icon><Moon /></el-icon>{{ t('settings.themeDark') }}</span
+                      >
+                    </el-option>
+                  </el-select>
+                </div>
+              </div>
 
-          <!-- #25 theme customization: accent override + frosted-blur strength -->
-          <el-form-item>
-            <template #label
-              >{{ t('settings.accentColor') }}<InfoTip :content="t('settings.accentTip')"
-            /></template>
-            <div class="accent-row">
-              <el-color-picker
-                :model-value="settingsStore.settings.accentColor || ''"
-                @update:model-value="patch({ accentColor: ($event as string) || '' }, '')"
-              />
-              <el-button
-                v-if="settingsStore.settings.accentColor"
-                link
-                type="primary"
-                @click="patch({ accentColor: '' }, t('settings.saved'))"
-              >
-                {{ t('settings.accentReset') }}
-              </el-button>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><MagicStick /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.accentColor') }}</span>
+                  <span class="row-desc">{{ t('settings.accentDesc') }}</span>
+                </div>
+                <div class="row-control">
+                  <div class="accent-row">
+                    <el-color-picker
+                      :model-value="settingsStore.settings.accentColor || ''"
+                      @update:model-value="patch({ accentColor: ($event as string) || '' }, '')"
+                    />
+                    <el-button
+                      v-if="settingsStore.settings.accentColor"
+                      link
+                      type="primary"
+                      @click="patch({ accentColor: '' }, t('settings.saved'))"
+                    >
+                      {{ t('settings.accentReset') }}
+                    </el-button>
+                  </div>
+                </div>
+              </div>
             </div>
-          </el-form-item>
+          </section>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.glassFx') }}<InfoTip :content="t('settings.glassFxTip')"
-            /></template>
-            <div class="blur-row">
-              <el-slider
-                v-model="frostDraft"
-                :min="0"
-                :max="FROST_MAX"
-                :step="1"
-                class="set-slider"
-                @input="previewFrost"
-                @change="commitFrost"
-              />
-              <span class="blur-val">{{ frostDraft }}%</span>
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.groupLangLayout') }}</h3>
+            <div class="group-card">
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><ChatLineSquare /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.language') }}</span>
+                  <span class="row-desc">{{ t('settings.languageDesc') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-radio-group
+                    :model-value="settingsStore.settings.locale"
+                    @update:model-value="onLocaleChange($event as 'zh' | 'en')"
+                  >
+                    <el-radio-button value="zh">{{ t('settings.langZh') }}</el-radio-button>
+                    <el-radio-button value="en">{{ t('settings.langEn') }}</el-radio-button>
+                  </el-radio-group>
+                </div>
+              </div>
             </div>
-          </el-form-item>
-
-          <el-form-item :label="t('settings.language')">
-            <el-radio-group
-              :model-value="settingsStore.settings.locale"
-              @update:model-value="onLocaleChange($event as 'zh' | 'en')"
-            >
-              <el-radio-button value="zh">{{ t('settings.langZh') }}</el-radio-button>
-              <el-radio-button value="en">{{ t('settings.langEn') }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-
-          <!-- One row, four edges: 顶部 = 经典布局, 左侧/底部/右侧 = 效率布局的图标栏停靠位. -->
-          <el-form-item>
-            <template #label
-              >{{ t('settings.layoutMode') }}<InfoTip :content="t('settings.layoutModeTip')"
-            /></template>
-            <el-radio-group
-              :model-value="dock"
-              @update:model-value="onDockChange($event as 'top' | 'left' | 'bottom' | 'right')"
-            >
-              <el-radio-button value="top">{{ t('settings.dockTop') }}</el-radio-button>
-              <el-radio-button value="left">{{ t('settings.sidebarPosLeft') }}</el-radio-button>
-              <el-radio-button value="bottom">{{ t('settings.sidebarPosBottom') }}</el-radio-button>
-              <el-radio-button value="right">{{ t('settings.sidebarPosRight') }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-        </el-form>
+          </section>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane name="behavior">
@@ -826,79 +785,117 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             ><el-icon><Operation /></el-icon>{{ t('settings.tabBehavior') }}</span
           >
         </template>
-        <el-form label-position="left" size="small">
-          <el-form-item>
-            <template #label
-              >{{ t('settings.minimizeToTray') }}<InfoTip :content="t('settings.minimizeTip')"
-            /></template>
-            <el-switch
-              :model-value="settingsStore.settings.minimizeToTray"
-              @update:model-value="
-                patch(
-                  { minimizeToTray: $event as boolean },
-                  $event ? t('settings.minimizeOn') : t('settings.minimizeOff')
-                )
-              "
-            />
-          </el-form-item>
+        <div class="view-groups">
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.groupBehavior') }}</h3>
+            <div class="group-card">
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Postcard /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.minimizeToTray') }}</span>
+                  <span class="row-desc">{{ t('settings.minimizeTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.minimizeToTray"
+                    @update:model-value="
+                      patch(
+                        { minimizeToTray: $event as boolean },
+                        $event ? t('settings.minimizeOn') : t('settings.minimizeOff')
+                      )
+                    "
+                  />
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.launchAtStartup')
-              }}<InfoTip :content="t('settings.launchAtStartupTip')" />
-            </template>
-            <el-switch
-              :model-value="settingsStore.settings.launchAtStartup"
-              @update:model-value="patch({ launchAtStartup: $event as boolean })"
-            />
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><SwitchButton /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.launchAtStartup') }}</span>
+                  <span class="row-desc">{{ t('settings.launchAtStartupTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.launchAtStartup"
+                    @update:model-value="patch({ launchAtStartup: $event as boolean })"
+                  />
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.crashAutoRestart')
-              }}<InfoTip :content="t('settings.crashAutoRestartTip')" />
-            </template>
-            <el-switch
-              :model-value="settingsStore.settings.crashAutoRestart"
-              @update:model-value="patch({ crashAutoRestart: $event as boolean })"
-            />
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Refresh /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.crashAutoRestart') }}</span>
+                  <span class="row-desc">{{ t('settings.crashAutoRestartTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.crashAutoRestart"
+                    @update:model-value="patch({ crashAutoRestart: $event as boolean })"
+                  />
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.rememberWindow')
-              }}<InfoTip :content="t('settings.rememberWindowTip')"
-            /></template>
-            <el-switch
-              :model-value="settingsStore.settings.rememberWindowBounds !== false"
-              @update:model-value="patch({ rememberWindowBounds: $event as boolean })"
-            />
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Position /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.rememberWindow') }}</span>
+                  <span class="row-desc">{{ t('settings.rememberWindowTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.rememberWindowBounds !== false"
+                    @update:model-value="patch({ rememberWindowBounds: $event as boolean })"
+                  />
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.reduceMotion') }}<InfoTip :content="t('settings.reduceMotionTip')"
-            /></template>
-            <el-radio-group
-              :model-value="settingsStore.settings.reduceMotion || 'auto'"
-              @update:model-value="patch({ reduceMotion: $event as 'auto' | 'on' | 'off' })"
-            >
-              <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
-              <el-radio-button value="on">{{ t('settings.alwaysOn') }}</el-radio-button>
-              <el-radio-button value="off">{{ t('settings.alwaysOff') }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Mouse /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.reduceMotion') }}</span>
+                  <span class="row-desc">{{ t('settings.reduceMotionTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-radio-group
+                    :model-value="settingsStore.settings.reduceMotion || 'auto'"
+                    @update:model-value="patch({ reduceMotion: $event as 'auto' | 'on' | 'off' })"
+                  >
+                    <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
+                    <el-radio-button value="on">{{ t('settings.alwaysOn') }}</el-radio-button>
+                    <el-radio-button value="off">{{ t('settings.alwaysOff') }}</el-radio-button>
+                  </el-radio-group>
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.marqueeBorder') }}<InfoTip :content="t('settings.marqueeBorderTip')"
-            /></template>
-            <el-switch
-              :model-value="settingsStore.settings.marqueeBorder !== false"
-              @update:model-value="patch({ marqueeBorder: $event as boolean })"
-            />
-          </el-form-item>
-        </el-form>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Select /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.marqueeBorder') }}</span>
+                  <span class="row-desc">{{ t('settings.marqueeBorderTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.marqueeBorder !== false"
+                    @update:model-value="patch({ marqueeBorder: $event as boolean })"
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
       </el-tab-pane>
 
       <!-- 提醒告警：托盘、系统通知、内存阈值、外部地址去哪打开——都是“会主动打扰到人”的出口，从行为规范里拆出来。 -->
@@ -908,149 +905,217 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             ><el-icon><Bell /></el-icon>{{ t('settings.tabAlerts') }}</span
           >
         </template>
-        <el-form label-position="left" size="small">
-          <el-form-item>
-            <template #label
-              >{{ t('settings.systemNotifications')
-              }}<InfoTip :content="t('settings.systemNotificationsTip')" />
-            </template>
-            <el-switch
-              :model-value="settingsStore.settings.systemNotifications"
-              @update:model-value="patch({ systemNotifications: $event as boolean })"
-            />
-          </el-form-item>
+        <div class="view-groups">
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.groupAlerts') }}</h3>
+            <div class="group-card">
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Bell /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.systemNotifications') }}</span>
+                  <span class="row-desc">{{ t('settings.systemNotificationsTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.systemNotifications"
+                    @update:model-value="patch({ systemNotifications: $event as boolean })"
+                  />
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.startDoneNotifications')
-              }}<InfoTip :content="t('settings.startDoneNotificationsTip')" />
-            </template>
-            <el-switch
-              :model-value="settingsStore.settings.startDoneNotifications !== false"
-              @update:model-value="patch({ startDoneNotifications: $event as boolean })"
-            />
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><BellFilled /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.startDoneNotifications') }}</span>
+                  <span class="row-desc">{{ t('settings.startDoneNotificationsTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.startDoneNotifications !== false"
+                    @update:model-value="patch({ startDoneNotifications: $event as boolean })"
+                  />
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.diskLowNotifications')
-              }}<InfoTip :content="t('settings.diskLowNotificationsTip')" />
-            </template>
-            <el-switch
-              :model-value="settingsStore.settings.diskLowNotifications !== false"
-              @update:model-value="patch({ diskLowNotifications: $event as boolean })"
-            />
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Odometer /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.diskLowNotifications') }}</span>
+                  <span class="row-desc">{{ t('settings.diskLowNotificationsTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.diskLowNotifications !== false"
+                    @update:model-value="patch({ diskLowNotifications: $event as boolean })"
+                  />
+                </div>
+              </div>
 
-          <!-- #11: expose the container itself as an MCP server for external agents to drive. -->
-          <el-form-item>
-            <template #label
-              >{{ t('settings.containerMcpServer')
-              }}<InfoTip :content="t('settings.containerMcpServerTip')" />
-            </template>
-            <el-switch
-              :model-value="settingsStore.settings.containerMcpServer"
-              :loading="containerMcpBusy"
-              @update:model-value="toggleContainerMcp"
-            />
-          </el-form-item>
+              <!-- #11: expose the container itself as an MCP server for external agents to drive. -->
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Connection /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.containerMcpServer') }}</span>
+                  <span class="row-desc">{{ t('settings.containerMcpServerTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-switch
+                    :model-value="settingsStore.settings.containerMcpServer"
+                    :loading="containerMcpBusy"
+                    @update:model-value="toggleContainerMcp"
+                  />
+                </div>
+              </div>
 
-          <!-- #1 autopilot: every dispatch control lives on the task board's autopilot-bar now. -->
+              <!-- #1 autopilot: every dispatch control lives on the task board's autopilot-bar now. -->
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Clock /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.cliIdleStop') }}</span>
+                  <span class="row-desc">{{ t('settings.cliIdleStopTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-input-number
+                    :model-value="
+                      settingsStore.settings.cliIdleStopMinutes ?? CLI_IDLE_STOP_DEFAULT_MINUTES
+                    "
+                    :min="0"
+                    :max="240"
+                    controls-position="right"
+                    @update:model-value="
+                      patch({ cliIdleStopMinutes: Math.max(0, Number($event) || 0) })
+                    "
+                  />
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.cliIdleStop') }}<InfoTip :content="t('settings.cliIdleStopTip')" />
-            </template>
-            <el-input-number
-              :model-value="
-                settingsStore.settings.cliIdleStopMinutes ?? CLI_IDLE_STOP_DEFAULT_MINUTES
-              "
-              :min="0"
-              :max="240"
-              controls-position="right"
-              @update:model-value="patch({ cliIdleStopMinutes: Math.max(0, Number($event) || 0) })"
-            />
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Odometer /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.memWarnMb') }}</span>
+                  <span class="row-desc">{{ t('settings.memWarnMbTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-input-number
+                    v-model="memWarnDraft"
+                    :min="MEM_WARN_MIN_MB"
+                    :max="MEM_WARN_MAX_MB"
+                    :step="50"
+                    controls-position="right"
+                    class="mem-input"
+                    @change="patch({ memWarnMb: memWarnDraft }, '')"
+                  />
+                  <span class="blur-val">MB</span>
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.memWarnMb') }}<InfoTip :content="t('settings.memWarnMbTip')"
-            /></template>
-            <div class="blur-row">
-              <el-slider
-                v-model="memWarnDraft"
-                :min="MEM_WARN_MIN_MB"
-                :max="MEM_WARN_MAX_MB"
-                :step="50"
-                class="set-slider"
-                @change="patch({ memWarnMb: memWarnDraft }, '')"
-              />
-              <span class="blur-val">{{ memWarnDraft }} MB</span>
+              <!-- B1: what the container does once a page sits over that budget for a while. -->
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Warning /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.memLimitAction') }}</span>
+                  <span class="row-desc">{{ t('settings.memLimitActionTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-radio-group
+                    :model-value="settingsStore.settings.memLimitAction || 'notify'"
+                    @update:model-value="patch({ memLimitAction: $event as 'notify' | 'restart' })"
+                  >
+                    <el-radio-button value="notify">{{
+                      t('settings.memLimitNotify')
+                    }}</el-radio-button>
+                    <el-radio-button value="restart">{{
+                      t('settings.memLimitRestart')
+                    }}</el-radio-button>
+                  </el-radio-group>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Postcard /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.trayPageEntries') }}</span>
+                  <span class="row-desc">{{ t('settings.trayPageEntriesTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-radio-group
+                    :model-value="settingsStore.settings.trayPageEntries || 'all'"
+                    @update:model-value="
+                      patch({ trayPageEntries: $event as 'all' | 'running' | 'off' })
+                    "
+                  >
+                    <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
+                    <el-radio-button value="running">{{
+                      t('settings.trayRunning')
+                    }}</el-radio-button>
+                    <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
+                  </el-radio-group>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Bell /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.trayBadge') }}</span>
+                  <span class="row-desc">{{ t('settings.trayBadgeTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-radio-group
+                    :model-value="settingsStore.settings.trayBadge || 'all'"
+                    @update:model-value="patch({ trayBadge: $event as 'all' | 'alert' | 'off' })"
+                  >
+                    <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
+                    <el-radio-button value="alert">{{
+                      t('settings.trayAlertOnly')
+                    }}</el-radio-button>
+                    <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
+                  </el-radio-group>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Position /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.externalOpenMode') }}</span>
+                  <span class="row-desc">{{ t('settings.externalOpenModeTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-radio-group
+                    :model-value="settingsStore.settings.openExternalIn"
+                    @update:model-value="
+                      patch({ openExternalIn: $event as 'embedded' | 'system-browser' })
+                    "
+                  >
+                    <el-radio-button value="embedded">{{ t('settings.embedded') }}</el-radio-button>
+                    <el-radio-button value="system-browser">{{
+                      t('settings.systemBrowser')
+                    }}</el-radio-button>
+                  </el-radio-group>
+                </div>
+              </div>
             </div>
-          </el-form-item>
-
-          <!-- B1: what the container does once a page sits over that budget for a while. -->
-          <el-form-item>
-            <template #label
-              >{{ t('settings.memLimitAction')
-              }}<InfoTip :content="t('settings.memLimitActionTip')"
-            /></template>
-            <el-radio-group
-              :model-value="settingsStore.settings.memLimitAction || 'notify'"
-              @update:model-value="patch({ memLimitAction: $event as 'notify' | 'restart' })"
-            >
-              <el-radio-button value="notify">{{ t('settings.memLimitNotify') }}</el-radio-button>
-              <el-radio-button value="restart">{{ t('settings.memLimitRestart') }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-
-          <el-form-item>
-            <template #label
-              >{{ t('settings.trayPageEntries')
-              }}<InfoTip :content="t('settings.trayPageEntriesTip')"
-            /></template>
-            <el-radio-group
-              :model-value="settingsStore.settings.trayPageEntries || 'all'"
-              @update:model-value="patch({ trayPageEntries: $event as 'all' | 'running' | 'off' })"
-            >
-              <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
-              <el-radio-button value="running">{{ t('settings.trayRunning') }}</el-radio-button>
-              <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-
-          <el-form-item>
-            <template #label
-              >{{ t('settings.trayBadge') }}<InfoTip :content="t('settings.trayBadgeTip')"
-            /></template>
-            <el-radio-group
-              :model-value="settingsStore.settings.trayBadge || 'all'"
-              @update:model-value="patch({ trayBadge: $event as 'all' | 'alert' | 'off' })"
-            >
-              <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
-              <el-radio-button value="alert">{{ t('settings.trayAlertOnly') }}</el-radio-button>
-              <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-
-          <el-form-item>
-            <template #label
-              >{{ t('settings.externalOpenMode')
-              }}<InfoTip :content="t('settings.externalOpenModeTip')"
-            /></template>
-            <el-radio-group
-              :model-value="settingsStore.settings.openExternalIn"
-              @update:model-value="
-                patch({ openExternalIn: $event as 'embedded' | 'system-browser' })
-              "
-            >
-              <el-radio-button value="embedded">{{ t('settings.embedded') }}</el-radio-button>
-              <el-radio-button value="system-browser">{{
-                t('settings.systemBrowser')
-              }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-        </el-form>
+          </section>
+        </div>
       </el-tab-pane>
 
       <!-- C1: 快捷键 —— every action the shell binds, recorded straight into settings.keybindings. -->
@@ -1060,54 +1125,68 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             ><el-icon><Key /></el-icon>{{ t('settings.tabKeys') }}</span
           >
         </template>
-        <div class="keys-head">
-          <span class="keys-title"
-            >{{ t('settings.keysTitle') }}<InfoTip :content="t('settings.keysTip')"
-          /></span>
-          <el-button size="small" @click="resetKeybindings">{{
-            t('settings.keysReset')
-          }}</el-button>
-        </div>
-        <div v-for="row in keyRows" :key="row.action" class="key-row">
-          <span class="key-name">{{ row.name }}</span>
-          <el-input
-            class="key-input"
-            :class="{ 'key-conflict': row.conflictWith }"
-            :model-value="row.text"
-            :placeholder="
-              recording === row.action ? t('settings.keysRecord') : t('settings.keysNone')
-            "
-            readonly
-            @focus="recording = row.action"
-            @blur="recording = null"
-            @keydown="onRecordKeydown(row.action, $event)"
-          />
-          <!-- A customized row gets "restore default" back; a stock row keeps "clear"
-               (unbind). The old clear-on-custom rows left the action unbound with no way
-               back to its default short of the whole-table reset. -->
-          <el-tooltip
-            v-if="row.custom"
-            :content="t('settings.keysReset')"
-            placement="top"
-            popper-class="dsh-tip-popper"
-          >
-            <el-button size="small" text type="primary" @click="restoreKeybinding(row.action)">
-              {{ t('settings.keysReset') }}
-            </el-button>
-          </el-tooltip>
-          <el-button
-            v-else
-            size="small"
-            text
-            :disabled="!row.text"
-            @click="saveKeybinding(row.action, '')"
-          >
-            {{ t('settings.keysClear') }}
-          </el-button>
-          <span v-if="row.conflictWith" class="tip keys-err">{{
-            t('settings.keysConflict', { other: row.conflictWith })
-          }}</span>
-          <span v-else-if="row.custom" class="tip">{{ row.defaultText }}</span>
+        <div class="view-groups">
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.groupKeys') }}</h3>
+            <div class="keys-panel">
+              <div class="keys-head">
+                <span class="keys-title"
+                  >{{ t('settings.keysTitle') }}<InfoTip :content="t('settings.keysTip')"
+                /></span>
+                <el-button size="small" @click="resetKeybindings">{{
+                  t('settings.keysReset')
+                }}</el-button>
+              </div>
+              <div class="keys-card">
+                <div v-for="row in keyRows" :key="row.action" class="key-row">
+                  <span class="key-name">{{ row.name }}</span>
+                  <el-input
+                    class="key-input"
+                    :class="{ 'key-conflict': row.conflictWith }"
+                    :model-value="row.text"
+                    :placeholder="
+                      recording === row.action ? t('settings.keysRecord') : t('settings.keysNone')
+                    "
+                    readonly
+                    @focus="recording = row.action"
+                    @blur="recording = null"
+                    @keydown="onRecordKeydown(row.action, $event)"
+                  />
+                  <!-- A customized row gets "restore default" back; a stock row keeps "clear"
+                   (unbind). The old clear-on-custom rows left the action unbound with no way
+                   back to its default short of the whole-table reset. -->
+                  <el-tooltip
+                    v-if="row.custom"
+                    :content="t('settings.keysReset')"
+                    placement="top"
+                    popper-class="dsh-tip-popper"
+                  >
+                    <el-button
+                      size="small"
+                      text
+                      type="primary"
+                      @click="restoreKeybinding(row.action)"
+                    >
+                      {{ t('settings.keysReset') }}
+                    </el-button>
+                  </el-tooltip>
+                  <el-button
+                    v-else
+                    size="small"
+                    text
+                    :disabled="!row.text"
+                    @click="saveKeybinding(row.action, '')"
+                  >
+                    {{ t('settings.keysClear') }}
+                  </el-button>
+                  <span v-if="row.conflictWith" class="tip keys-err">{{
+                    t('settings.keysConflict', { other: row.conflictWith })
+                  }}</span>
+                  <span v-else-if="row.custom" class="tip">{{ row.defaultText }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </el-tab-pane>
 
@@ -1117,45 +1196,54 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             ><el-icon><Download /></el-icon>{{ t('settings.tabDownload') }}</span
           >
         </template>
-        <el-form label-position="left" size="small">
-          <el-form-item>
-            <template #label
-              >{{ t('settings.downloadDir')
-              }}<InfoTip
-                :content="
-                  t('settings.downloadDirTip', {
-                    dir: downloadDirInfo?.downloadDir || t('settings.envRootLoaded')
-                  })
-                "
-            /></template>
-            <div class="env-root-row">
-              <el-input
-                v-model="downloadDirDraft"
-                :placeholder="
-                  downloadDirInfo
-                    ? `${t('settings.downloadDirFollow')}（${downloadDirInfo.defaultDir}）`
-                    : t('settings.downloadDirFollow')
-                "
-                class="set-ctl"
-                clearable
-                @change="saveDownloadDir(String($event || ''))"
-              />
-              <el-button size="small" @click="browseDownloadDir">{{
-                t('common.browse')
-              }}</el-button>
-              <div v-if="downloadDirInfo" class="row-status">
-                {{ t('settings.currentDownloadDir') }}：{{ downloadDirInfo.downloadDir }}
-                <span class="row-status-tag">
-                  {{
-                    downloadDirInfo.custom
-                      ? t('settings.sourcePinned')
-                      : t('settings.sourceFollowSystem')
-                  }}
-                </span>
+        <div class="view-groups">
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.groupDownload') }}</h3>
+            <div class="group-card">
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Download /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.downloadDir') }}</span>
+                  <span class="row-desc">{{
+                    t('settings.downloadDirTip', {
+                      dir: downloadDirInfo?.downloadDir || t('settings.envRootLoaded')
+                    })
+                  }}</span>
+                </div>
+                <div class="row-control">
+                  <div class="env-root-row">
+                    <el-input
+                      v-model="downloadDirDraft"
+                      :placeholder="
+                        downloadDirInfo
+                          ? `${t('settings.downloadDirFollow')}（${downloadDirInfo.defaultDir}）`
+                          : t('settings.downloadDirFollow')
+                      "
+                      class="set-ctl"
+                      clearable
+                      @change="saveDownloadDir(String($event || ''))"
+                    />
+                    <el-button size="small" @click="browseDownloadDir">{{
+                      t('common.browse')
+                    }}</el-button>
+                    <div v-if="downloadDirInfo" class="row-status">
+                      {{ t('settings.currentDownloadDir') }}：{{ downloadDirInfo.downloadDir }}
+                      <span class="row-status-tag">
+                        {{
+                          downloadDirInfo.custom
+                            ? t('settings.sourcePinned')
+                            : t('settings.sourceFollowSystem')
+                        }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-          </el-form-item>
-        </el-form>
+          </section>
+        </div>
       </el-tab-pane>
 
       <!-- #26: 网络镜像。一个设置决定容器带动的所有安装去哪拉包。 -->
@@ -1165,87 +1253,115 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             ><el-icon><Connection /></el-icon>{{ t('settings.tabNetwork') }}</span
           >
         </template>
-        <el-form label-position="left" size="small">
-          <el-form-item>
-            <template #label
-              >{{ t('settings.registryPick') }}<InfoTip :content="t('settings.registryTip')"
-            /></template>
-            <div class="reg-list">
-              <div
-                v-for="c in REGISTRY_CANDIDATES"
-                :key="c.id"
-                class="reg-row"
-                :class="{ on: isCurrent(c.url) }"
-              >
-                <span class="reg-name">{{ labelOf(c.label) }}</span>
-                <span class="reg-url">{{ c.url }}</span>
-                <span class="reg-ms" :class="probeClass(c.id)">{{ msText(c.id) }}</span>
-                <el-button
-                  v-if="rowHasBest(c.url) && !isCurrent(c.url)"
-                  class="reg-act"
-                  size="small"
-                  type="primary"
-                  plain
-                  @click="useRegistry(c.url)"
-                >
-                  {{ t('settings.registryUse') }}
-                </el-button>
-                <el-button
-                  class="reg-act"
-                  size="small"
-                  :disabled="isCurrent(c.url)"
-                  @click="useRegistry(c.url)"
-                >
-                  {{ isCurrent(c.url) ? t('settings.registryCurrent') : t('settings.registryUse') }}
-                </el-button>
+        <div class="view-groups">
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.groupNetwork') }}</h3>
+            <div class="group-card">
+              <div class="setting-row setting-row--stack">
+                <span class="row-icon"
+                  ><el-icon><Connection /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.registryPick') }}</span>
+                  <span class="row-desc">{{ t('settings.registryTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <div class="reg-list">
+                    <div
+                      v-for="c in REGISTRY_CANDIDATES"
+                      :key="c.id"
+                      class="reg-row"
+                      :class="{ on: isCurrent(c.url) }"
+                    >
+                      <span class="reg-name">{{ labelOf(c.label) }}</span>
+                      <span class="reg-url">{{ c.url }}</span>
+                      <span class="reg-ms" :class="probeClass(c.id)">{{ msText(c.id) }}</span>
+                      <el-button
+                        v-if="rowHasBest(c.url) && !isCurrent(c.url)"
+                        class="reg-act"
+                        size="small"
+                        type="primary"
+                        plain
+                        @click="useRegistry(c.url)"
+                      >
+                        {{ t('settings.registryUse') }}
+                      </el-button>
+                      <el-button
+                        class="reg-act"
+                        size="small"
+                        :disabled="isCurrent(c.url)"
+                        @click="useRegistry(c.url)"
+                      >
+                        {{
+                          isCurrent(c.url) ? t('settings.registryCurrent') : t('settings.registryUse')
+                        }}
+                      </el-button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Odometer /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.registryProbe') }}</span>
+                  <span class="row-desc">{{ t('settings.registryProbeTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <div class="act-row act-end">
+                    <el-button size="small" :loading="probing" @click="probeAllRegistries">
+                      {{ t('settings.registryProbeBtn') }}
+                    </el-button>
+                    <el-button
+                      v-if="bestRegistry"
+                      size="small"
+                      type="primary"
+                      :disabled="isCurrent(bestRegistry.url)"
+                      @click="useRegistry(bestRegistry.url)"
+                    >
+                      {{
+                        t('settings.registryUseBest', { name: bestName, ms: bestRegistry.ms ?? 0 })
+                      }}
+                    </el-button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Edit /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.registryCustom') }}</span>
+                  <span class="row-desc">{{ t('settings.registryCustomTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <div class="act-row">
+                    <el-input
+                      v-model="customRegistry"
+                      :placeholder="NPM_REGISTRY_DEFAULT"
+                      clearable
+                      @change="saveCustomRegistry(String($event || ''))"
+                    />
+                    <el-button
+                      size="small"
+                      type="primary"
+                      plain
+                      :disabled="
+                        customRegistry.trim() === (settingsStore.settings.npmRegistry || '')
+                      "
+                      @click="saveCustomRegistry(customRegistry)"
+                    >
+                      {{ t('common.save') }}
+                    </el-button>
+                  </div>
+                </div>
               </div>
             </div>
-          </el-form-item>
-
-          <el-form-item>
-            <template #label
-              >{{ t('settings.registryProbe') }}<InfoTip :content="t('settings.registryProbeTip')"
-            /></template>
-            <div class="act-row act-end">
-              <el-button size="small" :loading="probing" @click="probeAllRegistries">
-                {{ t('settings.registryProbeBtn') }}
-              </el-button>
-              <el-button
-                v-if="bestRegistry"
-                size="small"
-                type="primary"
-                :disabled="isCurrent(bestRegistry.url)"
-                @click="useRegistry(bestRegistry.url)"
-              >
-                {{ t('settings.registryUseBest', { name: bestName, ms: bestRegistry.ms ?? 0 }) }}
-              </el-button>
-            </div>
-          </el-form-item>
-
-          <el-form-item>
-            <template #label
-              >{{ t('settings.registryCustom')
-              }}<InfoTip :content="t('settings.registryCustomTip')"
-            /></template>
-            <div class="act-row">
-              <el-input
-                v-model="customRegistry"
-                :placeholder="NPM_REGISTRY_DEFAULT"
-                clearable
-                @change="saveCustomRegistry(String($event || ''))"
-              />
-              <el-button
-                size="small"
-                type="primary"
-                plain
-                :disabled="customRegistry.trim() === (settingsStore.settings.npmRegistry || '')"
-                @click="saveCustomRegistry(customRegistry)"
-              >
-                {{ t('common.save') }}
-              </el-button>
-            </div>
-          </el-form-item>
-        </el-form>
+          </section>
+        </div>
       </el-tab-pane>
 
       <!-- #26: 隐私数据。所有 <webview> 共用一个 session，所以这里说清楚每次清理的范围。 -->
@@ -1255,135 +1371,161 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
             ><el-icon><Lock /></el-icon>{{ t('settings.tabPrivacy') }}</span
           >
         </template>
-        <el-form label-position="left" size="small">
-          <el-form-item class="section-item">
-            <template #label
-              ><span class="section-title">{{ t('settings.secSession') }}</span>
-            </template>
-          </el-form-item>
+        <div class="view-groups">
+          <section class="view-group">
+            <h3 class="group-caption">{{ t('settings.secSession') }}</h3>
+            <div class="group-card">
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><DataLine /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.webDataTitle') }}</span>
+                  <span class="row-desc">{{ t('settings.webDataTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <span class="wd-size">{{
+                    t('settings.webDataTotal', { size: webDataTotal })
+                  }}</span>
+                  <el-button size="small" :loading="webDataLoading" @click="loadWebData">
+                    {{ t('common.refresh') }}
+                  </el-button>
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.webDataTitle') }}<InfoTip :content="t('settings.webDataTip')"
-            /></template>
-            <div class="act-row">
-              <span class="wd-size">
-                {{ t('settings.webDataTotal', { size: webDataTotal }) }}
-              </span>
-              <el-button size="small" :loading="webDataLoading" @click="loadWebData">
-                {{ t('common.refresh') }}
-              </el-button>
-            </div>
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Coin /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.webDataCache') }}</span>
+                  <span class="row-desc">{{ t('settings.webDataCacheTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <span class="wd-size">{{ sizeText(webData?.cacheBytes ?? 0) }}</span>
+                  <el-button
+                    size="small"
+                    :loading="webDataBusy === 'cache'"
+                    @click="clearWeb('cache')"
+                  >
+                    {{ t('settings.webDataClear') }}
+                  </el-button>
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.webDataCache') }}<InfoTip :content="t('settings.webDataCacheTip')"
-            /></template>
-            <div class="act-row">
-              <span class="wd-size">{{ sizeText(webData?.cacheBytes ?? 0) }}</span>
-              <el-button size="small" :loading="webDataBusy === 'cache'" @click="clearWeb('cache')">
-                {{ t('settings.webDataClear') }}
-              </el-button>
-            </div>
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Files /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.webDataStorage') }}</span>
+                  <span class="row-desc">{{ t('settings.webDataStorageTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <span class="wd-size">{{ sizeText(webData?.storageBytes ?? 0) }}</span>
+                  <el-button
+                    size="small"
+                    :loading="webDataBusy === 'storage'"
+                    @click="clearWeb('storage', undefined, 'settings.webDataStorageConfirm')"
+                  >
+                    {{ t('settings.webDataClear') }}
+                  </el-button>
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.webDataStorage')
-              }}<InfoTip :content="t('settings.webDataStorageTip')"
-            /></template>
-            <div class="act-row">
-              <span class="wd-size">{{ sizeText(webData?.storageBytes ?? 0) }}</span>
-              <el-button
-                size="small"
-                :loading="webDataBusy === 'storage'"
-                @click="clearWeb('storage', undefined, 'settings.webDataStorageConfirm')"
-              >
-                {{ t('settings.webDataClear') }}
-              </el-button>
-            </div>
-          </el-form-item>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Key /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.webDataCookies') }}</span>
+                  <span class="row-desc">{{ t('settings.webDataCookiesTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <span class="wd-size">
+                    {{ t('settings.webDataCookieCount', { n: webData?.totalCookies ?? 0 }) }}
+                  </span>
+                  <el-button
+                    size="small"
+                    :loading="webDataBusy === 'cookies'"
+                    :disabled="!webData?.totalCookies"
+                    @click="clearWeb('cookies', undefined, 'settings.webDataCookieConfirm')"
+                  >
+                    {{ t('settings.webDataClearAll') }}
+                  </el-button>
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.webDataCookies')
-              }}<InfoTip :content="t('settings.webDataCookiesTip')"
-            /></template>
-            <div class="act-row">
-              <span class="wd-size">
-                {{ t('settings.webDataCookieCount', { n: webData?.totalCookies ?? 0 }) }}
-              </span>
-              <el-button
-                size="small"
-                :loading="webDataBusy === 'cookies'"
-                :disabled="!webData?.totalCookies"
-                @click="clearWeb('cookies', undefined, 'settings.webDataCookieConfirm')"
-              >
-                {{ t('settings.webDataClearAll') }}
-              </el-button>
-            </div>
-          </el-form-item>
-
-          <el-form-item>
-            <template #label
-              >{{ t('settings.webDataPerSite')
-              }}<InfoTip :content="t('settings.webDataPerSiteTip')"
-            /></template>
-            <div v-if="webData?.cookieDomains.length" class="site-clear-row">
-              <el-select
-                v-model="siteClear"
-                class="site-clear"
-                size="small"
-                filterable
-                :loading="webDataBusy.startsWith('cookies:')"
-                :placeholder="t('settings.webDataPerSitePick')"
-              >
-                <el-option
-                  v-for="d in webData.cookieDomains"
-                  :key="d.domain"
-                  :label="d.domain"
-                  :value="d.domain"
-                >
-                  <div class="opt-row">
-                    <span class="opt-site">{{ d.domain }}</span>
-                    <span class="opt-count">
-                      {{ t('settings.webDataCookieCount', { n: d.count }) }}
-                    </span>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Position /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.webDataPerSite') }}</span>
+                  <span class="row-desc">{{ t('settings.webDataPerSiteTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <div v-if="webData?.cookieDomains.length" class="site-clear-row">
+                    <el-select
+                      v-model="siteClear"
+                      class="site-clear"
+                      size="small"
+                      filterable
+                      :loading="webDataBusy.startsWith('cookies:')"
+                      :placeholder="t('settings.webDataPerSitePick')"
+                    >
+                      <el-option
+                        v-for="d in webData.cookieDomains"
+                        :key="d.domain"
+                        :label="d.domain"
+                        :value="d.domain"
+                      >
+                        <div class="opt-row">
+                          <span class="opt-site">{{ d.domain }}</span>
+                          <span class="opt-count">
+                            {{ t('settings.webDataCookieCount', { n: d.count }) }}
+                          </span>
+                        </div>
+                      </el-option>
+                    </el-select>
+                    <el-button
+                      size="small"
+                      type="danger"
+                      plain
+                      :disabled="!siteClear"
+                      :loading="webDataBusy.startsWith('cookies:')"
+                      @click="clearSelectedSite"
+                    >
+                      {{ t('settings.webDataClear') }}
+                    </el-button>
                   </div>
-                </el-option>
-              </el-select>
-              <el-button
-                size="small"
-                type="danger"
-                plain
-                :disabled="!siteClear"
-                :loading="webDataBusy.startsWith('cookies:')"
-                @click="clearSelectedSite"
-              >
-                {{ t('settings.webDataClear') }}
-              </el-button>
-            </div>
-            <div v-else class="env-empty">{{ t('settings.webDataNoCookies') }}</div>
-          </el-form-item>
+                  <div v-else class="env-empty">{{ t('settings.webDataNoCookies') }}</div>
+                </div>
+              </div>
 
-          <el-form-item>
-            <template #label
-              >{{ t('settings.webDataAll') }}<InfoTip :content="t('settings.webDataAllTip')"
-            /></template>
-            <div class="act-row act-end">
-              <el-button
-                size="small"
-                type="danger"
-                plain
-                :loading="webDataBusy === 'all'"
-                @click="clearWeb('all', undefined, 'settings.webDataAllConfirm')"
-              >
-                {{ t('settings.webDataAllBtn') }}
-              </el-button>
+              <div class="setting-row">
+                <span class="row-icon"
+                  ><el-icon><Lock /></el-icon
+                ></span>
+                <div class="row-label">
+                  <span class="row-title">{{ t('settings.webDataAll') }}</span>
+                  <span class="row-desc">{{ t('settings.webDataAllTip') }}</span>
+                </div>
+                <div class="row-control">
+                  <el-button
+                    size="small"
+                    type="danger"
+                    plain
+                    :loading="webDataBusy === 'all'"
+                    @click="clearWeb('all', undefined, 'settings.webDataAllConfirm')"
+                  >
+                    {{ t('settings.webDataAllBtn') }}
+                  </el-button>
+                </div>
+              </div>
             </div>
-          </el-form-item>
-        </el-form>
+          </section>
+        </div>
       </el-tab-pane>
 
       <!-- #8: 存储。容器占用磁盘的分项仪表盘；只有 webcache / logs 两行可在此清理。 -->
@@ -1559,14 +1701,18 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   /* Base rule caps this with `!important`; match the weight so the top variant truly lifts it. */
   max-height: none !important;
 }
-/* Single-pane (IM sidebar): drop the rail so the one shown tab fills the column. */
+/* Single-pane (unified console): drop the rail and the fixed-height cap so the one shown tab
+   fills the console column. The base rule caps `.el-tabs__content` with `!important` and forces
+   `overflow-y: auto`; match that weight here, otherwise the panel stays stuck in a 520px scroll
+   box instead of running the full height (the console body owns scrolling). */
 .settings-panel.single-pane :deep(.settings-tabs > .el-tabs__header) {
   display: none;
 }
 .settings-panel.single-pane :deep(.el-tabs__content) {
-  max-height: none;
+  max-height: none !important;
   min-height: 0;
   padding: 0;
+  overflow: visible !important;
 }
 /* EP 对竖排 tab 默认是 `justify-content:flex-end; text-align:right`（选择器
    `.el-tabs--left .el-tabs__item.is-left`，特异性 0,3,0），单类 :deep 规则压不过，
@@ -1588,6 +1734,107 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   padding: 6px 8px 8px 6px;
 }
 
+/* ---- 界面视图 tab: captioned cards, title + persistent desc -------------------
+   The mockup renders the view tab as two rounded cards, each preceded by a small grey
+   caption; every row is a two-line label (bold title + dimmer description) on the left and
+   the control on the right, split by a hairline. The controls themselves (pills / select /
+   color dot) are themed by UnifiedConsole's `:deep` capsule rules, so only the chrome lives
+   here — kept in this component so the console's shared el-form styling stays put for the
+   other tabs. */
+.view-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 2px;
+}
+.view-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.group-caption {
+  margin: 0;
+  padding-left: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.group-card {
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 22px;
+}
+.setting-row + .setting-row {
+  /* 参考图行与行之间是发丝虚线，不是实线：实线在长列表里把卡片切成表格，虚线更轻。 */
+  border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+/* Row-leading icon tile (reference look): a soft rounded square that gives every row a
+   visual anchor, so the eye scans titles instead of drifting across an undifferentiated list. */
+.row-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  font-size: 17px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 6%, var(--surface));
+  border: 1px solid var(--border);
+}
+.row-label {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.row-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.row-desc {
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-dim);
+  /* Keep the description a readable left column: without a cap, a long 行为规范 / 提醒警告 tip runs
+     one very wide line up to the right-hand control, which reads as an unbalanced row. Capping it
+     wraps the tip into a tidy block so text (left) and control (right) form two clear groups. The
+     界面视图 descs are short, so this leaves that tab visually unchanged. */
+  max-width: 62ch;
+}
+.row-control {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+/* The default-page select reads as a wide rounded rectangle in the mockup; keep it off the
+   shared 340px control width so the row stays balanced. */
+.setting-row .set-ctl {
+  width: 240px;
+}
+/* 主题模式下拉：只有三个短选项，收窄成与参考图一致的紧凑胶囊。 */
+.setting-row .theme-select {
+  width: 140px;
+}
+.theme-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ---- one control column, one rhythm ----
    Every standalone field used to carry its own inline pixel width (340px for selects and path
    inputs, 260px for sliders) while the list rows said 620px — a number wider than the column,
@@ -1596,8 +1843,9 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 .set-ctl {
   width: var(--settings-control-w);
 }
-.set-slider {
-  width: var(--settings-slider-w);
+/* 内存告警阈值：数字输入框取代旧滑条，宽度与主题下拉同一节奏。 */
+.settings-panel .mem-input {
+  width: 140px;
 }
 /* One control height across the panel: `size="small"` drew 24px boxes with 12px text, which is
    why the whole thing reads cramped. 28px is still compact but stops the 3-4 button rows from
@@ -1608,10 +1856,14 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 .settings-panel :deep(.el-select--small .el-select__wrapper) {
   min-height: 28px;
 }
-.settings-panel :deep(.el-radio-button--small .el-radio-button__inner) {
-  height: 28px;
-  padding: 0 12px;
-  line-height: 27px;
+/* Every segmented pill in this panel — 视图 (主题/语言, default size) and 行为规范 (减少动态,
+   size="small") — must render at the SAME height. The console owns the visual skin but leaves
+   font-size / line-height to Element Plus, and EP's default vs small differ, which is why the
+   behaviour tab's pills came out shorter. Pin them uniformly; drop the old fixed 28px height so
+   the console's symmetric padding alone defines a single shared height across every pill. */
+.settings-panel :deep(.el-radio-button__inner) {
+  font-size: 13px;
+  line-height: 1.2;
 }
 /* Where a value actually resolves to, printed in the row that sets it: it fills the wide-but-empty
    single-row tabs (下载 / 环境目录) with the one fact the ⓘ tooltip hides. */
@@ -1682,8 +1934,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 }
 
 /* #25 theme customization rows: align the control and its inline value/reset. */
-.accent-row,
-.blur-row {
+.accent-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1693,7 +1944,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   font-variant-numeric: tabular-nums;
   color: var(--text-dim);
   font-size: 12px;
-  min-width: 42px;
+  min-width: 24px;
 }
 
 .tip code {
@@ -1709,6 +1960,18 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   align-items: center;
   gap: 8px;
   width: var(--settings-row-w);
+}
+/* 外链下载：输入框随列伸展（浏览按钮贴其右），解析后的“当前目录”另起一行、用发丝虚线与控件行
+   分隔，避免和输入/按钮挤在一起。 */
+.env-root-row .set-ctl {
+  flex: 1 1 240px;
+  min-width: 0;
+  max-width: 420px;
+}
+.env-root-row .row-status {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
 }
 /* Rows carry their own inner padding so the hover wash and its inset ring never hug the label
    or the control. The radius lives here (not just on :hover) because a bordered box only reads as
@@ -1762,24 +2025,32 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 .reg-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
   width: var(--settings-row-w);
 }
 .reg-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px;
+  gap: 12px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   font-size: 12.5px;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.reg-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  background: var(--dsh-wash-soft);
 }
 .reg-row.on {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .reg-name {
-  min-width: 128px;
+  flex: none;
+  min-width: 96px;
   font-weight: 650;
   color: var(--text);
 }
@@ -1844,6 +2115,28 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   flex: 1;
   min-width: 0;
 }
+/* In a setting-row the control sits in a shrink-to-fit `.row-control`, so the 100% width the
+   el-form layout relied on would collapse to nothing. Give it a definite width there. */
+.settings-panel .setting-row .site-clear-row {
+  width: 300px;
+  max-width: 60vw;
+}
+/* 外链下载 / 网络镜像 改成卡片行后，输入框/按钮行同样落在 shrink-to-fit 的 .row-control 里，
+   旧的 el-form 靠 100% 撑开，这里给一个确定轨宽，避免塌成 0。 */
+.settings-panel .setting-row .env-root-row,
+.settings-panel .setting-row .act-row {
+  width: min(420px, 60vw);
+}
+/* 镜像列表较宽：让控件换行到标签下方的整行，图标+标题在上一行，列表独占整宽。 */
+.settings-panel .setting-row.setting-row--stack {
+  flex-wrap: wrap;
+}
+.settings-panel .setting-row.setting-row--stack .row-control {
+  flex: 1 1 100%;
+}
+.settings-panel .setting-row .reg-list {
+  width: 100%;
+}
 .opt-row {
   display: flex;
   align-items: center;
@@ -1864,29 +2157,41 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 }
 
 /* ---- C1 shortcut recorder ----
-   One four-track grid (name / binding / clear / status) so every row lines up with the panel's
-   shared label column instead of drifting with the length of the action name. */
+   The recorder isn't an el-form, so it doesn't inherit the console's card skin. Mirror that card
+   here (rounded 16 / faint surface / hairline rows) so 快捷键 lines up with 行为规范 & 提醒报警.
+   Grid tracks: name / binding / action-button / status. The button track is `auto` (content-sized)
+   so the wider 「恢复默认」 / "Restore defaults" never clips, while the status column takes the rest. */
+.settings-panel .keys-panel {
+  width: 100%;
+}
 .settings-panel .keys-head {
   display: flex;
   gap: 12px;
   align-items: center;
-  margin-bottom: 2px;
+  justify-content: space-between;
+  margin-bottom: 12px;
 }
 .settings-panel .keys-title {
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 650;
   color: var(--text);
 }
+.settings-panel .keys-card {
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
 .settings-panel .key-row {
-  /* Fixed tracks for name / binding / clear; the status column (conflict text or the shipped
-     default) gets whatever is left, so the 清除 button lands on the same edge on every row
-     instead of drifting with the length of the status text. */
   display: grid;
-  grid-template-columns: var(--settings-label-w) 180px 56px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: var(--settings-label-w) 180px auto minmax(0, 1fr);
+  gap: 14px;
   align-items: center;
-  padding: 4px 8px;
-  margin: 0 0 12px;
-  border-radius: 8px;
+  padding: 14px 22px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+.settings-panel .key-row:last-child {
+  border-bottom: none;
 }
 .settings-panel .key-row:hover {
   background: var(--dsh-wash-soft);
@@ -1919,15 +2224,23 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
    bar per row, the byte count right-aligned. The volume bar at top is the disk-wide view; each
    scope's inline bar is that scope's share of the scanned total (so they never sum to 100%). */
 .disk-wrap {
+  /* Fill the content column (like the el-form tabs) instead of a fixed 680px cap, so the disk
+     dashboard tracks the console width and never leaves a right-hand gutter. */
   width: var(--settings-row-w);
-  max-width: 640px;
+  max-width: none;
+  /* Card it like the console's other tabs so the dashboard reads as one block; give it room to
+     breathe now that it has its own edge. */
+  padding: 18px 20px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 16px;
 }
 .disk-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 .disk-title {
   font-weight: 650;
@@ -1964,12 +2277,13 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   color: var(--text-dim);
 }
 .disk-scope {
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 .disk-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  min-height: 28px;
 }
 .disk-dot {
   flex: none;
@@ -1979,7 +2293,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 12%, transparent);
 }
 .disk-name {
-  min-width: 84px;
+  min-width: 96px;
   font-size: 12.5px;
   color: var(--text);
 }
@@ -2078,13 +2392,5 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 }
 .disk-lg-pct {
   font-variant-numeric: tabular-nums;
-}
-</style>
-
-<style>
-/* Rendered in a teleported popper, so it can't live in the scoped block above. */
-.settings-tip-popper {
-  max-width: 340px;
-  line-height: 1.6;
 }
 </style>

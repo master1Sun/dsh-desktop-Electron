@@ -141,7 +141,9 @@ const advancedOpen = ref<string[]>([])
 const kind = computed<SourceKind | null>(() =>
   kindOverride.value === 'auto' ? detectSourceKind(source.value) : kindOverride.value
 )
-const kindLabel = computed(() => (kind.value ? t(`pageMgr.kindTag.${kind.value}`) : t('pageMgr.kindTag.none')))
+const kindLabel = computed(() =>
+  kind.value ? t(`pageMgr.kindTag.${kind.value}`) : t('pageMgr.kindTag.none')
+)
 const kindTagType = computed(() =>
   kind.value === 'git'
     ? 'primary'
@@ -196,7 +198,10 @@ async function runPreflight(): Promise<void> {
   if (!s || !k || k === 'npm') return
   pre.checking = true
   try {
-    const res = await window.container.preflightImport(k === 'git' ? expandGitSource(s) : s, k === 'dir')
+    const res = await window.container.preflightImport(
+      k === 'git' ? expandGitSource(s) : s,
+      k === 'dir'
+    )
     if (seq !== preflightSeq) return
     if (res?.ok && res.data) {
       pre.tier = res.data.tier
@@ -582,7 +587,8 @@ async function saveConfig(): Promise<void> {
     const curDeps = page.dependsOn ?? []
     const nextDeps = [...configDraft.deps]
     const sameDeps =
-      curDeps.length === nextDeps.length && [...curDeps].sort().join() === nextDeps.slice().sort().join()
+      curDeps.length === nextDeps.length &&
+      [...curDeps].sort().join() === nextDeps.slice().sort().join()
     if (!sameDeps) {
       const res = await window.container.setPageDeps?.(page.id, nextDeps)
       if (res && !res.ok) {
@@ -1015,7 +1021,10 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
             :data="pagesStore.pages"
             size="small"
             :empty-text="t('pageMgr.msgEmpty')"
-            :show-overflow-tooltip="{ popperClass: 'dsh-tip-popper dsh-cell-tip', appendTo: 'body' }"
+            :show-overflow-tooltip="{
+              popperClass: 'dsh-tip-popper dsh-cell-tip',
+              appendTo: 'body'
+            }"
           >
             <el-table-column prop="name" :label="t('pageMgr.colName')" min-width="120">
               <template #default="{ row }">
@@ -1025,9 +1034,7 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
                    page is stopped by definition — its dot must not echo a stale status. -->
                   <span
                     class="status-dot"
-                    :class="
-                      row.disabled || runtimeMissing(row) ? 'stopped' : row.status
-                    "
+                    :class="row.disabled || runtimeMissing(row) ? 'stopped' : row.status"
                   />
                   <!-- D1: a manifest-shipped icon when the page provides one; the plain name
                        remains the fallback (no letter glyph to fight the status dot with). -->
@@ -1219,9 +1226,7 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
                     size="small"
                     text
                     :type="
-                      row.status === 'running' || row.status === 'starting'
-                        ? 'warning'
-                        : 'success'
+                      row.status === 'running' || row.status === 'starting' ? 'warning' : 'success'
                     "
                     :aria-label="
                       row.status === 'running' || row.status === 'starting'
@@ -1690,12 +1695,20 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
   margin-top: 8px;
   max-width: 480px;
 }
-/* Smart import: one source row + browse button, kind chips under it, action at the bottom. */
+/* Smart import: one source row + browse button, kind chips under it, action at the bottom.
+   Carded to match the console's other tabs (el-form / 快捷键) — a rounded faint-surface well with
+   even 14px gaps — so 导入项目 no longer floats as a bare stack beside the carded panes. */
 .import-wrap {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  max-width: 620px;
+  gap: 14px;
+  /* Fill the content column so the card tracks the console width (no fixed 620px island). */
+  width: 100%;
+  max-width: none;
+  padding: 18px 20px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 16px;
 }
 .import-wrap .hint {
   margin: 0;
@@ -1715,7 +1728,6 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-top: -6px;
 }
 .pre-reason {
   font-size: 12px;
@@ -1725,8 +1737,36 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
   margin-top: 8px;
 }
 .adv-collapse {
-  max-width: 480px;
-  margin-top: -2px;
+  width: 100%;
+}
+/* Restyle the 高级选项 collapse to live inside the frosted card: EP's stock collapse paints a
+   light top/bottom border and a solid header divider that read as stray lines against the card.
+   Drop them, rebuild a single hairline under the header, keep the surfaces transparent, and give
+   the wrapped fields room. */
+.import-wrap :deep(.adv-collapse) {
+  border-top: none;
+  border-bottom: none;
+}
+.import-wrap :deep(.adv-collapse .el-collapse-item__header) {
+  display: flex;
+  align-items: center;
+  height: auto;
+  min-height: 30px;
+  padding: 6px 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+  background: transparent;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.import-wrap :deep(.adv-collapse .el-collapse-item__wrap) {
+  background: transparent;
+  border-bottom: none;
+}
+.import-wrap :deep(.adv-collapse .el-collapse-item__content) {
+  padding: 12px 2px 2px;
+  color: var(--text);
 }
 .adv-grid {
   display: flex;

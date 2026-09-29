@@ -4,32 +4,26 @@
   /* Single app font stack; Element Plus components (menus/tabs/buttons/dialogs) default to their
      own Helvetica/PingFang/YaHei stack which renders differently from the body text, so point
      --el-font-family at the same stack to keep every surface on one typeface. */
-  --font-app: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Microsoft YaHei UI',
-    sans-serif;
+  --font-app:
+    'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Microsoft YaHei UI', sans-serif;
   --el-font-family: var(--font-app);
   --accent: #4f8cff;
   --accent-strong: #2f6fe4;
-  /* #25: base frosted-blur strength; .glass/.glass-soft/inputs scale off it. Overridden
-     at runtime from settings.glassBlur via documentElement.style.setProperty.
-     --glass-blur carries the px used by blur(); --glass-blur-n is the same value unitless,
-     for the alpha/saturate ratios (CSS calc can't divide/subtract across a unit). Both are
-     kept in sync by applyGlassBlur()/previewGlassBlur().
-     25px == GLASS_BLUR_MAX_PX, the strongest blur the slider can ask for: a pre-load paint
-     must never render past the supported range. */
-  --glass-blur: 25px;
-  --glass-blur-n: 25;
-  /* Blur-coupled frosting: the bigger --glass-blur, the more the surface tint thins out,
-     so the slider actually *shows* (a near-opaque tint makes the backdrop invisible and
-     blur 0↔60 indistinguishable). rgb channels + a plain alpha keep the calc simple. */
+  /* Foreground for a solid `--accent` fill (selected pills, primary buttons). Defaults to white
+     for the built-in blue accents; App.vue's applyAccent overrides it with a dark value when a
+     user-picked 主题色 is light enough that white text would wash out. */
+  --on-accent: #ffffff;
+  /* #25 retired: the 毛玻璃 (frosted-glass) feature is removed. Glass surfaces now render as
+     solid panels — --glass-blur is 0 and --glass-tint-a is fully opaque, so every surface that
+     reads these tokens (`.glass` / `.glass-soft` / `.panel-card` / dialogs / menubar) is a flat,
+     opaque fill instead of a blurred tint. --glass-well / --glass-chip map onto the theme's solid
+     surface tokens so content wells keep a subtle step from the panel. */
+  --glass-blur: 0px;
+  --glass-blur-n: 0;
   --glass-tint-rgb: 255 255 255;
-  --glass-tint-a: clamp(0.6, calc(0.85 - var(--glass-blur-n, 30) / 150), 0.85);
-  /* Shared translucent fills for in-panel surfaces, so they track the 毛玻璃 slider
-     (which drives --glass-tint-a) instead of sitting as an opaque --surface block.
-     Resolved lazily against the theme-flipped --glass-tint-rgb, so one definition
-     serves light and dark. --glass-well = content wells (log/chart/list/box); the
-     lighter --glass-chip = inline code/kbd tags and small value chips. */
-  --glass-well: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.5));
-  --glass-chip: rgb(var(--glass-tint-rgb) / calc(var(--glass-tint-a) * 0.38));
+  --glass-tint-a: 1;
+  --glass-well: var(--surface-2);
+  --glass-chip: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
   --bg: #f3f5fa;
   --surface: #ffffff;
   --surface-2: #f7f9fc;
@@ -49,10 +43,19 @@
   --scroll-thumb-hover: color-mix(in srgb, var(--text-dim) 60%, transparent);
 }
 
+/* Solid primary buttons fill with --accent, so their white text washes out under a light
+   user-picked 主题色. Route the label through --on-accent (App.vue flips it to dark ink for bright
+   accents). Plain/link/text variants are excluded — they keep the accent as their text color. */
+.el-button--primary:not(.is-plain):not(.is-link):not(.is-text) {
+  --el-button-text-color: var(--on-accent);
+  --el-button-hover-text-color: var(--on-accent);
+  --el-button-active-text-color: var(--on-accent);
+}
+
 html.dark {
-  /* Dark frosting reads with a black tint; slightly thinner so the blur shows through. */
+  /* Dark solid tint: opaque near-black surface (matches --surface), no frosting. */
   --glass-tint-rgb: 0 0 0;
-  --glass-tint-a: clamp(0.5, calc(0.78 - var(--glass-blur-n, 30) / 180), 0.78);
+  --glass-tint-a: 1;
   --accent: #5b9bff;
   --accent-strong: #7cb0ff;
   --bg: #000000;
@@ -233,6 +236,14 @@ body,
 #app {
   height: 100%;
   margin: 0;
+}
+
+/* 主文档永不滚动：所有滚动都发生在内部容器（.console-body / .panel-body / .console-list 等）。
+   overflow:hidden 直接禁止主页面出现横/纵向滚动条，也不会在窗口右缘留下滚动条槽空白；
+   控制台这类 100vw/100vh 定宽浮层因此不再随内容波动横向抖动（无需再预留 scrollbar-gutter）。 */
+html,
+body {
+  overflow: hidden;
 }
 
 body {

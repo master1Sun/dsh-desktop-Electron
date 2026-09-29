@@ -52,8 +52,16 @@ const taskDraft = ref('')
 /* Tabs follow the shell layout: the classic host passes no tabPosition → a left rail; the IM/效率
    host (MenuPanelContent via QQShell) forwards 'top' → a centred pill strip. Reuses the global
    `.v-tabs` skin so both orientations stay pixel-consistent with Settings / Pages / Help. */
-const props = defineProps<{ tabPosition?: 'left' | 'top' }>()
-const activeTab = ref('board')
+const props = defineProps<{ pane?: string; tabPosition?: 'left' | 'top' }>()
+/* Console single-pane mode: a host passing `pane` gets just that tab with the rail hidden
+   (mirrors Settings / Pages / Dsh); absent = the full tabbed card. */
+const activeTab = ref(props.pane || 'board')
+watch(
+  () => props.pane,
+  (p) => {
+    if (p) activeTab.value = p
+  }
+)
 
 /* #1 autopilot: the whole dispatch policy — master switch, executor page, concurrency and the
  * prompt template — lives at the top of the board so it can be armed right where the queue is
@@ -207,7 +215,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div v-loading="loading && !tasks.length" class="task-board">
+  <div v-loading="loading && !tasks.length" class="task-board" :class="{ 'single-pane': !!pane }">
     <el-tabs v-model="activeTab" class="v-tabs" :tab-position="props.tabPosition || 'left'">
       <!-- Tab 1: the editable queue, with the #1 autopilot arming controls on top. -->
       <el-tab-pane name="board">
@@ -433,6 +441,10 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* Single-pane (unified console): hide the tab rail so the one shown tab fills the column. */
+.task-board.single-pane :deep(.v-tabs > .el-tabs__header) {
+  display: none;
+}
 .task-board .block {
   margin-bottom: 14px;
 }

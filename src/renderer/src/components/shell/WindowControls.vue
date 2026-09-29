@@ -48,8 +48,8 @@ async function close(): Promise<void> {
     <el-tooltip
       v-if="props.showNav"
       :content="t('menu.goBack')"
-      placement="bottom"
-      popper-class="dsh-tip-popper"
+      placement="bottom-end"
+      popper-class="dsh-tip-popper dsh-bar-tip"
     >
       <button
         class="win-btn view"
@@ -63,8 +63,8 @@ async function close(): Promise<void> {
     <el-tooltip
       v-if="props.showNav"
       :content="t('menu.goForward')"
-      placement="bottom"
-      popper-class="dsh-tip-popper"
+      placement="bottom-end"
+      popper-class="dsh-tip-popper dsh-bar-tip"
     >
       <button
         class="win-btn view"
@@ -78,22 +78,18 @@ async function close(): Promise<void> {
     <el-tooltip
       v-if="props.canOperate"
       :content="t('menu.reloadCurrent')"
-      placement="bottom"
-      popper-class="dsh-tip-popper"
+      placement="bottom-end"
+      popper-class="dsh-tip-popper dsh-bar-tip"
     >
-      <button
-        class="win-btn view"
-        :aria-label="t('menu.reloadCurrent')"
-        @click="emit('reload')"
-      >
+      <button class="win-btn view" :aria-label="t('menu.reloadCurrent')" @click="emit('reload')">
         <el-icon><Refresh /></el-icon>
       </button>
     </el-tooltip>
     <el-tooltip
       v-if="!props.hideTheme"
       :content="t('menu.themeToggle', { mode: props.themeLabel })"
-      placement="bottom"
-      popper-class="dsh-tip-popper"
+      placement="bottom-end"
+      popper-class="dsh-tip-popper dsh-bar-tip"
     >
       <button
         class="win-btn view theme-toggle"
@@ -106,38 +102,38 @@ async function close(): Promise<void> {
     <el-tooltip
       v-if="props.canOperate"
       :content="t('menu.detach')"
-      placement="bottom"
-      popper-class="dsh-tip-popper"
+      placement="bottom-end"
+      popper-class="dsh-tip-popper dsh-bar-tip"
     >
       <button class="win-btn view" :aria-label="t('menu.detach')" @click="emit('detach')">
         <!-- External-link glyph redrawn on the shared 16-box / stroke-1.2 grid so it
              matches the 双屏 pills in both size and line weight. -->
         <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-        <path
-          d="M10.5 2.5 H13.5 V5.5"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-        <path
-          d="M13.5 2.5 L7.5 8.5"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-        <path
-          d="M11.5 10 V12.5 A1 1 0 0 1 10.5 13.5 H3.5 A1 1 0 0 1 2.5 12.5 V5.5 A1 1 0 0 1 3.5 4.5 H6"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
+          <path
+            d="M10.5 2.5 H13.5 V5.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M13.5 2.5 L7.5 8.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M11.5 10 V12.5 A1 1 0 0 1 10.5 13.5 H3.5 A1 1 0 0 1 2.5 12.5 V5.5 A1 1 0 0 1 3.5 4.5 H6"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
       </button>
     </el-tooltip>
     <!-- Traffic-light tooltips use the shared `.dsh-tip-popper` glass bubble (tracks
@@ -162,7 +158,13 @@ async function close(): Promise<void> {
         :aria-label="props.isMaximized ? t('menu.restore') : t('menu.maximize')"
         @click="maximize"
       >
-        <svg v-if="!props.isMaximized" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+        <svg
+          v-if="!props.isMaximized"
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          aria-hidden="true"
+        >
           <rect
             x="1.5"
             y="1.5"

@@ -16,10 +16,8 @@ const persistedSettings: Record<string, unknown> = {
   lastExternalUrls: [],
   externalSites: [],
   theme: 'auto',
-  // This suite exercises the classic top menu bar (.group-trigger / drop list / centered panel),
-  // which only renders in classic layout — pinned here explicitly even though classic is now also
-  // the shell default (qq-shell.test covers the IM/效率 rail).
-  layoutMode: 'classic',
+  // This suite exercises the classic shell: the top menu bar collapses to a single 「控制台」
+  // entry that opens the unified console (left grouped nav + right content).
   dshHome: '',
   openclawHome: ''
 }
@@ -137,6 +135,26 @@ const click = async (el: Element | null): Promise<void> => {
   await nextTick()
 }
 
+/** Open the unified console from the single top-bar 「设置」 entry. */
+async function openConsole(): Promise<void> {
+  const trigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
+    b.textContent?.includes('设置')
+  )
+  await click(trigger ?? null)
+  await new Promise((r) => setTimeout(r, 60))
+  await nextTick()
+}
+
+/** Select a console left-nav leaf by its (partial) label; renders that function on the right. */
+async function gotoLeaf(label: string): Promise<void> {
+  const item = [...document.querySelectorAll('.console .nav-item')].find((b) =>
+    b.textContent?.includes(label)
+  )
+  await click(item ?? null)
+  await new Promise((r) => setTimeout(r, 60))
+  await nextTick()
+}
+
 beforeEach(() => {
   // Tear down the previous app before each test: the terminal drawer mounts el-dropdowns whose
   // teleported poppers / document-level listeners survive a bare `body.innerHTML = ''`. Unmounting
@@ -147,6 +165,7 @@ beforeEach(() => {
   document.body.innerHTML = ''
   persistedSettings.theme = 'auto'
   persistedSettings.locale = 'zh'
+  persistedSettings.externalSites = []
   ;(window as unknown as { container: unknown }).container = makeContainerMock()
 })
 
@@ -191,23 +210,31 @@ describe('shell chrome theme + layout', () => {
     expect(document.querySelector('.pagetabs')).toBeNull()
   })
 
-  it('row ⚙配置 dialog shows the port; declared env dirs live in the 环境目录 tab', async () => {
+  it('collapses the top bar to a single console entry that opens the unified panel', async () => {
     await mountApp()
-    const sysTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-      b.textContent?.includes('系统')
+    const triggers = [...document.querySelectorAll('.menubar .group-trigger')]
+    // The ten scattered panels folded into one surface: exactly one trigger, labelled 设置.
+    expect(triggers.length).toBe(1)
+    expect(triggers[0].textContent).toContain('设置')
+    await openConsole()
+    // A wider console card whose left rail carries the grouped nav.
+    expect(document.querySelector('.panel-card.is-console')).not.toBeNull()
+    expect(document.querySelector('.console')).not.toBeNull()
+    const groups = [...document.querySelectorAll('.console .nav-group-title')].map((e) =>
+      e.textContent?.trim()
     )
-    // 页面/设置 merged into 系统: trigger drops a list, the 页面 row opens the panel.
-    await click(sysTrigger ?? null)
-    const pagesRow = [...document.querySelectorAll('.drop-list .drop-item')].find((b) =>
-      b.textContent?.includes('页面')
-    )
-    await click(pagesRow ?? null)
-    await new Promise((r) => setTimeout(r, 60))
-    expect(document.querySelector('.panel-card')).not.toBeNull()
+    expect(groups).toContain('页面与应用')
+    expect(groups).toContain('运行环境')
+    expect(groups).toContain('帮助与诊断')
+  })
+
+  it('console ▸ 已安装页面 shows the list; the ⚙配置 dialog shows the port', async () => {
+    await mountApp()
+    await openConsole()
+    await gotoLeaf('已安装页面')
     expect(document.querySelector('.installed')).not.toBeNull()
     // Row actions are glyphs only — the label lives in the themed tooltip + aria-label, so
-    // English can't overflow the fixed-width action column. Locate the entry point by that
-    // accessible name instead of by visible text.
+    // English can't overflow the fixed-width action column. Locate by accessible name.
     const cfgBtn = document.querySelector('.installed .el-button[aria-label="配置"]')
     expect(cfgBtn).not.toBeNull()
     await click(cfgBtn ?? null)
@@ -219,13 +246,13 @@ describe('shell chrome theme + layout', () => {
     // The ⚙ dialog keeps only the generic knobs: port + 自动启动 + free KEY=VALUE.
     expect(dlg?.textContent).toContain('端口（留空 = 项目声明端口）')
     expect(dlg?.textContent).toContain('项目声明端口 :8899')
-    // Declared env dirs moved out of the ⚙ dialog into the aggregated 环境目录 tab, where
-    // DSH_HOME renders as the two-choice directory card (label + manifest note + 独立/系统通用).
-    const envTab = [...document.querySelectorAll('.el-tabs__item')].find((b) =>
-      b.textContent?.includes('环境目录')
-    )
-    expect(envTab).not.toBeNull()
-    await click(envTab ?? null)
+  })
+
+  it('console ▸ 环境目录 aggregates declared env dirs into two-choice cards', async () => {
+    await mountApp()
+    await openConsole()
+    // Declared env dirs live in their own nav leaf (moved out of the ⚙ dialog).
+    await gotoLeaf('环境目录')
     await new Promise((r) => setTimeout(r, 80))
     const section = [...document.querySelectorAll('.env-section')].find((s) =>
       s.textContent?.includes('DSH Home')
@@ -238,152 +265,18 @@ describe('shell chrome theme + layout', () => {
     expect(section?.querySelector('.env-desc')?.textContent).toContain('profile 容器目录')
   })
 
-  it('list groups toggle a drop list; 系统 rows open the settings/pages panels', async () => {
-    await mountApp()
-    const findTrigger = (label: string): Element | undefined =>
-      [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-        b.textContent?.includes(label)
-      )
-    // 视图 carries the app managers → always a drop list, never its own panel.
-    const viewTrigger = findTrigger('视图')
-    await click(viewTrigger ?? null)
-    expect(document.querySelector('.dropdown.drop-list')).not.toBeNull()
-    expect(document.querySelector('.panel-card')).toBeNull()
-    expect(
-      [...document.querySelectorAll('.drop-list .drop-item')].some((b) =>
-        b.textContent?.includes('DSH 管理器')
-      )
-    ).toBe(true)
-    await click(viewTrigger ?? null) // re-click → list toggles closed
-    expect(document.querySelector('.dropdown.drop-list')).toBeNull()
-    // 系统 merged 页面+设置: trigger drops a list, a row opens the panel.
-    const sysTrigger = findTrigger('系统')
-    await click(sysTrigger ?? null)
-    const rows = [...document.querySelectorAll('.drop-list .drop-item')]
-    expect(rows.some((b) => b.textContent?.includes('设置'))).toBe(true)
-    expect(rows.some((b) => b.textContent?.includes('页面'))).toBe(true)
-    const settingsRow = rows.find((b) => b.textContent?.includes('设置'))
-    await click(settingsRow ?? null) // row click → closes list, opens the settings panel
-    expect(document.querySelector('.dropdown.drop-list')).toBeNull()
-    expect(document.querySelector('.panel-card')).not.toBeNull()
-    // Parent trigger stays highlighted while its child panel is open.
-    expect(findTrigger('系统')?.classList.contains('active')).toBe(true)
-  })
-
-  it('the floating panel dismisses on click-away but not on its own surface', async () => {
-    await mountApp()
-    const findTrigger = (label: string): Element | undefined =>
-      [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-        b.textContent?.includes(label)
-      )
-    /**
-     * The dismiss path is a capture-phase *mousedown* (matching how a desktop menu behaves and
-     * so a press that starts a text selection already counts). `el.click()` synthesises none,
-     * hence the explicit dispatch.
-     */
-    const press = async (el: Element | null): Promise<void> => {
-      el?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
-      await nextTick()
-      await new Promise((r) => setTimeout(r, 30))
-      await nextTick()
-    }
-    await click(findTrigger('系统') ?? null)
-    await click(
-      ([...document.querySelectorAll('.drop-list .drop-item')].find((b) =>
-        b.textContent?.includes('设置')
-      ) ?? null) as Element | null
-    )
-    expect(document.querySelector('.panel-card')).not.toBeNull()
-
-    // A press inside the card is the user working in it, not blank space.
-    await press(document.querySelector('.panel-body'))
-    expect(document.querySelector('.panel-card')).not.toBeNull()
-    // A second-level dialog teleports to <body> (see the append-to-body rule above); its overlay
-    // is still the panel's own surface, so closing the panel under a half-filled form is wrong.
-    const overlay = document.createElement('div')
-    overlay.className = 'el-overlay'
-    document.body.appendChild(overlay)
-    await press(overlay)
-    expect(document.querySelector('.panel-card')).not.toBeNull()
-    overlay.remove()
-    // Blank content area → dismiss.
-    await press(document.querySelector('.content-main'))
-    expect(document.querySelector('.panel-card')).toBeNull()
-  })
-
-  it('switching the language to English re-renders the menu chrome', async () => {
-    await mountApp()
-    const zhLabels = [...document.querySelectorAll('.menubar .group-trigger')].map((b) =>
-      b.textContent?.trim()
-    )
-    expect(zhLabels.some((x) => x?.includes('视图'))).toBe(true)
-    const store = useSettingsStore(pinia)
-    await store.patch({ locale: 'en' })
-    await nextTick() // let the settings watch call setLocale (arms the lazy import)
-    await localeDictReady() // the en dictionary is lazy-loaded on first switch
-    await nextTick()
-    const enLabels = [...document.querySelectorAll('.menubar .group-trigger')].map((b) =>
-      b.textContent?.trim()
-    )
-    expect(enLabels.some((x) => x?.includes('View'))).toBe(true)
-    expect(enLabels.some((x) => x?.includes('视图'))).toBe(false)
-  })
-
-  it('系统 ▸ 页面 opens the manage panel; 视图 lists the app managers', async () => {
+  it('console ▸ 外部地址 lists saved sites; the 新增 dialog teleports out of the card', async () => {
     persistedSettings.externalSites = [{ id: 's1', name: '示例站', url: 'https://example.com' }]
     await mountApp()
-    const labels = [...document.querySelectorAll('.menubar .group-trigger')].map((b) =>
-      b.textContent?.trim()
-    )
-    // 应用 was merged away: no separate trigger, and DSH/OpenClaw/外部地址 are no
-    // longer top-level either — they live under 视图. 页面/设置 merged into 系统.
-    expect(labels.some((t) => t?.includes('应用'))).toBe(false)
-    expect(labels.some((t) => t === 'DSH' || t === 'OpenClaw' || t?.includes('外部地址'))).toBe(
-      false
-    )
-    expect(labels.some((t) => t === '页面' || t === '设置')).toBe(false)
-    const findTrigger = (label: string): Element | undefined =>
-      [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-        b.textContent?.includes(label)
-      )
-    const sysTrigger = findTrigger('系统')
-    await click(sysTrigger ?? null) // opens the drop list first, never the panel
-    const rows = [...document.querySelectorAll('.drop-list .drop-item')]
-    const pagesRow = rows.find((b) => b.textContent?.includes('页面'))
-    expect(pagesRow).not.toBeNull()
-    expect(document.querySelector('.panel-card')).toBeNull()
-    await click(pagesRow ?? null) // row click → opens the manage-pages panel
-    expect(document.querySelector('.dropdown.drop-list')).toBeNull()
-    expect(document.querySelector('.panel-card')).not.toBeNull()
-    // Built-in managers moved under 视图, which keeps a drop list.
-    const viewTrigger = findTrigger('视图')
-    await click(viewTrigger ?? null)
-    const viewRows = [...document.querySelectorAll('.drop-list .drop-item')]
-    expect(viewRows.some((b) => b.textContent?.includes('DSH 管理器'))).toBe(true)
-    expect(viewRows.some((b) => b.textContent?.includes('OpenClaw 管理器'))).toBe(true)
-    const extRow = viewRows.find((b) => b.textContent?.includes('外部地址'))
-    expect(extRow).not.toBeNull()
-    await click(extRow ?? null) // row click → closes list, opens that panel
-    expect(document.querySelector('.dropdown.drop-list')).toBeNull()
-    expect(document.querySelector('.panel-card')).not.toBeNull()
-    expect(document.querySelector('.panel-body')?.textContent).toContain('示例站')
-    persistedSettings.externalSites = []
-  })
-
-  it('external add dialog teleports out of the frosted panel card', async () => {
-    await mountApp()
-    const viewTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-      b.textContent?.includes('视图')
-    )
-    await click(viewTrigger ?? null)
-    const rows = [...document.querySelectorAll('.drop-list .drop-item')]
-    const extRow = rows.find((b) => b.textContent?.includes('外部地址'))
-    await click(extRow ?? null)
+    await openConsole()
+    await gotoLeaf('外部地址')
+    await new Promise((r) => setTimeout(r, 60))
+    expect(document.querySelector('.console-content')?.textContent).toContain('示例站')
     const addBtn = [...document.querySelectorAll('.panel-card button')].find((b) =>
       b.textContent?.includes('新增')
     )
     await click(addBtn ?? null)
-    // The panel card's backdrop-filter is a containing block for fixed descendants: an in-place
+    // The console card's backdrop-filter is a containing block for fixed descendants: an in-place
     // overlay would render (and clip) inside the card. append-to-body must put it on <body>.
     expect(document.querySelector('.panel-card .el-overlay')).toBeNull()
     expect(document.querySelector('body > .el-overlay')).not.toBeNull()
@@ -401,18 +294,13 @@ describe('shell chrome theme + layout', () => {
     )
   })
 
-  it('manageAsApp pages get a 设置… row in 视图 that opens AppManager', async () => {
+  it('console ▸ a manageAsApp agent leaf opens AppManager with its declared env dir', async () => {
     await mountApp()
-    const viewTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-      b.textContent?.includes('视图')
-    )
-    await click(viewTrigger ?? null)
-    const rows = [...document.querySelectorAll('.drop-list .drop-item')]
-    const cfgRow = rows.find((b) => b.textContent?.includes('智能体应用 · 设置'))
-    expect(cfgRow).not.toBeNull()
-    await click(cfgRow ?? null)
-    expect(document.querySelector('.dropdown.drop-list')).toBeNull()
-    const body = document.querySelector('.panel-body')
+    await openConsole()
+    // The dynamic agent-app leaf is labelled with the page name itself.
+    await gotoLeaf('智能体应用')
+    await new Promise((r) => setTimeout(r, 60))
+    const body = document.querySelector('.console-content')
     expect(body?.textContent).toContain('控制')
     expect(body?.textContent).toContain('配置')
     // declared envVars render as their own directory input
@@ -420,23 +308,72 @@ describe('shell chrome theme + layout', () => {
     expect(body?.textContent).toContain('智能体状态与登录态存放处')
   })
 
-  it('帮助 menu opens the merged about+updates panel from one row', async () => {
+  it('console ▸ 关于与运行 shows the merged about + updates content', async () => {
     await mountApp()
-    const helpTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-      b.textContent?.includes('帮助')
+    await openConsole()
+    await gotoLeaf('关于与运行')
+    await new Promise((r) => setTimeout(r, 60))
+    // One pane carrying the about KVs (the updates table shares the help panel's other leaves).
+    expect(document.querySelector('.console-content')?.textContent).toContain('内置 Node')
+  })
+
+  it('the console dismisses on click-away but not on its own surface', async () => {
+    await mountApp()
+    /**
+     * The dismiss path is a capture-phase *mousedown* (matching how a desktop menu behaves and
+     * so a press that starts a text selection already counts). `el.click()` synthesises none,
+     * hence the explicit dispatch.
+     */
+    const press = async (el: Element | null): Promise<void> => {
+      el?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+      await nextTick()
+      await new Promise((r) => setTimeout(r, 30))
+      await nextTick()
+    }
+    await openConsole()
+    expect(document.querySelector('.panel-card')).not.toBeNull()
+
+    // A press inside the console is the user working in it, not blank space.
+    await press(document.querySelector('.console-content'))
+    expect(document.querySelector('.panel-card')).not.toBeNull()
+    // A second-level dialog teleports to <body>; its overlay is still the panel's own surface, so
+    // closing the console under a half-filled form is wrong.
+    const overlay = document.createElement('div')
+    overlay.className = 'el-overlay'
+    document.body.appendChild(overlay)
+    await press(overlay)
+    expect(document.querySelector('.panel-card')).not.toBeNull()
+    overlay.remove()
+    // Blank content area → dismiss.
+    await press(document.querySelector('.content-main'))
+    expect(document.querySelector('.panel-card')).toBeNull()
+  })
+
+  it('switching the language to English re-renders the console chrome', async () => {
+    await mountApp()
+    await openConsole()
+    const zhLabel = [...document.querySelectorAll('.menubar .group-trigger')]
+      .map((b) => b.textContent?.trim())
+      .join('|')
+    expect(zhLabel).toContain('设置')
+    const zhGroups = [...document.querySelectorAll('.console .nav-group-title')].map((e) =>
+      e.textContent?.trim()
     )
-    await click(helpTrigger ?? null)
-    const helpRows = [...document.querySelectorAll('.drop-list .drop-item')]
-    // 打开日志目录 / 调试 DevTools moved out of the menu — only the palette still offers them.
-    expect(helpRows.some((b) => b.textContent?.includes('DevTools'))).toBe(false)
-    expect(helpRows.some((b) => b.textContent?.includes('打开日志目录'))).toBe(false)
-    const aboutRow = helpRows.find((b) => b.textContent?.includes('关于与更新'))
-    expect(aboutRow).not.toBeNull()
-    await click(aboutRow ?? null)
-    const card = document.querySelector('.panel-card')
-    expect(card).not.toBeNull()
-    // One panel carrying both the about KVs and the updates table — no second entry.
-    expect(document.querySelector('.panel-body')?.textContent).toContain('内置 Node')
+    expect(zhGroups).toContain('页面与应用')
+    const store = useSettingsStore(pinia)
+    await store.patch({ locale: 'en' })
+    await nextTick() // let the settings watch call setLocale (arms the lazy import)
+    await localeDictReady() // the en dictionary is lazy-loaded on first switch
+    await nextTick()
+    const enLabel = [...document.querySelectorAll('.menubar .group-trigger')]
+      .map((b) => b.textContent?.trim())
+      .join('|')
+    expect(enLabel).toContain('Settings')
+    expect(enLabel).not.toContain('设置')
+    const enGroups = [...document.querySelectorAll('.console .nav-group-title')].map((e) =>
+      e.textContent?.trim()
+    )
+    expect(enGroups).toContain('Pages & apps')
   })
 
   it('delete confirm renders a styled message box carrying the page id', async () => {

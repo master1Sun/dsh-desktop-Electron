@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
-import { Refresh, VideoPause } from '@element-plus/icons-vue'
+import { computed, markRaw, onBeforeUnmount, ref, type Component } from 'vue'
+import { Refresh, VideoPause, Setting } from '@element-plus/icons-vue'
 import whaleIcon from '@renderer/assets/whale.png'
 import PageSwitcher from '@renderer/components/shell/PageSwitcher.vue'
 import WindowControls from '@renderer/components/shell/WindowControls.vue'
 import TopProgressBar from '@renderer/components/shell/TopProgressBar.vue'
 import NetIndicator from '@renderer/components/shell/NetIndicator.vue'
-import { appPanelKey, parseAppPanel, managerPageVisible, type ExternalSite } from '@shared/types'
+import { parseAppPanel, type ExternalSite } from '@shared/types'
 import type { PageState } from '@renderer/stores/pages'
 import { useDualStore } from '@renderer/stores/dual'
 import { useSettingsStore } from '@renderer/stores/settings'
@@ -25,6 +25,7 @@ export type PanelKind =
   | 'help'
   | 'apps'
   | 'view'
+  | 'console'
 
 const props = defineProps<{
   current: string | null
@@ -47,12 +48,6 @@ const props = defineProps<{
   /** Whether the CLI on screen is currently running — gates the top-bar 停止 terminal button. */
   terminalRunning?: boolean
   externalSites: ExternalSite[]
-  /**
-   * IM (QQ-like) layout: the menu bar collapses to a compact title bar. The group triggers and
-   * the centered floating panel move out — the left rail + docked sidebar (QQShell) own them —
-   * while brand, page switcher, dual controls and window chrome stay.
-   */
-  imMode?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -120,6 +115,8 @@ interface MenuItem {
 interface MenuGroup {
   kind: PanelKind
   label: string
+  /** Leading icon tile rendered before the label on the trigger (e.g. the console ▸ 设置 gear). */
+  icon?: Component
   badge?: string
   /** Quick-access rows shown in the dropdown (running pages, external sites…). */
   items: MenuItem[]
@@ -130,69 +127,20 @@ interface MenuGroup {
 }
 
 const groups = computed<MenuGroup[]>(() => {
+  // Unified console: the classic menu bar collapses to a single entry. Its empty items/actions
+  // make `toggleMenu` open the console panel directly (no drop list); the pending-update count
+  // rides along as the trigger badge so 「有更新」 still surfaces up here. Every former panel
+  // (设置 / 页面 / DSH / OpenClaw / 外部站点 / MCP / 共享上下文 / 看板 / 帮助 / 智能体应用)
+  // is now reached from the console's left nav instead.
   return [
     {
-      kind: 'view',
-      label: t('menu.view'),
+      kind: 'console',
+      label: t('menu.console'),
+      // 入口文案已改为「设置」，图标同步用齿轮（Setting）以匹配语义；markRaw 避免响应式代理开销。
+      icon: markRaw(Setting),
+      badge: props.outdatedCount ? String(props.outdatedCount) : undefined,
       items: [],
-      // App managers (built-in + dynamic `manageAsApp`). View chrome like reload /
-      // detach / theme lives as icon buttons in the right-end chrome instead.
-      // MCP 服务 / 共享上下文 are reached from here too (their panels stay mounted via the
-      // slots below); the Ctrl+K palette offers the same two.
-      actions: [
-        // DSH / OpenClaw managers hide when their page is disabled or its runtime isn't installed
-        // (mirrors the IM rail's buildNav filter) — nothing to manage in those states.
-        ...(managerPageVisible(props.pages, 'dsh')
-          ? [{ id: 'dsh', title: t('menu.appDsh'), panel: 'dsh' as string }]
-          : []),
-        ...(managerPageVisible(props.pages, 'openclaw')
-          ? [{ id: 'openclaw', title: t('menu.appOpenclaw'), panel: 'openclaw' as string }]
-          : []),
-        { id: 'external', title: t('menu.externalAddress'), panel: 'external' as string },
-        { id: 'mcp', title: t('menu.appMcp'), panel: 'mcp' as string },
-        { id: 'workspace', title: t('menu.workspace'), panel: 'workspace' as string },
-        { id: 'board', title: t('menu.board'), panel: 'board' as string },
-        // Dynamic agent apps (container.json `manageAsApp`) — one settings row each.
-        ...props.pages
-          .filter((p) => p.manageAsApp && p.kind !== 'dsh' && p.kind !== 'openclaw')
-          .map((p) => ({
-            id: `appcfg-${p.id}`,
-            title: `${p.name} · ${t('menu.appSettings')}`,
-            panel: appPanelKey(p.id)
-          }))
-      ]
-    },
-    {
-      // 页面 + 设置 merged into one 系统 entry: the trigger always drops a list with
-      // one row per panel (desktop-menu semantics — the trigger never opens a panel).
-      kind: 'system',
-      label: t('menu.system'),
-      items: [],
-      actions: [
-        { id: 'sys-settings', title: t('menu.settings'), panel: 'settings' as string },
-        { id: 'sys-pages', title: t('menu.pages'), panel: 'pages' as string }
-      ]
-    },
-    {
-      kind: 'help',
-      label: t('menu.help'),
-      items: [],
-      actions: [
-        // The row IS the merged about/updates panel; opening it must not require a
-        // second click on the panel's own 检查更新 button. The pending-update count
-        // lives here (as the row's trailing hint) instead of on the 帮助 trigger badge.
-        {
-          id: 'about',
-          title: t('menu.helpAboutUpdates'),
-          panel: 'help' as const,
-          count: props.outdatedCount ? String(props.outdatedCount) : undefined
-        },
-        {
-          id: 'restart-app',
-          title: t('menu.restartApp'),
-          run: () => emit('restart-app')
-        }
-      ]
+      actions: []
     }
   ]
 })
@@ -378,8 +326,8 @@ function onDocumentMousedown(ev: MouseEvent): void {
     closeDropdowns()
     return
   }
-  // IM layout docks the panel into the left rail instead (QQShell owns that dismiss path).
-  if (!props.current || props.imMode) return
+  // Nothing open (or the click was on the active trigger): the toggle above already handled it.
+  if (!props.current) return
   // Anything the panel hosts is not "blank space": the card itself, plus what Element Plus
   // teleports to <body> out of it — a second-level dialog (see the append-to-body rule the
   // panels obey) or a select popper. Dismissing on those would yank the panel out from under
@@ -440,7 +388,7 @@ onBeforeUnmount(() => {
       @open-terminal="(id) => emit('open-terminal', id)"
     />
 
-    <nav v-if="!props.imMode" class="groups">
+    <nav class="groups">
       <template v-for="g in groups" :key="g.kind">
         <span v-if="g.sepBefore" class="group-sep" />
         <div class="group-wrap">
@@ -452,6 +400,7 @@ onBeforeUnmount(() => {
             :aria-expanded="isActive(g)"
             @click="toggleMenu(g, $event)"
           >
+            <el-icon v-if="g.icon" class="trigger-ic"><component :is="g.icon" /></el-icon>
             {{ g.label }}
             <span v-if="g.badge" class="badge">{{ g.badge }}</span>
           </button>
@@ -504,11 +453,7 @@ onBeforeUnmount(() => {
         placement="bottom"
         popper-class="dsh-tip-popper"
       >
-        <button
-          class="act-btn"
-          :aria-label="t('menu.stopTerminal')"
-          @click="emit('stop-terminal')"
-        >
+        <button class="act-btn" :aria-label="t('menu.stopTerminal')" @click="emit('stop-terminal')">
           <el-icon><VideoPause /></el-icon>
         </button>
       </el-tooltip>
@@ -785,24 +730,36 @@ onBeforeUnmount(() => {
       @detach="emit('detach')"
     />
 
-    <!-- Centered floating panels; they close via click-away / ✕ / Esc / re-click.
-         In IM layout the same panel docks into the left sidebar (QQShell) instead, so skip it here. -->
-    <div v-if="props.current && !listGroup && !props.imMode" class="panel-anchor">
-      <div class="panel-card" role="dialog" aria-modal="false" :aria-label="panelLabel">
-        <div class="panel-head">
+    <!-- Centered floating panels; they close via click-away / ✕ / Esc / re-click. -->
+    <div v-if="props.current && !listGroup" class="panel-anchor">
+      <div
+        class="panel-card"
+        :class="{ 'is-console': props.current === 'console' }"
+        role="dialog"
+        aria-modal="false"
+        :aria-label="panelLabel"
+      >
+        <!-- The unified console owns its own header (「返回应用」 in the left nav), so drop the
+             generic panel head for it; every other panel keeps the title + ✕ bar. -->
+        <div v-if="props.current !== 'console'" class="panel-head">
           <span class="panel-title">{{ panelLabel }}</span>
           <el-tooltip
             :content="t('menu.closeEsc')"
             placement="bottom"
             popper-class="dsh-tip-popper"
           >
-            <button class="panel-close" :aria-label="t('menu.closeEsc')" @click="emit('open', null)">
+            <button
+              class="panel-close"
+              :aria-label="t('menu.closeEsc')"
+              @click="emit('open', null)"
+            >
               ✕
             </button>
           </el-tooltip>
         </div>
         <div class="panel-body">
-          <template v-if="parseAppPanel(props.current)">
+          <slot v-if="props.current === 'console'" name="console" />
+          <template v-else-if="parseAppPanel(props.current)">
             <slot name="app" :page-id="parseAppPanel(props.current)" />
           </template>
           <slot v-else-if="props.current === 'pages'" name="pages" />
@@ -904,6 +861,9 @@ onBeforeUnmount(() => {
 
 .group-trigger {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: none;
   border: 1px solid transparent;
   border-radius: 7px;
@@ -911,6 +871,10 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
   padding: 3px 10px;
   cursor: pointer;
+}
+
+.group-trigger .trigger-ic {
+  font-size: 14px;
 }
 
 .group-trigger:hover {
@@ -1186,7 +1150,37 @@ onBeforeUnmount(() => {
 
 .panel-body {
   overflow-y: auto;
+  /* 恒预留滚动条槽：面板内容异步加载时滚动条出现/消失不再把整块内容横向推动（抖动）。 */
+  scrollbar-gutter: stable;
   padding: 10px 12px 12px;
+}
+
+/* Unified console: an edge-to-edge, full-height sheet rather than a centered floating card.
+   It spans the whole workbench below the menu bar (the bar stays for the single entry + window
+   chrome), so the console's left-nav / right-content split fills the screen and the content
+   column runs top-to-bottom. The generic head is dropped for it, so the sheet meets the edges. */
+.panel-card.is-console {
+  width: 100%;
+  max-width: none;
+  /* The generic `.panel-card` caps `max-height: calc(100vh - 52px)`; without clearing it the
+     console would stop ~14px short of the bottom edge. Release the clamp so `height` governs. */
+  max-height: none;
+  /* Fill from just under the 38px menu bar to the very bottom of the viewport. */
+  height: calc(100vh - 38px);
+  margin: 0;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  /* 关掉通用卡片的 reveal-up 向上展开动画：控制台是 100vw/100vh 整屏浮层，
+     动画期间 translateY/scale 会连带主页面抖动；整屏面板无需“弹出”叙事，直接呈现。 */
+  animation: none;
+}
+.panel-card.is-console .panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
 }
 </style>
 

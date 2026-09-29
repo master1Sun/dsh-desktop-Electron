@@ -61,6 +61,7 @@ const zh: Dict = {
     restartAppConfirm: '确定要重启桌面控制台吗？重启期间所有运行中的页面会被关闭并重新启动。',
     settings: '设置',
     help: '帮助',
+    console: '设置',
     pagesManage: '管理页面…',
     appSettings: '设置…',
     appDsh: 'DSH 管理器',
@@ -73,6 +74,19 @@ const zh: Dict = {
     openLogsDir: '打开日志',
     /** #26: 外部地址按设置交给系统浏览器时的轻提示（窗口内看不到变化） */
     openedExternally: '已在系统默认浏览器中打开（可在 设置 ▸ 提醒告警 改回容器内嵌）'
+  },
+  console: {
+    /** 统一控制台：左侧分组导航 + 右侧内容。 */
+    back: '返回应用',
+    search: '搜索功能…',
+    noMatch: '无匹配项',
+    noSelection: '未选择任何功能',
+    groupPages: '页面与应用',
+    groupRuntime: '运行环境',
+    groupBoard: '任务',
+    groupUi: '界面',
+    groupNetwork: '网络与隐私',
+    groupHelp: '帮助与诊断'
   },
   appmgr: {
     notFound: '应用不存在或已移除',
@@ -94,6 +108,21 @@ const zh: Dict = {
     tabDownload: '外链下载',
     tabEnv: '环境目录',
     interfaceTitle: '界面视图',
+    /** 界面视图 tab 的分组小标题与设计图一致（卡片外的灰色 caption）。 */
+    groupAppearance: '主题与外观',
+    groupLangLayout: '语言与布局',
+    /** 行为规范 / 提醒告警 / 快捷键 tab 的分组小标题（卡片外的灰色 caption，与界面视图同款）。 */
+    groupBehavior: '窗口与进程行为',
+    groupAlerts: '通知与告警',
+    groupKeys: '应用快捷键',
+    /** 外链下载 / 网络镜像 tab 的分组小标题（卡片外的灰色 caption，与界面视图同款）。 */
+    groupDownload: '下载位置',
+    groupNetwork: '镜像与源',
+    /** 每行标题下的灰色描述（设计图为常驻两行，非 hover）。 */
+    defaultPageDesc: '启动时自动打开的页面',
+    themeDesc: '深色 / 浅色 / 跟随系统',
+    accentDesc: '自定义高亮色，深浅主题均生效',
+    languageDesc: '界面显示语言',
     defaultPage: '默认页面',
     defaultPageTip:
       '选中的页面会在下次启动（或立即）自动拉起：未运行时容器先启动它并展示加载动画，成功后自动切到该页。',
@@ -119,8 +148,7 @@ const zh: Dict = {
     layoutMode: '布局',
     layoutClassic: '经典',
     layoutIm: '效率',
-    layoutModeTip:
-      '决定菜单与页面面板靠在哪个边。顶部：菜单在窗口顶部，面板在中间浮出。左侧 / 右侧：图标栏贴在窗口左/右边，面板靠在图标栏旁浮出。底部：图标栏收在窗口底部，平时只留一条细横条，鼠标停留展开、移开自动收起，面板从底部向上浮出。',
+    layoutModeTip: '菜单在窗口顶部，面板在中间浮出（经典布局）。',
     dockTop: '顶部',
     sidebarPosLeft: '左侧',
     sidebarPosRight: '右侧',
@@ -764,8 +792,8 @@ const zh: Dict = {
   },
   dshMgr: {
     /** DSH 管理面板竖排分类 tab 标题。 */
-    tabOverview: '概览',
-    tabPlugins: '插件管理',
+    tabOverview: 'DSH 管理器',
+    tabPlugins: 'DSH 插件管理',
     emptyError: '未安装 @deepseek-ai/dsh',
     installHint: 'npm install @deepseek-ai/dsh@0.1.7-rc.2',
     recheck: '重新检测',

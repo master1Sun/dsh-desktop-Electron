@@ -36,10 +36,6 @@ export interface Settings {
   theme: 'auto' | 'light' | 'dark'
   /** UI display language; 'zh' default, 'en' for English */
   locale: Locale
-  /** shell layout: 'classic' (default, top menu + floating panels) or 'im' (QQ-like rail + docked sidebar) */
-  layoutMode?: 'classic' | 'im'
-  /** IM rail docking: 'left' | 'right' edge column, or 'bottom' floating centred pill */
-  sidebarPosition?: 'left' | 'right' | 'bottom'
   /** root for every runtime's config dir; empty = follow the install dir */
   envRoot: string
   dshHome: string

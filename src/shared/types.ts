@@ -71,9 +71,6 @@ export type PageStatus = 'stopped' | 'starting' | 'running' | 'error'
 /** 'terminal' = a CLI-only project: no HTTP port, runs inside the embedded terminal */
 export type PageKind = 'page' | 'dsh' | 'openclaw' | 'terminal'
 
-/** Where the IM (效率) layout docks its icon rail: left / right edge column, or a bottom-centred pill. */
-export type SidebarPosition = 'left' | 'right' | 'bottom'
-
 /** default port openclaw's gateway listens on (matches `openclaw gateway --port`) */
 export const OPENCLAW_DEFAULT_PORT = 18789
 
@@ -336,18 +333,6 @@ export interface ContainerSettings {
   theme: 'auto' | 'light' | 'dark'
   /** UI display language; empty/default = Chinese */
   locale: Locale
-  /**
-   * Shell layout mode. 'classic' (default) = the top menu bar with centered floating panels;
-   * 'im' = a QQ-like shell: a compact title bar, a left icon rail, and a docked sidebar that
-   * hosts the same panels. Layout only — the frosted-glass surfaces are unchanged.
-   */
-  layoutMode?: 'classic' | 'im'
-  /**
-   * IM (效率) shell rail placement. 'left' (default) = docked column on the left edge, bubble to
-   * its right; 'right' = docked column on the right edge, bubble opens right→left; 'bottom' = a
-   * floating icon pill centred over the bottom edge (no content reflow), bubble bottom-centred.
-   */
-  sidebarPosition?: SidebarPosition
   /** legacy: the env root used to be a two-choice pick here; resolveEnvRoot() now always returns userData/env */
   envRoot: string
   /** dsh home choice; ''/'@install' (default) = container-owned <envRoot>/.dsh, '@system' = the tool's own ~/.dsh (legacy free paths read as default) */

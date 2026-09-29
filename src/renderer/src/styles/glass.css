@@ -17,6 +17,20 @@
   initial-value: 0deg;
 }
 
+/* ---- 毛玻璃 (frosted-glass) feature removed -----------------------------------------
+   Product decision: no backdrop frosting anywhere. Glass *surfaces* are made solid via the
+   main.css tokens (--glass-blur:0 / --glass-tint-a:1), but several floating surfaces (menu
+   dropdowns, command palette, terminal, dialogs…) still hardcode their own `backdrop-filter:
+   blur(...)`. This global override neutralises every one of them in a single place so nothing
+   blurs the content behind it. It deliberately targets only `backdrop-filter` — the decorative
+   aurora/glow blobs use plain `filter: blur()` and are left untouched. */
+*,
+*::before,
+*::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
 /* ---- frosted glass surfaces -------------------------------------------------
    `.glass` — primary floating surface (panels, dialogs, cards).
    `.glass-soft` — lighter inset surface (rows, sub-cards, inputs).
@@ -199,7 +213,7 @@ html.light .aurora .blob {
      dash whose offset animates. Chosen over a conic because on a wide window a conic sweeps by
      ANGLE and rushes the short vertical edges (the light looks like it "skips" the sides); a dash
      runs by PERIMETER at constant speed so every edge is covered evenly.
-   • Floating popups (`.qq-pop` / `.panel-card` / `.palette` / `.el-dialog`): a conic `::after`,
+   • Floating popups (`.panel-card` / `.palette` / `.el-dialog`): a conic `::after`,
      fine at their small near-square sizes. Ring colours are shared via `--mq-*` vars, but the conic
      is written inline on each popup so its `from var(--ang)` resolves against that element's
      animated angle (neon-spin drives the registered `@property --ang`) — each ring spins on its own.
@@ -223,7 +237,7 @@ html.light .aurora .blob {
   --marquee-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
 }
 /* Popup hosts that paint the ring as an ::after must be positioned; these are static, and
-   relative→ adds no offset so it is safe in every theme. (.qq-pop & .el-dialog already are.) */
+   relative→ adds no offset so it is safe in every theme. (.el-dialog already is.) */
 .panel-card,
 .palette {
   position: relative;
@@ -277,7 +291,6 @@ html.no-marquee .win-edge {
 }
 /* Every floating popup gets the same travelling ring along its own border. Suppressed when the
    user turns the border marquee off (Settings ▸ 外观 → 边框流光; `.no-marquee` on <html>). */
-html.dark:not(.no-marquee) .qq-pop::after,
 html.dark:not(.no-marquee) .panel-card::after,
 html.dark:not(.no-marquee) .palette::after,
 html.dark:not(.no-marquee) .el-dialog::after {
@@ -375,7 +388,7 @@ html.dark:not(.no-marquee) .el-dialog::after {
 :root {
   --dsh-wash: color-mix(in srgb, var(--accent) 12%, transparent);
   --dsh-wash-hover: color-mix(in srgb, var(--accent) 14%, transparent);
-  --dsh-wash-frost: blur(6px) saturate(125%);
+  --dsh-wash-frost: none;
   /* Softer wash for wide form/list ROW hovers (a whole el-form-item / key row lights up, so a
      little goes further than a compact button/tab). One value across Settings / DSH / Pages. */
   --dsh-wash-soft: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -435,7 +448,6 @@ html.dark:not(.no-marquee) .el-dialog::after {
 html.reduce-motion .reveal,
 html.reduce-motion .aurora .blob,
 html.reduce-motion .win-edge .we-comet,
-html.reduce-motion .qq-pop::after,
 html.reduce-motion .panel-card::after,
 html.reduce-motion .palette::after,
 html.reduce-motion .el-dialog::after,
@@ -503,6 +515,22 @@ html .el-dialog .el-dialog__title,
 html.dark .el-dialog .el-dialog__title {
   color: var(--accent);
 }
+/* Header / footer dividers: a single hairline under the title and above the action row keeps a
+   frosted dialog reading as three stacked bands (title · body · buttons) instead of one flat well,
+   matching the console's card language. Scoped to the dialog/message-box chrome so the body's own
+   content is untouched. */
+html .el-dialog__header,
+html.dark .el-dialog__header {
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+html .el-dialog__footer,
+html.dark .el-dialog__footer {
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+html .el-message-box__title,
+html.dark .el-message-box__title {
+  color: var(--accent);
+}
 
 /* ---- themed tooltip bubbles (`.dsh-tip-popper`) -----------------------------
    The ⓘ info tooltips (InfoTip in 设置, the 环境目录 row tips in Pages) used Element
@@ -559,6 +587,17 @@ html.dark .el-dialog .el-dialog__title {
 .dsh-cell-tip.el-popper {
   max-width: min(420px, 82vw);
   white-space: pre-line;
+}
+
+/* Top-bar action tips (reload / theme / detach / nav). They hang off the right end of the 38px
+   frosted bar, so the bubble is capped narrow and centered to read as an extension of the bar
+   rather than a wide box floating over the content. Paired with `bottom-end` placement it never
+   spills past the viewport edge — which used to toggle a horizontal scrollbar and jitter the
+   window each time the tip showed/hid. */
+.dsh-bar-tip.el-popper {
+  max-width: min(240px, 68vw);
+  padding: 6px 10px;
+  text-align: center;
 }
 
 /* ---- compact corner toasts (ElMessage) --------------------------------------
@@ -711,74 +750,4 @@ html.dark .el-dialog .el-dialog__title {
   font-size: 15px;
 }
 
-/* =============================================================================
- * IM (QQ-like) sidebar: narrow reflow
- * -----------------------------------------------------------------------------
- * The docked sidebar's content column is ~340px, while managers are authored for the wide
- * centered floating card — so horizontal control rows overflow and long inline values push
- * the panel wide. These unscoped rules are keyed on `.qq-sidebar .side-body`, a class the
- * classic card never carries, and reflow the shared patterns: control rows wrap instead of
- * overflowing, fixed-width fields give up their width, label/control grids collapse to one
- * column, and long inline values shrink. `.qq-sidebar .side-body X` (>=0,3,0) beats each
- * manager's own scoped `.X[data-v]` (0,2,0), so no per-component prop is needed.
- * ========================================================================== */
 
-/* Let any control row fold onto a second line instead of forcing the sidebar wide. */
-.qq-sidebar
-  .side-body
-  :is(
-    .head,
-    .head-main,
-    .head-actions,
-    .btn-row,
-    .row-actions,
-    .row-switch,
-    .actions,
-    .src-row,
-    .kind-row,
-    .act-row,
-    .info-row,
-    .token-row,
-    .token-hint,
-    .term-row,
-    .sub,
-    .note-row,
-    .row-main,
-    .row-pkg,
-    .tool-row,
-    .bridge-hint,
-    .node-update-ctl,
-    .kv,
-    .dsh-footer
-  ) {
-  flex-wrap: wrap;
-  row-gap: 6px;
-}
-
-/* Fields/tables can't exceed the column; `max-width:100%` beats a hard inline
-   `width` (it clamps regardless of specificity), so oversized selects fit. */
-.qq-sidebar
-  .side-body
-  :is(
-    .el-select,
-    .el-input,
-    .el-input-number,
-    .el-cascader,
-    .el-date-editor,
-    .el-autocomplete,
-    .el-textarea,
-    .el-button-group,
-    .el-table
-  ) {
-  max-width: 100%;
-}
-/* Long inline values (paths, commands, tokens) shrink below their content and wrap
-   rather than pushing the row out — `min-width:0` is what unlocks a flex child's shrink. */
-.qq-sidebar .side-body :is(code, .scmd, .sname, .info-val, .token-val, .row-status, .cell-sub) {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-/* Label/control grids collapse to one stacked column (AppManager `.field`, Help `.sys-grid`). */
-.qq-sidebar .side-body :is(.field, .sys-grid) {
-  grid-template-columns: minmax(0, 1fr);
-}

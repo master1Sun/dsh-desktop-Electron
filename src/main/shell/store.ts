@@ -24,10 +24,6 @@ const DEFAULTS: ContainerSettings = {
   theme: 'auto',
   // UI display language; defaults to Chinese
   locale: 'zh',
-  // shell layout: 'classic' (top menu + floating panels) is the default; 'im' = rail + bubbles
-  layoutMode: 'classic',
-  // IM rail docking side; 'left' keeps the original column-on-the-edge behaviour
-  sidebarPosition: 'left',
   // env root is no longer user-configurable: fixed at userData/env (the system-common spot).
   // The field only survives in old settings files; resolveEnvRoot() ignores it. '@system' was
   // also a persisted choice there and resolves to the same place, so nothing needs migrating.
@@ -373,11 +369,7 @@ export function resolvePageEnv(
  * string (a feature flag, an API base URL), and `~` / `{envRoot}` are directory-only conventions.
  * Empty result means "inject nothing", which is how an unset optional flag stays unset.
  */
-export function resolvePageTextEnv(
-  pageId: string,
-  key: string,
-  defaultValue?: string
-): string {
+export function resolvePageTextEnv(pageId: string, key: string, defaultValue?: string): string {
   return (
     (process.env[key] || '').trim() ||
     (getSettings().pageEnvs?.[pageId]?.[key] || '').trim() ||

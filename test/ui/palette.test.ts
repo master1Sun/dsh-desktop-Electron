@@ -86,7 +86,8 @@ function makeContainerMock(): Record<string, unknown> {
     pageRunSpec: () => Promise.resolve(ok(null)),
     dshStatus: () => Promise.resolve(ok({ installed: true })),
     dshListPlugins: () => Promise.resolve(ok([])),
-    openclawStatus: () => Promise.resolve(ok({ installed: true, home: '~/.openclaw', port: 18789 })),
+    openclawStatus: () =>
+      Promise.resolve(ok({ installed: true, home: '~/.openclaw', port: 18789 })),
     openclawToken: () => Promise.resolve(ok(null)),
     getPageLogs: () => Promise.resolve(ok([])),
     removePage: () => Promise.resolve(ok(true))
@@ -123,9 +124,10 @@ async function press(
   key: string,
   mods: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {}
 ): Promise<void> {
-  const code = /^Key[A-Z]$/.test(key.toUpperCase()) && /^[a-zA-Z]$/.test(key)
-    ? `Key${key.toUpperCase()}`
-    : undefined
+  const code =
+    /^Key[A-Z]$/.test(key.toUpperCase()) && /^[a-zA-Z]$/.test(key)
+      ? `Key${key.toUpperCase()}`
+      : undefined
   window.dispatchEvent(
     new KeyboardEvent('keydown', {
       key,
@@ -152,6 +154,24 @@ async function openPalette(): Promise<void> {
   await press('k', { ctrl: true })
 }
 
+/** Open the unified console from the single top-bar 「设置」 entry (classic layout). */
+async function openConsole(): Promise<void> {
+  const trigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
+    b.textContent?.includes('设置')
+  )
+  await click(trigger ?? null)
+  await flush(60)
+}
+
+/** Select a console left-nav leaf by its (partial) label; renders that function on the right. */
+async function gotoLeaf(label: string): Promise<void> {
+  const item = [...document.querySelectorAll('.console .nav-item')].find((b) =>
+    b.textContent?.includes(label)
+  )
+  await click(item ?? null)
+  await flush(60)
+}
+
 beforeEach(() => {
   document.body.innerHTML = ''
   for (const key of Object.keys(persistedSettings)) delete persistedSettings[key]
@@ -163,9 +183,6 @@ beforeEach(() => {
   persistedSettings.externalSites = []
   persistedSettings.theme = 'auto'
   persistedSettings.locale = 'zh'
-  // Settings is reached through the classic top menu here, so pin classic explicitly (the shell
-  // defaults to classic too, but the palette commands must not depend on that).
-  persistedSettings.layoutMode = 'classic'
   ;(window as unknown as { container: unknown }).container = makeContainerMock()
 })
 
@@ -199,7 +216,9 @@ describe('command palette contents', () => {
     expect(titles).toContain('问 OpenClaw（打开页面）')
     expect(titles).toContain('打开 DSH (web)')
     // Groups are rendered as headers, so the new AI bucket has to be visible too.
-    const groups = [...document.querySelectorAll('.group-label')].map((el) => el.textContent?.trim())
+    const groups = [...document.querySelectorAll('.group-label')].map((el) =>
+      el.textContent?.trim()
+    )
     expect(groups).toContain('AI 助手')
   })
 
@@ -305,28 +324,23 @@ describe('customizable shortcuts', () => {
     expect(paletteOpen()).toBe(false)
   })
 
-  it('records a new combination from the 快捷键 tab and stores only the override', async () => {
+  it('records a new combination from the 快捷键 leaf and stores only the override', async () => {
     await mountApp()
-    const sysTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-      b.textContent?.includes('系统')
-    )
-    await click(sysTrigger ?? null)
-    const settingsRow = [...document.querySelectorAll('.drop-list .drop-item')].find((b) =>
-      b.textContent?.includes('设置')
-    )
-    await click(settingsRow ?? null)
-    const keysTab = [...document.querySelectorAll('.el-tabs__item')].find((b) =>
-      b.textContent?.includes('快捷键')
-    )
-    expect(keysTab).not.toBeNull()
-    await click(keysTab ?? null)
+    await openConsole()
+    await gotoLeaf('快捷键')
     // One editable row per bindable action — the table is derived from the shared contract.
     expect(document.querySelectorAll('.key-row')).toHaveLength(KEYBINDING_ACTIONS.length)
 
     const firstInput = document.querySelector('.key-row .key-input input') as HTMLInputElement
     firstInput.focus()
     firstInput.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ', ctrlKey: true, altKey: true, bubbles: true })
+      new KeyboardEvent('keydown', {
+        key: 'j',
+        code: 'KeyJ',
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true
+      })
     )
     await flush(60)
     const stored = persistedSettings.keybindings as Record<string, string>
@@ -349,17 +363,8 @@ describe('customizable shortcuts', () => {
   it('names the other action when one combination is bound twice', async () => {
     persistedSettings.keybindings = { palette: 'Ctrl+G', devtools: 'Ctrl+G' }
     await mountApp()
-    const sysTrigger = [...document.querySelectorAll('.menubar .group-trigger')].find((b) =>
-      b.textContent?.includes('系统')
-    )
-    await click(sysTrigger ?? null)
-    const settingsRow = [...document.querySelectorAll('.drop-list .drop-item')].find((b) =>
-      b.textContent?.includes('设置')
-    )
-    await click(settingsRow ?? null)
-    await click(
-      [...document.querySelectorAll('.el-tabs__item')].find((b) => b.textContent?.includes('快捷键')) ?? null
-    )
+    await openConsole()
+    await gotoLeaf('快捷键')
     const conflicted = [...document.querySelectorAll('.key-row .key-conflict')]
     expect(conflicted).toHaveLength(2)
     const errs = [...document.querySelectorAll('.keys-err')].map((el) => el.textContent || '')

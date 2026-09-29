@@ -465,7 +465,6 @@ const TREND_CAP = 120
 // Same stale cache as events/ports: a remount paints the last curve instead of blanking until
 // getMetricsHistory re-lands. ref({}) deep-wraps the record, so per-page mutations stay reactive.
 const trendHistory = useStaleCache<Record<string, PageMetrics[]>>('panel.trendHistory', {})
-const trendPageId = useStaleCache<string>('panel.trendPageId', '')
 let offTrendMetrics: (() => void) | undefined
 
 /** Pages with samples, ordered by the page list so the dropdown is stable, not insertion-order. */
@@ -473,7 +472,12 @@ const trendOptions = computed(() => {
   const withData = new Set(Object.keys(trendHistory.value))
   return pagesStore.pages.filter((p) => withData.has(p.id)).map((p) => ({ id: p.id, name: p.name }))
 })
-const trendRows = computed(() => trendHistory.value[trendPageId.value] ?? [])
+/** Every page that has a curve — the tab tiles them all at once (there is no per-page select). */
+const trendPages = computed(() =>
+  trendOptions.value
+    .map((o) => ({ id: o.id, name: o.name, rows: trendHistory.value[o.id] ?? [] }))
+    .filter((p) => p.rows.length > 1)
+)
 
 function mergeTrendSample(m: PageMetrics): void {
   const arr = trendHistory.value[m.pageId] ?? (trendHistory.value[m.pageId] = [])
@@ -481,28 +485,15 @@ function mergeTrendSample(m: PageMetrics): void {
   arr.push(m)
   if (arr.length > TREND_CAP) arr.splice(0, arr.length - TREND_CAP)
 }
-/** Keep the selection pointed at a page that still has data (a stopped page drops out of the ring). */
-function ensureTrendSelection(): void {
-  const opts = trendOptions.value
-  if (!opts.length) {
-    trendPageId.value = ''
-    return
-  }
-  if (!opts.some((o) => o.id === trendPageId.value)) trendPageId.value = opts[0].id
-}
 
 function startTrend(): void {
   stopTrend()
-  // Paint from the retained cache first: the history read is async, so re-point the selection at a
-  // page that already has samples (a remount would otherwise sit on an empty trendPageId until it lands).
-  ensureTrendSelection()
   window.container
     .getMetricsHistory?.()
     .then((res) => {
       if (!res?.ok) return
       const map = (res.data as Record<string, PageMetrics[]>) ?? {}
       for (const [id, rows] of Object.entries(map)) trendHistory.value[id] = rows.slice(-TREND_CAP)
-      ensureTrendSelection()
     })
     .catch(() => undefined)
   offTrendMetrics = window.container.onPageMetrics?.((list) => {
@@ -510,7 +501,6 @@ function startTrend(): void {
     for (const id of Object.keys(trendHistory.value))
       if (!live.has(id)) delete trendHistory.value[id]
     for (const m of list as PageMetrics[]) mergeTrendSample(m)
-    ensureTrendSelection()
   })
 }
 function stopTrend(): void {
@@ -924,6 +914,7 @@ async function doImportSnapshot(): Promise<void> {
     <SettingsPanel
       v-if="props.panel === 'settings'"
       :tab-position="tabPosition"
+      :pane="pane"
       :initial-tab="props.initialTab"
       @apply-theme="emit('apply-theme', $event)"
       @preview-site="emit('preview-site', $event)"
@@ -937,7 +928,7 @@ async function doImportSnapshot(): Promise<void> {
     />
 
     <section v-else-if="props.panel === 'pages'" class="sec">
-      <PageManager :tab-position="tabPosition" @close="emit('close')" />
+      <PageManager :tab-position="tabPosition" :pane="pane" @close="emit('close')" />
     </section>
 
     <section v-else-if="props.panel === 'external'" class="sec">
@@ -945,7 +936,7 @@ async function doImportSnapshot(): Promise<void> {
     </section>
 
     <section v-else-if="props.panel === 'dsh'" class="sec">
-      <DshManager :tab-position="tabPosition" />
+      <DshManager :tab-position="tabPosition" :pane="pane" />
     </section>
 
     <section v-else-if="props.panel === 'openclaw'" class="sec">
@@ -962,13 +953,13 @@ async function doImportSnapshot(): Promise<void> {
 
     <!-- 看板: rail / 视图 row / palette page; TaskBoard owns the board / dependency-topology / call-feed tabs. -->
     <section v-else-if="props.panel === 'board'" class="sec">
-      <TaskBoard :tab-position="tabPosition" />
+      <TaskBoard :tab-position="tabPosition" :pane="pane" />
     </section>
 
     <!-- Help: 关于 + 更新 + 诊断 + 日志 merged into one panel, split by a vertical tab rail. -->
     <section v-else-if="props.panel === 'help'" class="sec help" :class="{ 'single-pane': !!pane }">
       <el-tabs v-model="helpTab" class="help-tabs v-tabs" :tab-position="tabPosition || 'left'">
-        <el-tab-pane name="about">
+        <el-tab-pane name="about" class="about-pane">
           <template #label>
             <span class="tab-label"
               ><el-icon><Help /></el-icon>{{ t('panel.tabAbout') }}</span
@@ -1158,7 +1149,12 @@ async function doImportSnapshot(): Promise<void> {
               {{ t('panel.checkUpdates') }}
             </el-button>
           </div>
-          <el-table :data="updates.results" size="small" :empty-text="t('panel.updatesEmpty')">
+          <el-table
+            class="upd-table"
+            :data="updates.results"
+            size="small"
+            :empty-text="t('panel.updatesEmpty')"
+          >
             <el-table-column :label="t('panel.colName')" min-width="200">
               <template #default="{ row }">
                 <span>{{ row.name }}</span>
@@ -1431,19 +1427,16 @@ async function doImportSnapshot(): Promise<void> {
           </template>
           <div class="head">
             <span>{{ t('pageMgr.trendTitle') }}</span>
-            <el-select
-              v-model="trendPageId"
-              size="small"
-              style="width: 170px"
-              :empty-values="[null, undefined]"
-              :placeholder="t('panel.trendNoPage')"
-            >
-              <el-option v-for="p in trendOptions" :key="p.id" :value="p.id" :label="p.name" />
-            </el-select>
+            <span class="evt-count">{{ trendPages.length }}</span>
           </div>
           <div class="cell-sub evt-tip">{{ t('panel.trendTip') }}</div>
-          <ResourceTrend v-if="trendRows.length > 1" :rows="trendRows" />
-          <div v-else class="evt-empty">{{ t('pageMgr.trendEmpty') }}</div>
+          <div v-if="!trendPages.length" class="evt-empty">{{ t('pageMgr.trendEmpty') }}</div>
+          <div v-else class="trend-tile">
+            <section v-for="p in trendPages" :key="p.id" class="trend-cell">
+              <div class="trend-cell-name" :title="p.name">{{ p.name }}</div>
+              <ResourceTrend :rows="p.rows" />
+            </section>
+          </div>
         </el-tab-pane>
 
         <!-- A1: the crash / lifecycle timeline. Rows deep-link into the log they describe. -->
@@ -1518,21 +1511,23 @@ async function doImportSnapshot(): Promise<void> {
               ><el-icon><Monitor /></el-icon>{{ t('panel.tabPorts') }}</span
             >
           </template>
-          <div class="head">
+          <div class="head ports-head">
             <span>{{ t('ports.title') }}</span>
-            <el-checkbox v-model="portsOnlyIssues" size="small">{{
-              t('ports.onlyIssues')
-            }}</el-checkbox>
-            <el-input
-              v-model="portsKeyword"
-              size="small"
-              :placeholder="t('ports.searchPlaceholder')"
-              clearable
-              style="width: 170px"
-            />
-            <el-button size="small" :loading="portsLoading" @click="refreshPorts">
-              {{ t('ports.refresh') }}
-            </el-button>
+            <div class="head-ctl">
+              <el-checkbox v-model="portsOnlyIssues" size="small">{{
+                t('ports.onlyIssues')
+              }}</el-checkbox>
+              <el-input
+                v-model="portsKeyword"
+                size="small"
+                :placeholder="t('ports.searchPlaceholder')"
+                clearable
+                class="ports-search"
+              />
+              <el-button size="small" :loading="portsLoading" @click="refreshPorts">
+                {{ t('ports.refresh') }}
+              </el-button>
+            </div>
           </div>
           <div class="cell-sub evt-tip">{{ t('ports.tip') }}</div>
           <PortTable
@@ -1616,6 +1611,11 @@ async function doImportSnapshot(): Promise<void> {
 .sec {
   padding: 2px;
 }
+/* The help section sits inside a flex content column; without min-width:0 a wide child (the port
+   table) can't shrink and instead stretches the card horizontally. */
+.sec.help {
+  min-width: 0;
+}
 
 /* Vertical (left) tab rail for the Help panel. The shared look (item sizing, accent wash,
    hairline removal, `.tab-label` glyph size) now comes from the global `.v-tabs` skin in
@@ -1663,7 +1663,15 @@ async function doImportSnapshot(): Promise<void> {
 }
 .help-tabs :deep(.el-tabs__content) {
   flex: 1;
+  min-width: 0; /* let the content column shrink so a wide table (端口与进程) can't feed its
+                  intrinsic width back and grow the card without bound */
   overflow: hidden;
+}
+/* 运行日志：和事件动态一样，把日志时间轴撑到接近整屏高再出滚动条（组件内默认 300/260px 太矮）。
+   scoped to the help tab so a standalone LogViewer elsewhere keeps its own sizing. */
+.help-tabs :deep(.lv-timeline),
+.help-tabs :deep(.lv-pre) {
+  max-height: calc(100vh - 280px);
 }
 
 .head {
@@ -1673,6 +1681,48 @@ async function doImportSnapshot(): Promise<void> {
   margin-bottom: 10px;
   font-weight: 650;
   font-size: 13px;
+}
+
+/* Ports header: title stays on the left, the trailing controls gather into a right-aligned cluster
+   (`.head` is space-between, so the cluster sits flush right) instead of scattering across the row. */
+.head-ctl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ports-search {
+  width: 170px;
+}
+/* Let the port table fill the console height before its own scrollbar appears, matching the
+   events/logs wells ("occupy the screen, then scroll"). EP applies the max-height prop as a
+   non-important inline style on the .el-table root, so an !important override here wins and the
+   inner-wrapper flex layout stretches the body area to the new bound. */
+.help-tabs :deep(.pt-table.el-table) {
+  max-height: calc(100vh - 260px) !important;
+}
+/* 表格卡片化：更新表/端口表统一大圆角 + 淡面，表头与行分隔线随主题，与控制台
+   其它卡片同一观感（el-table 默认直角 + 硬分隔线在卡片流里显得突兀）。 */
+.help-tabs :deep(.el-table) {
+  --el-table-border-color: color-mix(in srgb, var(--border) 70%, transparent);
+  --el-table-header-bg-color: color-mix(in srgb, var(--text) 4%, transparent);
+  --el-table-tr-bg-color: transparent;
+  --el-table-bg-color: transparent;
+  /* inner-wrapper 的底色挂在 --el-bg-color 上，不透明化会盖掉根上的卡片底色。 */
+  --el-bg-color: transparent;
+  border-radius: 12px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+}
+.help-tabs :deep(.el-table__header th) {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+/* 更新表拉高到接近整屏再出内部滚动条（与端口表同一节奏）：默认按行数收缩，
+   卡片下方留大片空白。min-height 让空表也占住高度，表头不会贴在卡片顶部孤零。 */
+.help-tabs :deep(.upd-table.el-table) {
+  width: 100%;
+  max-height: calc(100vh - 260px) !important;
+  min-height: 280px;
 }
 
 .tip {
@@ -1834,7 +1884,7 @@ async function doImportSnapshot(): Promise<void> {
   flex-direction: column;
   padding: 4px 10px 6px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 14px;
   background: var(--glass-well);
   font-size: 12.5px;
   user-select: text;
@@ -1925,18 +1975,29 @@ async function doImportSnapshot(): Promise<void> {
 .net-result {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--glass-well);
 }
 .net-summary {
-  font-size: 12.5px;
+  padding: 6px 0;
+  font-size: 13px;
   font-weight: 600;
 }
+/* 诊断步骤：整行 + 发丝虚线分隔，状态点左、步骤名、耗时靠右、详情换行不推。 */
 .net-step {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  padding: 8px 0;
   font-size: 12.5px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+.net-step:last-of-type {
+  border-bottom: none;
 }
 .net-dot {
   width: 8px;
@@ -1951,26 +2012,30 @@ async function doImportSnapshot(): Promise<void> {
   background: var(--err);
 }
 .net-name {
-  width: 96px;
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 550;
+  color: var(--text);
 }
 .net-ms {
-  color: var(--text-dim);
+  flex: none;
   font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
 }
 .net-detail {
-  max-width: 260px;
+  flex: 1 1 100%;
+  min-width: 0;
+  padding-left: 18px;
 }
 .net-proxy {
   margin-top: 2px;
 }
 
-/* 关于与运行 — system overview: a two-column label/value grid; `sys-wide` rows
-   (paths) span the full width so long directories stay on one readable line. */
+/* 关于与运行 — system overview: one full-width row list (label left · value right),
+   matching the console's row rhythm; paths rows stay readable on their own line. */
 .sys-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 20px;
+  display: flex;
+  flex-direction: column;
   font-size: 12.5px;
 }
 .sys-row {
@@ -1994,7 +2059,7 @@ async function doImportSnapshot(): Promise<void> {
   padding: 0 6px;
 }
 .sys-row.sys-wide {
-  grid-column: 1 / -1;
+  grid-column: auto;
 }
 .sys-row.sys-wide code {
   white-space: normal;
@@ -2010,19 +2075,123 @@ async function doImportSnapshot(): Promise<void> {
   letter-spacing: 0.2px;
 }
 
+/* About ▸ the runtime + system overview sits in the same contained well as the sibling tabs' lists
+   (events / ports), so the flat kv rows and system grid read as one cohesive card instead of loose
+   text on the panel. The class lands on the el-tab-pane root via attribute fallthrough, so it only
+   wraps the About pane. The trailing copyright is the last block, so drop its bottom padding. */
+.help-tabs :deep(.about-pane.el-tab-pane) {
+  padding: 6px 18px 10px;
+  border: 1px solid var(--border);
+  /* 与控制台其它 tab 同配方的大卡片（淡面 + 16px 圆角），不再是小圆角 well。 */
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+}
+.help-tabs :deep(.about-pane .about-copyright) {
+  padding-bottom: 0;
+}
+/* About ▸ 每一块（运行时 / 系统概览）用小标题分组，与控制台左侧导航的分组标题同款。 */
+.help-tabs :deep(.about-pane .head) {
+  margin: 18px 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.help-tabs :deep(.about-pane .head > span) {
+  font-size: 13px;
+  font-weight: 500;
+}
+/* About ▸ kv 行拉成整行：标签左、值右，行间发丝虚线，与设置卡片行同一节奏。
+   用 flex-wrap 而非固定列 grid：内置 Node 行有 4 个子节点（标签/版本/标签胶囊/控件簇），
+   固定两列会把多余子项塞进标签列导致按钮错位。 */
+.help-tabs :deep(.about-pane .kv) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 8px;
+  width: 100%;
+  padding: 12px 2px;
+  font-size: 13px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+.help-tabs :deep(.about-pane .kv:last-of-type) {
+  border-bottom: none;
+}
+/* 标签列固定宽度居左，不被 flex 压缩。 */
+.help-tabs :deep(.about-pane .kv > span:first-child) {
+  flex: 0 0 auto;
+  min-width: 84px;
+  color: var(--text-dim);
+}
+/* 值（strong/code）靠右贴边，形成“标签左·值右”。 */
+.help-tabs :deep(.about-pane .kv > strong),
+.help-tabs :deep(.about-pane .kv > code) {
+  margin-left: auto;
+  min-width: 0;
+}
+/* 内置 Node 的升级控件簇：独占一整行、靠右排列、可换行。 */
+.help-tabs :deep(.about-pane .kv .node-update-ctl) {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* 分隔线由 kv 行自身的发丝线承担，去掉旧的同义重复实线。 */
+.help-tabs :deep(.about-pane .line) {
+  display: none;
+}
+/* About ▸ system rows join the same full-width rhythm as the kv rows above. */
+.help-tabs :deep(.about-pane .sys-row) {
+  padding: 10px 2px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+.help-tabs :deep(.about-pane .sys-row:last-child) {
+  border-bottom: none;
+}
+.help-tabs :deep(.about-pane .sys-row > span) {
+  color: var(--text);
+  font-size: 13px;
+}
+/* 控件里的文字（按钮/开关旁标签）不跟小标题同色同粗。 */
+.help-tabs :deep(.about-pane .head .el-button),
+.help-tabs :deep(.about-pane .node-incompat-toggle span) {
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
 /* 网络与工具 — live throughput + interface list. */
 .net-live {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--glass-well);
 }
+/* 实时速率：胶囊徽章化，箭头着色，读数加粗等宽数字。 */
 .net-rate {
   display: flex;
-  align-items: center;
-  gap: 18px;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.net-rate > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   font-size: 12.5px;
+  color: var(--text-dim);
+}
+.net-rate b {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
 }
 .net-rate .rate-down b {
   color: var(--ok);
@@ -2031,32 +2200,45 @@ async function doImportSnapshot(): Promise<void> {
   color: var(--accent);
 }
 .net-rate .rate-total {
-  margin-left: auto;
+  border-style: dashed;
 }
 .net-sub-label {
-  font-size: 11.5px;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-dim);
   letter-spacing: 0.3px;
-  margin-top: 2px;
+  margin-top: 4px;
 }
+/* 网卡列表：整行行式 + 发丝虚线分隔，与控制台其它行列表同一节奏。 */
 .iface-list {
   display: flex;
   flex-direction: column;
-  gap: 3px;
 }
 .iface-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  padding: 8px 2px;
   font-size: 12.5px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+.iface-row:last-child {
+  border-bottom: none;
+}
+.iface-row:hover {
+  background: var(--dsh-wash-soft);
 }
 .iface-row.iface-internal {
   opacity: 0.6;
 }
 .iface-name {
-  flex: none;
-  min-width: 96px;
-  font-weight: 550;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text);
 }
 .iface-addr {
   background: var(--glass-chip);
@@ -2072,6 +2254,35 @@ async function doImportSnapshot(): Promise<void> {
 .evt-tip {
   margin-bottom: 8px;
 }
+
+/* 资源趋势平铺：每个页面占满整行（百分百自适应），曲线随控制台宽度拉伸；
+   窄窗口下也不会被 300px 网格挤成两列。 */
+.trend-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+.trend-cell {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--glass-well);
+}
+.trend-cell-name {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ResourceTrend carries a 10px top margin meant for a standalone block; inside a labelled cell it
+   should sit tight under the caption. */
+.trend-cell :deep(.trend) {
+  margin-top: 2px;
+}
 .evt-count {
   margin-left: auto;
   font-size: 11.5px;
@@ -2084,11 +2295,16 @@ async function doImportSnapshot(): Promise<void> {
   color: var(--text-dim);
 }
 .evt-list {
-  max-height: 320px;
+  /* Fill the console height before the inner scrollbar appears (was a fixed 320px that cut long
+     timelines off well short of the viewport). console-body is the outer scroller, so sizing this
+     to the viewport minus the surrounding chrome gives “occupy the screen, then scroll”. */
+  max-height: calc(100vh - 260px);
   overflow: auto;
+  /* 与控制台大卡片同圆角体系（14px），与表格/趋势格子同一家族。 */
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 14px;
   background: var(--glass-well);
+  scrollbar-gutter: stable;
 }
 .evt-row {
   display: flex;

@@ -63,6 +63,7 @@ const en: Dict = {
       'Restart the desktop console? All running pages will be closed and started again.',
     settings: 'Settings',
     help: 'Help',
+    console: 'Settings',
     pagesManage: 'Manage pages…',
     appSettings: 'Settings…',
     appDsh: 'DSH manager',
@@ -75,6 +76,19 @@ const en: Dict = {
     openLogsDir: 'Open logs',
     /** #26: soft toast for when an external address is handed to the OS browser */
     openedExternally: 'Opened in your default browser (Settings ▸ Alerts can put it back inline)'
+  },
+  console: {
+    /** Unified console: grouped left nav + right content. */
+    back: 'Back to app',
+    search: 'Search functions…',
+    noMatch: 'No matches',
+    noSelection: 'No function selected',
+    groupPages: 'Pages & apps',
+    groupRuntime: 'Runtimes',
+    groupBoard: 'Tasks',
+    groupUi: 'Interface',
+    groupNetwork: 'Network & privacy',
+    groupHelp: 'Help & diagnostics'
   },
   appmgr: {
     notFound: 'App not found or removed',
@@ -95,6 +109,19 @@ const en: Dict = {
     tabDownload: 'External Downloads',
     tabEnv: 'Environment',
     interfaceTitle: 'Interface & view',
+    groupAppearance: 'Theme & appearance',
+    groupLangLayout: 'Language & layout',
+    /** Group captions for the behavior / alerts / keys tabs (same grey caption as the view tab). */
+    groupBehavior: 'Window & process behavior',
+    groupAlerts: 'Notifications & alerts',
+    groupKeys: 'App shortcuts',
+    /** Group captions for the download / network tabs (same grey caption as the view tab). */
+    groupDownload: 'Download location',
+    groupNetwork: 'Mirrors & registry',
+    defaultPageDesc: 'Page to open automatically on launch',
+    themeDesc: 'Dark / light / follow system',
+    accentDesc: 'Custom highlight color for both themes',
+    languageDesc: 'Interface display language',
     defaultPage: 'Default page',
     defaultPageTip:
       'The chosen page auto-launches on next start (or immediately): if not running, the container starts it and shows a loading animation, then switches to it once up.',
@@ -122,7 +149,7 @@ const en: Dict = {
     layoutClassic: 'Classic',
     layoutIm: 'Efficiency',
     layoutModeTip:
-      'Which edge the menu and the page panels sit on. Top: the menu runs across the window top and panels float in the middle. Left / Right: an icon rail docks to that edge and the panel floats beside it. Bottom: the rail rests as a thin bar on the bottom edge, expands while the pointer dwells on it and retracts when it leaves, and the panel rises from the bottom.',
+      'The menu runs across the window top and panels float in the middle (classic layout).',
     dockTop: 'Top',
     sidebarPosLeft: 'Left',
     sidebarPosRight: 'Right',
@@ -783,8 +810,8 @@ const en: Dict = {
   },
   dshMgr: {
     /** DSH manager vertical tab titles. */
-    tabOverview: 'Overview',
-    tabPlugins: 'Plugins',
+    tabOverview: 'DSH Manager',
+    tabPlugins: 'DSH Plugins',
     emptyError: '@deepseek-ai/dsh is not installed',
     installHint: 'npm install @deepseek-ai/dsh@0.1.7-rc.2',
     recheck: 'Re-check',
