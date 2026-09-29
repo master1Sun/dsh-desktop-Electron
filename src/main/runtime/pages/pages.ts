@@ -22,6 +22,7 @@ import {
 } from '../mcp/mcp-bridge'
 import { workspaceEnvVars } from '../mcp/workspace'
 import { listServers, listTools } from '../mcp/mcp-hub'
+import { looksLikeUsage, parseUsageLine, recordUsage } from '../diagnostics/usage'
 import { m as msg } from '../../shell/i18n'
 import {
   type DshTokenResult,
@@ -1349,6 +1350,11 @@ export class PageRegistry extends EventEmitter {
       e.logs.push(line)
       added = true
       if (e.logs.length > LOG_LIMIT) e.logs.shift()
+      // Usage-ledger tap: a cheap keyword gate first — this loop sees every child-output chunk.
+      if (looksLikeUsage(line)) {
+        const usage = parseUsageLine(e.meta.id, line.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ''))
+        if (usage) recordUsage(usage)
+      }
     }
     // Surface live output while booting so the overlay shows progress, not a frozen spinner.
     if (added && e.status === 'starting') this.emitProgress(e, 'log')

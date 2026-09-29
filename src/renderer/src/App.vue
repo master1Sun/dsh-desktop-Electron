@@ -190,6 +190,9 @@ const PANEL_COMMANDS: { kind: PanelKind; key: string }[] = [
 const commands = computed<Command[]>(() => {
   const list: Command[] = []
   for (const p of pagesStore.pages) {
+    // A disabled page left the switcher and cannot be started — its palette rows would only
+    // lead to a 「已禁用」error toast, so keep the whole group off for it.
+    if (p.disabled) continue
     if (p.external) {
       list.push({
         id: `open-ext-${p.id}`,
@@ -1244,6 +1247,9 @@ function applyNotifyDeepLink(sig: { pageId?: string; panel?: string; tab?: strin
   }
   if (sig.panel === 'help') openHelpTab(sig.tab || 'about')
   else if (sig.panel === 'settings') openSettingsTab(sig.tab || 'view')
+  // Any other known panel key (board / mcp / workspace …) opens as-is; its own internal tab
+  // state is component-scoped and resets per open, so `tab` only steers help/settings.
+  else if (sig.panel) activePanel.value = sig.panel
 }
 
 /**
@@ -1511,6 +1517,28 @@ watch(
         )
       }
     }
+  }
+)
+
+const defaultPageId = computed(() => {
+  const dv = settingsStore.settings.defaultView
+  return dv.kind === 'page' ? dv.pageId : null
+})
+
+// The configured default page's service coming up *later* — started from the Pages panel
+// after a failed/cancelled boot, or revived by the crash guard — must still open the page:
+// restoreDefaultView only runs on entry, and the panel's start button never touches the
+// view. Gated on the workbench being on screen (activePageId null), so a page the user
+// deliberately switched to is never hijacked, and on a real stopped→running transition, so
+// picking a new 默认打开 in 设置 doesn't jump the view under them.
+watch(
+  () => pagesStore.pages.find((p) => p.id === defaultPageId.value)?.status,
+  (status, prev) => {
+    if (status !== 'running' || prev === 'running') return
+    if (isPopout.value || activePageId.value || pendingPageId.value) return
+    const page = pagesStore.pages.find((p) => p.id === defaultPageId.value)
+    if (!page || page.disabled) return
+    showInWebview(page)
   }
 )
 

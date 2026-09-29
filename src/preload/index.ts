@@ -14,6 +14,7 @@ import {
   type McpServerSpec,
   type PageProgress,
   type ReadLogsArgs,
+  type ReportUsageArgs,
   type ToastLevel,
   type UpdateCheckResult,
   type UpdateProgress,
@@ -83,6 +84,12 @@ const api = {
   openLogsDir: () => ipcRenderer.invoke(IPC.OpenLogsDir),
   listLogFiles: () => ipcRenderer.invoke(IPC.ListLogFiles),
   readLogs: (args: ReadLogsArgs) => ipcRenderer.invoke(IPC.ReadLogs, args),
+  // autopilot per-task transcript (logs/tasks/<taskId>.log), tail-read through the same viewer plumbing
+  getTaskTranscript: (args: { taskId: string; tail?: number }) =>
+    ipcRenderer.invoke(IPC.GetTaskTranscript, args),
+  // usage ledger: manual / agent-reported row + the aggregated summary
+  reportUsage: (args: ReportUsageArgs) => ipcRenderer.invoke(IPC.ReportUsage, args),
+  getUsageSummary: (args: { since?: number }) => ipcRenderer.invoke(IPC.GetUsageSummary, args),
   exportDiagnostics: () => ipcRenderer.invoke(IPC.ExportDiagnostics),
   exportSnapshot: () => ipcRenderer.invoke(IPC.ExportSnapshot),
   importSnapshot: () => ipcRenderer.invoke(IPC.ImportSnapshot),

@@ -14,7 +14,12 @@
  * ephemeral port, and every request must carry the bearer token written to
  * `userData/mcp-bridge/container-server.token`.
  */
-import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
+import {
+  createServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse
+} from 'node:http'
 import { once } from 'node:events'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
@@ -28,6 +33,7 @@ import { normalizeTasks, readWorkspace, writeWorkspace } from './workspace'
 import { readLogTail } from '../../shell/logger'
 import { bridgeDir } from './mcp-bridge'
 import { logEvent } from '../../shell/events'
+import { recordUsage } from '../diagnostics/usage'
 import { setContainerEndpoint, type ContainerEndpoint } from './container-endpoint'
 import type { McpCallToolArgs } from '../../../shared/types'
 
@@ -47,11 +53,17 @@ interface ToolDef {
 }
 
 /** One text-block MCP result; `isError` marks a handled failure the agent should read. */
-function textResult(text: unknown): { content: { type: 'text'; text: string }[]; isError: boolean } {
+function textResult(text: unknown): {
+  content: { type: 'text'; text: string }[]
+  isError: boolean
+} {
   const t = typeof text === 'string' ? text : JSON.stringify(text, null, 2)
   return { content: [{ type: 'text', text: t }], isError: false }
 }
-function errorResult(text: string): { content: { type: 'text'; text: string }[]; isError: boolean } {
+function errorResult(text: string): {
+  content: { type: 'text'; text: string }[]
+  isError: boolean
+} {
   return { content: [{ type: 'text', text }], isError: true }
 }
 
@@ -68,7 +80,10 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: {
         pageId: { type: 'string', description: 'The page id (see container_list_pages).' },
-        tail: { type: 'number', description: 'How many trailing lines to return (default 200, max 5000).' }
+        tail: {
+          type: 'number',
+          description: 'How many trailing lines to return (default 200, max 5000).'
+        }
       },
       required: ['pageId'],
       additionalProperties: false
@@ -76,17 +91,23 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'container_workspace_read',
-    description: 'Read the container-owned shared context: current task, shared-memory notes, and the task queue.',
+    description:
+      'Read the container-owned shared context: current task, shared-memory notes, and the task queue.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
   },
   {
     name: 'container_workspace_submit',
-    description: 'Submit a new task into the shared task queue (todo column), optionally listing dependency ids.',
+    description:
+      'Submit a new task into the shared task queue (todo column), optionally listing dependency ids.',
     inputSchema: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'One-line task title (non-empty).' },
-        deps: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks this one waits on (optional).' }
+        deps: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Ids of tasks this one waits on (optional).'
+        }
       },
       required: ['title'],
       additionalProperties: false
@@ -94,7 +115,8 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'container_workspace_complete',
-    description: 'Mark a task done and optionally record its outcome (mirrored into the shared-memory notes).',
+    description:
+      'Mark a task done and optionally record its outcome (mirrored into the shared-memory notes).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -107,10 +129,13 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'container_list_mcp_tools',
-    description: 'List the tools of every MCP server connected in the container hub (optionally one server).',
+    description:
+      'List the tools of every MCP server connected in the container hub (optionally one server).',
     inputSchema: {
       type: 'object',
-      properties: { serverId: { type: 'string', description: 'Restrict to one hub server id (optional).' } },
+      properties: {
+        serverId: { type: 'string', description: 'Restrict to one hub server id (optional).' }
+      },
       additionalProperties: false
     }
   },
@@ -120,7 +145,10 @@ const TOOLS: ToolDef[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        serverId: { type: 'string', description: 'The hub server id (see container_list_mcp_tools).' },
+        serverId: {
+          type: 'string',
+          description: 'The hub server id (see container_list_mcp_tools).'
+        },
         tool: { type: 'string', description: 'The tool name on that server.' },
         arguments: { type: 'object', description: 'Arguments object the tool expects.' }
       },
@@ -130,7 +158,8 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'container_start_page',
-    description: 'Start a hosted page by id. Dependencies (per the container manifest) are started first.',
+    description:
+      'Start a hosted page by id. Dependencies (per the container manifest) are started first.',
     inputSchema: {
       type: 'object',
       properties: { pageId: { type: 'string', description: 'The page id to start.' } },
@@ -155,6 +184,25 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: { pageId: { type: 'string', description: 'The page id to restart.' } },
       required: ['pageId'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'container_report_usage',
+    description:
+      'Append one row to the token-usage ledger, attributed to a hosted page — for agents whose CLI does not print a parseable usage summary (or want to report a more exact figure).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pageId: {
+          type: 'string',
+          description: 'The page id this usage belongs to (see container_list_pages).'
+        },
+        inputTokens: { type: 'number', description: 'Prompt/input tokens used (>= 0).' },
+        outputTokens: { type: 'number', description: 'Completion/output tokens used (>= 0).' },
+        model: { type: 'string', description: 'Model name the tokens were spent on (optional).' }
+      },
+      required: ['pageId', 'inputTokens', 'outputTokens'],
       additionalProperties: false
     }
   }
@@ -249,7 +297,9 @@ async function dispatch(
       const callArgs: McpCallToolArgs = {
         serverId,
         tool,
-        ...(a.arguments && typeof a.arguments === 'object' ? { arguments: a.arguments as Record<string, unknown> } : {})
+        ...(a.arguments && typeof a.arguments === 'object'
+          ? { arguments: a.arguments as Record<string, unknown> }
+          : {})
       }
       const r = await hubCallTool(callArgs)
       return r.isError ? errorResult(r.error || r.text || 'tool call failed') : textResult(r.text)
@@ -278,6 +328,37 @@ async function dispatch(
       const state = await registry.restartWithDeps(pageId)
       logEvent({ level: 'info', kind: 'container-mcp', pageId, detail: 'restart' })
       return textResult(pageSummary(registry, pageId) ?? { id: pageId, status: state.status })
+    }
+    case 'container_report_usage': {
+      const pageId = typeof a.pageId === 'string' ? a.pageId.trim() : ''
+      const input = Number(a.inputTokens)
+      const output = Number(a.outputTokens)
+      if (!pageId || !Number.isFinite(input) || !Number.isFinite(output))
+        return errorResult(
+          'container_report_usage needs pageId, inputTokens, outputTokens (finite numbers)'
+        )
+      if (input < 0 || output < 0) return errorResult('token counts must be >= 0')
+      recordUsage({
+        ts: Date.now(),
+        pageId,
+        source: 'mcp',
+        ...(typeof a.model === 'string' && a.model.trim() ? { model: a.model.trim() } : {}),
+        inputTokens: Math.round(input),
+        outputTokens: Math.round(output)
+      })
+      logEvent({
+        level: 'info',
+        kind: 'usage',
+        pageId,
+        detail: 'agent 自报用量',
+        meta: { source: 'mcp' }
+      })
+      return textResult({
+        ok: true,
+        pageId,
+        inputTokens: Math.round(input),
+        outputTokens: Math.round(output)
+      })
     }
     default:
       return errorResult(`unknown tool: ${name}`)
@@ -389,13 +470,23 @@ async function listen(getRegistry: () => PageRegistry | undefined): Promise<Cont
     // teardown are not needed for request/response tool use and stay 405.
     if (req.method !== 'POST') {
       res.writeHead(405, { allow: 'POST', 'content-type': 'application/json' })
-      return res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null }))
+      return res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Method not allowed.' },
+          id: null
+        })
+      )
     }
     let body: unknown
     try {
       body = await readJsonBody(req)
     } catch {
-      return sendJson(res, 400, { jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' }, id: null })
+      return sendJson(res, 400, {
+        jsonrpc: '2.0',
+        error: { code: -32700, message: 'Parse error' },
+        id: null
+      })
     }
     const mcp = buildMcpServer(getRegistry)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
@@ -408,7 +499,11 @@ async function listen(getRegistry: () => PageRegistry | undefined): Promise<Cont
       await transport.handleRequest(req, res, body as never)
     } catch (err) {
       console.warn('[container-mcp] request failed:', (err as Error)?.message ?? err)
-      sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null })
+      sendJson(res, 500, {
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Internal error' },
+        id: null
+      })
     }
   })
 

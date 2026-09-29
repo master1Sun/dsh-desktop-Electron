@@ -546,6 +546,12 @@ export interface ContainerSettings {
    * 需下载…" expectation-setter only shows on the former.
    */
   bootedPages?: string[]
+  /**
+   * Token pricing for the usage ledger: pageId (or 'default') → USD per 1M tokens. Rows are
+   * only costed when a price resolves for their page (page entry first, then 'default'); a
+   * page with no price anywhere just shows token totals. Edited from the 用量 tab.
+   */
+  usagePricing?: Record<string, { input: number; output: number }>
 }
 
 /**
@@ -785,6 +791,57 @@ export interface NotifyOpenSignal {
   pageId?: string
   panel?: string
   tab?: string
+}
+
+/** Where one usage-ledger row came from: parsed CLI output, an agent's own MCP report, or the UI. */
+export type UsageSource = 'parse' | 'mcp' | 'manual'
+
+/**
+ * One usage-ledger row (`logs/usage.jsonl`): token counts attributed to a page. A line that only
+ * reports a combined total lands in `inputTokens` with `outputTokens: 0` — per-row totals stay
+ * honest, a split-price cost estimate is then approximate by design.
+ */
+export interface UsageRecord {
+  /** epoch ms */
+  ts: number
+  pageId: string
+  source: UsageSource
+  model?: string
+  inputTokens: number
+  outputTokens: number
+}
+
+/** Args for `IPC.ReportUsage` — the manual/MCP entry point; `ts` defaults to now in main. */
+export interface ReportUsageArgs {
+  pageId: string
+  inputTokens: number
+  outputTokens: number
+  model?: string
+  source?: UsageSource
+}
+
+export interface UsagePageTotal {
+  pageId: string
+  inputTokens: number
+  outputTokens: number
+  /** number of ledger rows folded into this line */
+  calls: number
+}
+
+/** One day of the by-day chart; `day` is the `YYYY-MM-DD` display-zone date. */
+export interface UsageDayTotal {
+  day: string
+  inputTokens: number
+  outputTokens: number
+}
+
+/** `IPC.GetUsageSummary` payload: raw rows (newest-first) plus the two roll-ups. */
+export interface UsageSummary {
+  rows: UsageRecord[]
+  byPage: UsagePageTotal[]
+  byDay: UsageDayTotal[]
+  /** epoch ms the window started at (echoed back so the panel can label the range) */
+  since: number
 }
 
 export interface UpdateCheckResult {
@@ -1501,7 +1558,13 @@ export const IPC = {
   /** a hosted page asks for an OS notification (its `notify` permission is checked in main) */
   PageNotify: 'container:page-notify',
   /** broadcast: the user clicked an OS notification carrying a deep link (NotifyOpenSignal) */
-  OnNotifyOpen: 'container:on-notify-open'
+  OnNotifyOpen: 'container:on-notify-open',
+  /** autopilot task transcript: tail logs/tasks/<taskId>.log ({taskId, tail?} → LogReadResult) */
+  GetTaskTranscript: 'container:get-task-transcript',
+  /** usage ledger: append one row from the UI / an agent (ReportUsageArgs → boolean) */
+  ReportUsage: 'container:report-usage',
+  /** usage ledger: rows + per-page / per-day roll-ups since a cutoff ({ since? } → UsageSummary) */
+  GetUsageSummary: 'container:get-usage-summary'
 } as const
 
 /** The four Element Plus toast severities a renderer message can carry. */

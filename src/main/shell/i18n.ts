@@ -135,6 +135,11 @@ const zh: Dict = {
   'notify.startDoneBody': '自动启动已结束：成功 {ok} 个，失败 {fail} 个',
   'notify.diskLowTitle': '磁盘空间不足',
   'notify.diskLowBody': '剩余空间仅 {free} GB（低于 {threshold} GB），可在存储页清理以释放空间',
+  'notify.taskDoneTitle': '任务已完成',
+  'notify.taskDoneBody': '托管任务「{title}」已执行完成，点击查看看板',
+  'notify.taskFailTitle': '任务执行失败',
+  'notify.taskFailBody': '托管任务「{title}」异常退出（代码 {code}），已停止自动重试',
+  'ipc.badTaskId': '非法的任务 id',
   'log.mainLabel': '主进程日志',
   'update.noRollback': '当前没有可回退的上一版本备份（仅在完成过一次在线更新后可用）',
   'update.hashMismatch': '更新包内容校验失败（SHA-512 不匹配），已丢弃本次下载，请重试',
@@ -411,6 +416,12 @@ const en: Dict = {
   'notify.diskLowTitle': 'Low disk space',
   'notify.diskLowBody':
     'Only {free} GB free (below {threshold} GB); open the storage settings to reclaim space',
+  'notify.taskDoneTitle': 'Task finished',
+  'notify.taskDoneBody': 'Autopilot task “{title}” completed — click to open the board',
+  'notify.taskFailTitle': 'Task failed',
+  'notify.taskFailBody':
+    'Autopilot task “{title}” exited abnormally (code {code}); auto-retry stopped',
+  'ipc.badTaskId': 'Invalid task id',
   'log.mainLabel': 'Main process log',
   'update.noRollback':
     'No previous-version backup is available to roll back to (only offered after one OTA update has completed)',

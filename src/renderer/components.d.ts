@@ -20,7 +20,6 @@ declare module 'vue' {
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElButton: typeof import('element-plus/es')['ElButton']
     ElCheckbox: typeof import('element-plus/es')['ElCheckbox']
-    ElCheckboxGroup: typeof import('element-plus/es')['ElCheckboxGroup']
     ElCollapse: typeof import('element-plus/es')['ElCollapse']
     ElCollapseItem: typeof import('element-plus/es')['ElCollapseItem']
     ElColorPicker: typeof import('element-plus/es')['ElColorPicker']
@@ -72,6 +71,7 @@ declare module 'vue' {
     TerminalPane: typeof import('./src/components/terminal/TerminalPane.vue')['default']
     TerminalSearchBar: typeof import('./src/components/terminal/TerminalSearchBar.vue')['default']
     TopProgressBar: typeof import('./src/components/shell/TopProgressBar.vue')['default']
+    UsageStats: typeof import('./src/components/panels/UsageStats.vue')['default']
     WindowControls: typeof import('./src/components/shell/WindowControls.vue')['default']
     WorkspaceContext: typeof import('./src/components/panels/WorkspaceContext.vue')['default']
   }

@@ -130,14 +130,37 @@ export function logPageLine(pageId: string, chunk: string): void {
   if (body) append(file, body)
 }
 
+/** Append one autopilot dispatch's mirrored output to `logs/tasks/<taskId>.log` — the
+ *  per-task transcript the board's 查看输出 dialog reads through the same tail reader. */
+export function logTaskLine(taskId: string, chunk: string): void {
+  const safe = taskId.replace(/[^\w.-]/g, '_')
+  const dir = join(logsDir(), 'tasks')
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {
+    return
+  }
+  const file = join(dir, `${safe}.log`)
+  rotateIfNeeded(file)
+  const body = chunk
+    .split(/\r?\n/)
+    .filter((l) => l.trim())
+    .map((l) => `[${stamp()}] ${l}\n`)
+    .join('')
+  if (body) append(file, body)
+}
+
 /* ---- in-app log viewer backing (IPC container:list-log-files / container:read-logs) ---- */
 
-/** Resolve a viewer key ('main' | 'pages/<file>') to an on-disk path; null on anything
- *  else — the key comes from the renderer, so path traversal must not resolve. */
+/** Resolve a viewer key ('main' | 'pages/<file>' | 'tasks/<file>') to an on-disk path; null on
+ *  anything else — the key comes from the renderer, so path traversal must not resolve. */
 function resolveLogKey(key: string): string | null {
   if (key === 'main') return join(logsDir(), 'main.log')
-  const mm = key.match(/^pages\/([\w.-]+)\.log$/)
-  if (mm && !mm[1].includes('..')) return join(logsDir(), 'pages', `${mm[1]}.log`)
+  const mm = key.match(/^(?:pages|tasks)\/([\w.-]+)\.log$/)
+  if (mm && !mm[1].includes('..')) {
+    const dir = key.startsWith('tasks/') ? 'tasks' : 'pages'
+    return join(logsDir(), dir, `${mm[1]}.log`)
+  }
   return null
 }
 
@@ -162,6 +185,18 @@ export function listLogFiles(): LogFileInfo[] {
     }
   } catch {
     /* pages dir may not exist before the first hosted boot */
+  }
+  // Per-task autopilot transcripts: a distinct group so the viewer can tell them apart.
+  const taskDir = join(logsDir(), 'tasks')
+  try {
+    if (existsSync(taskDir)) {
+      for (const f of readdirSync(taskDir)) {
+        if (f.endsWith('.log'))
+          push(`tasks/${f}`, `task:${f.replace(/\.log$/, '')}`, join(taskDir, f))
+      }
+    }
+  } catch {
+    /* tasks dir only appears once autopilot has run */
   }
   return out
 }
@@ -301,9 +336,23 @@ export function startLogStream(onLine: (ev: LogLineEvent) => void): void {
       /* watch unsupported on this path: polling fallback stays in the viewer */
     }
   }
-  // Root holds main.log (+ rotated .1 siblings we ignore); the pages dir holds <id>.log.
+  // Root holds main.log (+ rotated .1 siblings we ignore); the pages/tasks dirs hold <id>.log.
   watchDir(root, (name) => (name === 'main.log' ? 'main' : null))
   watchDir(pagesDir, (name) => (name.endsWith('.log') ? `pages/${name}` : null))
+  const tasksDir = join(root, 'tasks')
+  try {
+    mkdirSync(tasksDir, { recursive: true })
+  } catch {
+    /* tasks dir creation is best-effort */
+  }
+  try {
+    for (const f of readdirSync(tasksDir)) {
+      if (f.endsWith('.log')) seed(join(tasksDir, f))
+    }
+  } catch {
+    /* tasks dir just created — nothing to seed */
+  }
+  watchDir(tasksDir, (name) => (name.endsWith('.log') ? `tasks/${name}` : null))
 }
 
 export function stopLogStream(): void {

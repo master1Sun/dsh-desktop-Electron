@@ -5,6 +5,8 @@ import {
   TaskDispatcher,
   buildPrompt,
   pickNextTask,
+  sweepOrphanTasks,
+  type DispatcherNotify,
   type DispatcherSettings,
   type Executor,
   type RegistryView,
@@ -64,7 +66,10 @@ describe('pickNextTask', () => {
 
 describe('buildPrompt', () => {
   it('substitutes template placeholders', () => {
-    const p = buildPrompt(task({ id: 't9', title: 'Ship it', deps: ['a', 'b'] }), '{title}|{id}|{deps}')
+    const p = buildPrompt(
+      task({ id: 't9', title: 'Ship it', deps: ['a', 'b'] }),
+      '{title}|{id}|{deps}'
+    )
     expect(p).toBe('Ship it|t9|a, b')
   })
 
@@ -90,7 +95,7 @@ describe('buildPrompt', () => {
   })
 
   it('M1 backstop: inserts $-sequences verbatim instead of re-interpreting them', () => {
-    const p = buildPrompt(task({ id: 't9', title: "pay $&100" }), '{title}')
+    const p = buildPrompt(task({ id: 't9', title: 'pay $&100' }), '{title}')
     expect(p).toBe('pay $&100')
   })
 })
@@ -102,15 +107,18 @@ interface Harness {
   setStore(next: WorkspaceTask[]): void
   runs: { task: WorkspaceTask; prompt: string; resolve: (code: number) => void }[]
   logs: { level: string; detail: string; taskId?: string }[]
+  notifies: DispatcherNotify[]
   settings: DispatcherSettings
   dispatchTick: () => void
-  lastRun: () => { task: WorkspaceTask; prompt: string; resolve: (code: number) => void } | undefined
+  lastRun: () =>
+    { task: WorkspaceTask; prompt: string; resolve: (code: number) => void } | undefined
 }
 
 function harness(initial: WorkspaceTask[], settings?: Partial<DispatcherSettings>): Harness {
   let store = initial.map((t) => ({ ...t }))
   const runs: Harness['runs'] = []
   const logs: Harness['logs'] = []
+  const notifies: Harness['notifies'] = []
   const cfg: DispatcherSettings = {
     enabled: true,
     executorPageId: 'exec',
@@ -135,6 +143,7 @@ function harness(initial: WorkspaceTask[], settings?: Partial<DispatcherSettings
       store = tasks.map((t) => ({ ...t }))
     },
     log: (e) => logs.push({ level: e.level, detail: e.detail, taskId: e.taskId }),
+    notify: (entry) => notifies.push(entry),
     now: () => 12345
   })
   return {
@@ -146,6 +155,7 @@ function harness(initial: WorkspaceTask[], settings?: Partial<DispatcherSettings
     },
     runs,
     logs,
+    notifies,
     settings: cfg,
     dispatchTick: () => dispatcher.tick(),
     lastRun: () => runs[runs.length - 1]
@@ -192,6 +202,10 @@ describe('TaskDispatcher', () => {
     expect(a.status).toBe('done')
     expect(a.result).toBe('agent said done')
     expect(h.logs.some((l) => l.detail.includes('agent'))).toBe(true)
+    // A2: the terminal done outcome fires exactly one notification, carrying the agent's result.
+    expect(h.notifies).toHaveLength(1)
+    expect(h.notifies[0].outcome).toBe('done')
+    expect(h.notifies[0].task.result).toBe('agent said done')
   })
 
   it('records a container-side done on a clean exit the agent did not backfill', async () => {
@@ -202,6 +216,8 @@ describe('TaskDispatcher', () => {
     const a = byId(h.store, 'a')
     expect(a.status).toBe('done')
     expect(a.result).toContain('容器代记')
+    expect(h.notifies).toHaveLength(1)
+    expect(h.notifies[0].outcome).toBe('done')
   })
 
   it('reverts to todo on an abnormal exit and retries until the attempt cap', async () => {
@@ -216,6 +232,8 @@ describe('TaskDispatcher', () => {
     let a = byId(h.store, 'a')
     expect(a.status).toBe('doing')
     expect(a.attempts).toBe(MAX_ATTEMPTS)
+    // A2: the intermediate retry stays silent — no toast per crash before the cap is spent.
+    expect(h.notifies).toHaveLength(0)
     // crash again → revert, and the cap stops a third dispatch
     h.lastRun()!.resolve(1)
     await flush()
@@ -226,6 +244,10 @@ describe('TaskDispatcher', () => {
     expect(h.runs).toHaveLength(2)
     h.dispatchTick()
     expect(h.runs).toHaveLength(2)
+    // …and exactly one failed notification once the cap is spent.
+    expect(h.notifies).toHaveLength(1)
+    expect(h.notifies[0].outcome).toBe('failed')
+    expect(h.notifies[0].code).toBe(1)
   })
 
   it('respects concurrency: one at a time, chaining as each finishes', async () => {
@@ -245,5 +267,46 @@ describe('TaskDispatcher', () => {
     h.dispatchTick()
     expect(h.runs).toHaveLength(2)
     expect(new Set(h.runs.map((r) => r.task.id))).toEqual(new Set(['a', 'b']))
+  })
+})
+
+describe('sweepOrphanTasks', () => {
+  /* A3: the startup reclaim, kept pure — everything a previous run claimed but never reconciled. */
+  it('returns an autopilot-claimed doing task to todo, clearing the claim but keeping attempts', () => {
+    const now = 999
+    const { tasks, swept } = sweepOrphanTasks(
+      [
+        task({
+          id: 'orphan',
+          status: 'doing',
+          owner: `${OWNER_PREFIX}exec`,
+          dispatchedAt: 1,
+          attempts: 1,
+          at: 5
+        }),
+        task({ id: 'agent-claim', status: 'doing', owner: 'some-agent', at: 5 }),
+        task({ id: 'todo', at: 5 }),
+        task({ id: 'done', status: 'done', owner: `${OWNER_PREFIX}exec`, at: 5 })
+      ],
+      now
+    )
+    expect(swept).toEqual(['orphan'])
+    const o = byId(tasks, 'orphan')
+    expect(o.status).toBe('todo')
+    expect(o.owner).toBeUndefined()
+    expect(o.dispatchedAt).toBeUndefined()
+    // attempts survives so the crash cap keeps bounding a task that keeps orphaning.
+    expect(o.attempts).toBe(1)
+    expect(o.at).toBe(now)
+    // untouched rows keep identity (no needless rewrites / revision churn for them).
+    expect(byId(tasks, 'agent-claim')).toBe(tasks[1])
+    expect(byId(tasks, 'todo')).toBe(tasks[2])
+    expect(byId(tasks, 'done').status).toBe('done')
+  })
+
+  it('sweeps nothing for a clean queue', () => {
+    const { tasks, swept } = sweepOrphanTasks([task({ id: 'a' })])
+    expect(swept).toEqual([])
+    expect(tasks).toHaveLength(1)
   })
 })

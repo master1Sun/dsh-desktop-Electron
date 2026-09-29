@@ -13,10 +13,24 @@ import { buildPageEnv, expandStartCommand } from '../pages/pages'
 import { PtyManager } from '../terminal/pty'
 import { bridgeEnvVars } from '../mcp/mcp-bridge'
 import { getSettings } from '../../shell/store'
-import { normalizeTasks, readWorkspace, writeWorkspace, workspaceEnvVars, onWorkspaceTasksChanged } from '../mcp/workspace'
+import {
+  normalizeTasks,
+  readWorkspace,
+  writeWorkspace,
+  workspaceEnvVars,
+  onWorkspaceTasksChanged
+} from '../mcp/workspace'
 import { logEvent } from '../../shell/events'
-import { logPageLine } from '../../shell/logger'
-import { TaskDispatcher, type Executor, type TaskExecution } from './task-dispatcher'
+import { logPageLine, logTaskLine } from '../../shell/logger'
+import { notifyEvent } from '../../shell/notifications'
+import { isoShanghai } from '../../shell/time'
+import { looksLikeUsage, parseUsageLine, recordUsage } from '../diagnostics/usage'
+import {
+  TaskDispatcher,
+  sweepOrphanTasks,
+  type Executor,
+  type TaskExecution
+} from './task-dispatcher'
 import type { PageState, WorkspaceTask } from '../../../shared/types'
 
 /** How long to let the agent CLI boot before typing the task prompt into its PTY. */
@@ -36,7 +50,8 @@ function ptyTextForLog(chunk: string): string {
 /**
  * Runs one task headlessly: a fresh PTY in the page's dir executing the page's start command with
  * the page + bridge + workspace env (so the agent reaches the shared `context.json` and the
- * workspace MCP exactly as it would interactively), the run mirrored into `logs/pages/<id>.log`.
+ * workspace MCP exactly as it would interactively), the run mirrored into `logs/pages/<id>.log`
+ * and into the per-task transcript `logs/tasks/<taskId>.log` the board's 查看输出 dialog tails.
  */
 class HeadlessExecutor implements Executor {
   private readonly pty = new PtyManager()
@@ -48,7 +63,27 @@ class HeadlessExecutor implements Executor {
     })
     const session = this.pty.get(info.id)
     if (!session) throw new Error('pty session vanished right after start')
-    session.on('data', (chunk) => logPageLine(page.id, ptyTextForLog(String(chunk))))
+    // Dispatch header so a retried task's transcript reads as separate attempts in one file.
+    logTaskLine(
+      task.id,
+      `── dispatch #${task.attempts ?? 1} page=${page.id} ${isoShanghai(new Date())} ──\n`
+    )
+    // Line-buffer the stripped text: usage-summary lines straddle PTY chunk boundaries.
+    let tail = ''
+    session.on('data', (chunk) => {
+      const text = ptyTextForLog(String(chunk))
+      logPageLine(page.id, text)
+      logTaskLine(task.id, text)
+      tail += text
+      const lines = tail.split('\n')
+      tail = lines.pop() ?? ''
+      for (const line of lines) {
+        // Cheap pre-filter before the regex table — this sits on every PTY data event.
+        if (!looksLikeUsage(line)) continue
+        const usage = parseUsageLine(page.id, line)
+        if (usage) recordUsage(usage)
+      }
+    })
     const exited = new Promise<number>((resolve) => {
       session.on('exit', (code) => resolve(Number(code)))
     })
@@ -95,8 +130,43 @@ export function initAutopilot(getRegistry: () => PageRegistry | undefined): void
         pageId: e.pageId,
         detail: e.detail,
         ...(e.taskId ? { meta: { taskId: e.taskId } } : {})
-      })
+      }),
+    // One OS toast per terminal dispatch (done, or failed once the attempt cap is spent);
+    // clicking either jumps to the task board.
+    notify: ({ outcome, task, code }) =>
+      outcome === 'done'
+        ? notifyEvent(
+            'notify.taskDoneTitle',
+            'notify.taskDoneBody',
+            { title: task.title },
+            undefined,
+            {
+              panel: 'board'
+            }
+          )
+        : notifyEvent(
+            'notify.taskFailTitle',
+            'notify.taskFailBody',
+            { title: task.title, code },
+            undefined,
+            { panel: 'board' }
+          )
   })
+  // Reclaim anything a previous container run claimed but never reconciled (killed mid-dispatch)
+  // before the first tick would otherwise ignore them forever.
+  try {
+    const { tasks, swept } = sweepOrphanTasks(normalizeTasks(readWorkspace().tasks))
+    if (swept.length) {
+      writeWorkspace({ tasks })
+      logEvent({
+        level: 'warn',
+        kind: 'autopilot',
+        detail: `重启回收：${swept.length} 个执行中任务退回待办（${swept.join(', ')}）`
+      })
+    }
+  } catch (err) {
+    console.warn('[autopilot] orphan sweep failed (ignored):', (err as Error)?.message)
+  }
   offTasksChanged = onWorkspaceTasksChanged(() => dispatcher?.tick())
   pollTimer = setInterval(() => dispatcher?.tick(), POLL_MS)
   dispatcher.tick()

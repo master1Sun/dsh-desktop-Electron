@@ -10,14 +10,25 @@ import {
   Help,
   Grid,
   Share,
-  DataAnalysis
+  DataAnalysis,
+  Tickets,
+  View
 } from '@element-plus/icons-vue'
 import { t } from '@renderer/i18n'
 import { useSettingsStore } from '@renderer/stores/settings'
 import { usePagesStore } from '@renderer/stores/pages'
 import DependencyGraph from '@renderer/components/panels/DependencyGraph.vue'
 import McpCallFeed from '@renderer/components/panels/McpCallFeed.vue'
-import type { WorkspaceContext, WorkspaceInfo, WorkspaceTask, WorkspaceTaskStatus } from '@shared/types'
+import UsageStats from '@renderer/components/panels/UsageStats.vue'
+import LogTimeline from '@renderer/components/monitor/LogTimeline.vue'
+import type {
+  LogReadResult,
+  IpcResult,
+  WorkspaceContext,
+  WorkspaceInfo,
+  WorkspaceTask,
+  WorkspaceTaskStatus
+} from '@shared/types'
 
 /**
  * The shared-context task board (the same queue agents drive through workspace_submit/claim/
@@ -98,9 +109,7 @@ function column(status: WorkspaceTaskStatus): WorkspaceTask[] {
 }
 /** deps are stored as ids; render them as titles so the board reads without cross-referencing. */
 function depTitles(x: WorkspaceTask): string {
-  return (x.deps ?? [])
-    .map((d) => tasks.value.find((y) => y.id === d)?.title || d)
-    .join('、')
+  return (x.deps ?? []).map((d) => tasks.value.find((y) => y.id === d)?.title || d).join('、')
 }
 
 async function load(): Promise<void> {
@@ -121,9 +130,9 @@ async function persist(next: WorkspaceTask[]): Promise<boolean> {
   saving.value = true
   try {
     const plainTasks = (Array.isArray(next) ? next : []).map((x) => ({ ...toRaw(x) }))
-    const r = (await window.container.workspaceSave?.({ tasks: plainTasks })) as Result<
-      WorkspaceContext
-    >
+    const r = (await window.container.workspaceSave?.({
+      tasks: plainTasks
+    })) as Result<WorkspaceContext>
     if (!r?.ok || !r.data) throw new Error(r?.error || t('wsMgr.msgSaveFail'))
     tasks.value = [...(r.data.tasks ?? [])]
     return true
@@ -151,6 +160,43 @@ async function moveTask(id: string, status: WorkspaceTaskStatus): Promise<void> 
 
 async function deleteTask(id: string): Promise<void> {
   await persist(tasks.value.filter((x) => x.id !== id))
+}
+
+/* ---- autopilot per-task transcript ----
+ * A dispatched task mirrors its executor PTY into logs/tasks/<taskId>.log; this is the close the
+ * loop needs after a done/failed OS notification — see what the agent actually printed, in place,
+ * instead of digging through the page log. Only autopilot-owned rows offer it (the file only
+ * exists for those). Newest-first like the log viewer; reopening a row re-reads the tail. */
+const transcriptVisible = ref(false)
+const transcriptTask = ref<WorkspaceTask | null>(null)
+const transcriptLines = ref<string[]>([])
+const transcriptLoading = ref(false)
+
+const autopilotOwned = (x: WorkspaceTask): boolean => !!x.owner?.startsWith('autopilot:')
+
+async function openTranscript(x: WorkspaceTask): Promise<void> {
+  transcriptTask.value = x
+  transcriptVisible.value = true
+  await loadTranscript()
+}
+
+async function loadTranscript(): Promise<void> {
+  const x = transcriptTask.value
+  if (!x) return
+  transcriptLoading.value = true
+  try {
+    const r = (await window.container.getTaskTranscript?.({
+      taskId: x.id,
+      tail: 800
+    })) as IpcResult<LogReadResult>
+    if (!r?.ok) throw new Error(r?.error || t('wsMgr.msgTranscriptFail'))
+    transcriptLines.value = r.data?.lines ?? []
+  } catch (err) {
+    ElMessage.error((err as Error).message || t('wsMgr.msgTranscriptFail'))
+    transcriptLines.value = []
+  } finally {
+    transcriptLoading.value = false
+  }
 }
 
 onMounted(() => {
@@ -258,6 +304,16 @@ onMounted(() => {
                 </div>
                 <div class="task-actions">
                   <el-button
+                    v-if="autopilotOwned(x)"
+                    size="small"
+                    text
+                    type="primary"
+                    :icon="View"
+                    @click="openTranscript(x)"
+                  >
+                    {{ t('wsMgr.viewTranscript') }}
+                  </el-button>
+                  <el-button
                     v-if="x.status === 'todo'"
                     size="small"
                     text
@@ -341,7 +397,38 @@ onMounted(() => {
           <McpCallFeed />
         </div>
       </el-tab-pane>
+
+      <!-- Tab 4: the token-usage ledger (parsed CLI output + agent self-reports + manual rows). -->
+      <el-tab-pane name="usage">
+        <template #label>
+          <span class="tab-label"
+            ><el-icon><Tickets /></el-icon>{{ t('usageMgr.tab') }}</span
+          >
+        </template>
+        <UsageStats />
+      </el-tab-pane>
     </el-tabs>
+
+    <!-- Per-task execution record (autopilot transcripts), same timeline skin as the log viewer. -->
+    <el-dialog
+      v-model="transcriptVisible"
+      :title="t('wsMgr.transcriptTitle', { title: transcriptTask?.title ?? '' })"
+      width="720px"
+      append-to-body
+    >
+      <div v-loading="transcriptLoading">
+        <div v-if="!transcriptLoading && !transcriptLines.length" class="col-empty">
+          {{ t('wsMgr.transcriptEmpty') }}
+        </div>
+        <LogTimeline :lines="transcriptLines" :newest-first="true" max-height="56vh" />
+      </div>
+      <template #footer>
+        <el-button size="small" @click="loadTranscript">{{ t('common.refresh') }}</el-button>
+        <el-button size="small" type="primary" @click="transcriptVisible = false">
+          {{ t('common.close') }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

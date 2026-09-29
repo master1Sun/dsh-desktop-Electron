@@ -51,6 +51,14 @@ export interface DispatcherLogEntry {
   pageId?: string
 }
 
+/** Terminal outcome of one dispatch, handed to the wiring layer for an OS notification. */
+export interface DispatcherNotify {
+  outcome: 'done' | 'failed'
+  task: WorkspaceTask
+  /** the executor's exit code (-1 for a spawn failure) */
+  code: number
+}
+
 export interface DispatcherDeps {
   /** undefined very early in boot; the dispatcher no-ops until the registry exists. */
   getRegistry(): RegistryView | undefined
@@ -61,6 +69,12 @@ export interface DispatcherDeps {
   /** persist a whole replacement queue (bumps the shared revision via the wiring layer). */
   writeTasks(tasks: WorkspaceTask[]): void
   log(entry: DispatcherLogEntry): void
+  /**
+   * Fired once per dispatch at its terminal reconcile: done (agent-backfilled or
+   * container-recorded) or failed (abnormal exit with the attempt cap spent). Intermediate
+   * retries stay silent so a crash-looping executor cannot stack toasts.
+   */
+  notify?(entry: DispatcherNotify): void
   /** injectable clock so tests can pin `at` ordering. */
   now?(): number
 }
@@ -118,6 +132,28 @@ export function buildPrompt(task: WorkspaceTask, template?: string): string {
 }
 
 /**
+ * Startup sweep: reclaim tasks a previous container run claimed but never reconciled (the app
+ * was killed mid-dispatch, so the PTY is long gone and nothing will ever flip them). They go
+ * back to todo with the claim cleared; `attempts` is kept so the crash cap still bounds a task
+ * that keeps orphaning. Pure so the sweep is unit-testable without the electron wiring.
+ */
+export function sweepOrphanTasks(
+  tasks: WorkspaceTask[],
+  now = Date.now()
+): { tasks: WorkspaceTask[]; swept: string[] } {
+  const swept: string[] = []
+  const next = tasks.map((t) => {
+    if (t.status !== 'doing' || !t.owner?.startsWith(OWNER_PREFIX)) return t
+    swept.push(t.id)
+    const clone: WorkspaceTask = { ...t, status: 'todo', at: now }
+    delete clone.owner
+    delete clone.dispatchedAt
+    return clone
+  })
+  return { tasks: next, swept }
+}
+
+/**
  * The dispatch state machine. `tick()` is idempotent and cheap; it fills any free concurrency
  * slots with eligible tasks. Each dispatch claims the task (owner/status/attempts), runs the
  * executor, then reconciles on exit. Re-entrancy (a reconcile calling tick) is safe because an
@@ -159,7 +195,11 @@ export class TaskDispatcher {
     }
   }
 
-  private async dispatch(task: WorkspaceTask, page: PageState, s: DispatcherSettings): Promise<void> {
+  private async dispatch(
+    task: WorkspaceTask,
+    page: PageState,
+    s: DispatcherSettings
+  ): Promise<void> {
     const at = this.now()
     const fresh = this.deps.readTasks()
     const t = fresh.find((x) => x.id === task.id)
@@ -177,7 +217,9 @@ export class TaskDispatcher {
 
     const prompt = buildPrompt(task, s.prompt)
     try {
-      const exec = await this.deps.executor.run(page, task, prompt)
+      // Hand the executor the *claimed* copy (attempts/status already set): the transcript
+      // header labels itself with the attempt number off this snapshot.
+      const exec = await this.deps.executor.run(page, t, prompt)
       const code = await exec.exited
       this.reconcile(task.id, code)
     } catch (err) {
@@ -204,12 +246,14 @@ export class TaskDispatcher {
     if (t.status === 'done') {
       // The agent backfilled `workspace_complete` itself — the source of truth, nothing to add.
       this.deps.log({ level: 'info', detail: `由 agent 回填完成`, taskId })
+      this.deps.notify?.({ outcome: 'done', task: t, code })
     } else if (code === 0) {
       t.status = 'done'
       t.at = this.now()
       if (!t.result) t.result = '容器代记：执行器正常退出，但 agent 未回填结果'
       this.deps.writeTasks(tasks)
       this.deps.log({ level: 'info', detail: `执行器退出(0)，容器代为记为完成`, taskId })
+      this.deps.notify?.({ outcome: 'done', task: t, code })
     } else {
       // Abnormal exit (or a spawn failure, code -1): hand it back so it may be retried until the
       // attempt cap, clearing the claim so it becomes eligible again.
@@ -222,6 +266,10 @@ export class TaskDispatcher {
         detail: `执行器异常退出(${code})，退回待办（已试 ${t.attempts ?? 0} 次）`,
         taskId
       })
+      // The cap is spent — nothing will retry it silently anymore, so this is the one failure
+      // worth pulling the user back to the board for.
+      if ((t.attempts ?? 0) >= MAX_ATTEMPTS)
+        this.deps.notify?.({ outcome: 'failed', task: t, code })
     }
     this.tick()
   }

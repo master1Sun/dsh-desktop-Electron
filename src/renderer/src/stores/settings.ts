@@ -100,6 +100,8 @@ export interface Settings {
   autopilotConcurrency?: number
   /** #1：注入执行器的 prompt 模板，含 {title}/{id}/{deps} 占位符；空=内置默认 */
   autopilotPrompt?: string
+  /** 用量账本的单价（USD / 1M tokens）：pageId 或 'default' -> { input, output } */
+  usagePricing?: Record<string, { input: number; output: number }>
   /** 顶栏“选择页面”切换器中被用户隐藏的页面/外部站点 id 列表；空=全部显示，全部隐藏时顶栏切换器与角标一并隐藏 */
   hiddenSwitcherPages?: string[]
 }
@@ -120,7 +122,10 @@ export const reduceMotion = ref(false)
 
 /** What the OS itself asks for — the 'auto' leg of the setting. */
 export function osPrefersReducedMotion(): boolean {
-  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  return (
+    typeof window !== 'undefined' &&
+    !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  )
 }
 
 /** Resolve setting + OS into the class + the exported flag. Undefined mode = 'auto'. */

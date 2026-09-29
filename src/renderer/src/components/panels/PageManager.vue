@@ -1004,12 +1004,18 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
           </div>
           <!-- Cell overflow tooltips share the themed glass bubble (dsh-tip-popper in glass.css
                tracks --glass/--accent, so light/dark both follow the theme + frosted slider);
-               the object form is merged into the underlying ElTooltip props by EP. -->
+               the object form is merged into the underlying ElTooltip props by EP.
+               appendTo 'body' overrides EP's default (the table wrapper): the cell tip uses
+               `strategy: fixed`, and the glass panel card's backdrop-filter becomes the
+               containing block for fixed descendants — trapped there the popper can't be kept
+               inside the window, so a wide tip on the leftmost column gets clipped at the edge.
+               Teleporting to <body> restores viewport-relative positioning (same reason the
+               dialogs here use append-to-body). -->
           <el-table
             :data="pagesStore.pages"
             size="small"
             :empty-text="t('pageMgr.msgEmpty')"
-            :show-overflow-tooltip="{ popperClass: 'dsh-tip-popper dsh-cell-tip' }"
+            :show-overflow-tooltip="{ popperClass: 'dsh-tip-popper dsh-cell-tip', appendTo: 'body' }"
           >
             <el-table-column prop="name" :label="t('pageMgr.colName')" min-width="120">
               <template #default="{ row }">

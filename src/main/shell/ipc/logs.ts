@@ -1,13 +1,25 @@
 import { BrowserWindow, ipcMain, shell } from 'electron'
-import { IPC, type IpcResult, type ListEventsArgs, type ReadLogsArgs } from '../../../shared/types'
+import {
+  IPC,
+  type IpcResult,
+  type ListEventsArgs,
+  type ReadLogsArgs,
+  type ReportUsageArgs
+} from '../../../shared/types'
 import { listEvents, logEvent } from '../events'
 import { logsDir, listLogFiles, readLogTail, startLogStream } from '../logger'
+import { m } from '../i18n'
+import { getUsageSummary, recordUsage } from '../../runtime/diagnostics/usage'
 import { exportDiagnostics } from '../../runtime/diagnostics/diagnostics'
 import { exportSnapshot, importSnapshot } from '../../runtime/pages/snapshot'
 import { runNetworkProbe } from '../../runtime/diagnostics/net-probe'
 import { startNetBarLoop } from '../../runtime/diagnostics/network-bar'
 import { getSystemInfo, getNetworkStats } from '../../runtime/diagnostics/sysinfo'
-import { collectPageMetrics, pruneMetricsBaseline, getMetricsHistory } from '../../runtime/diagnostics/metrics'
+import {
+  collectPageMetrics,
+  pruneMetricsBaseline,
+  getMetricsHistory
+} from '../../runtime/diagnostics/metrics'
 import { getSettings } from '../store'
 import { setTrayResourceWarn } from '../tray'
 import { type IpcCtx } from './util'
@@ -72,6 +84,62 @@ export function registerLogsIpc(ctx: IpcCtx): void {
   ipcMain.handle(IPC.ReadLogs, (_e, args: ReadLogsArgs): IpcResult => {
     try {
       return ok(readLogTail(args?.key ?? '', args?.tail, args?.filter))
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // Autopilot per-task transcript: tail logs/tasks/<taskId>.log through the same reader as the
+  // log viewer. The id comes from the renderer, so it must be a bare filename token — a taskId
+  // carrying a path separator (or `..`) never reaches the filesystem.
+  ipcMain.handle(
+    IPC.GetTaskTranscript,
+    (_e, args: { taskId?: string; tail?: number }): IpcResult => {
+      try {
+        const taskId = String(args?.taskId ?? '')
+        if (!/^[\w.-]+$/.test(taskId) || taskId.includes('..'))
+          return fail(new Error(m('ipc.badTaskId')))
+        return ok(readLogTail(`tasks/${taskId}.log`, args?.tail ?? 800))
+      } catch (err) {
+        return fail(err)
+      }
+    }
+  )
+
+  // Usage ledger: append one manually-entered / agent-reported row (validated finite & non-negative).
+  ipcMain.handle(IPC.ReportUsage, (_e, args: ReportUsageArgs): IpcResult => {
+    try {
+      const pageId = String(args?.pageId ?? '').trim()
+      const input = Number(args?.inputTokens)
+      const output = Number(args?.outputTokens)
+      if (!pageId || !Number.isFinite(input) || !Number.isFinite(output))
+        return fail(new Error('bad usage args'))
+      if (input < 0 || output < 0) return fail(new Error('negative tokens'))
+      recordUsage({
+        ts: Date.now(),
+        pageId,
+        source: args.source === 'mcp' ? 'mcp' : 'manual',
+        ...(args.model ? { model: String(args.model) } : {}),
+        inputTokens: Math.round(input),
+        outputTokens: Math.round(output)
+      })
+      logEvent({
+        level: 'info',
+        kind: 'usage',
+        pageId,
+        detail: `录入用量：输入 ${Math.round(input)} / 输出 ${Math.round(output)} tokens`,
+        meta: { source: args.source === 'mcp' ? 'mcp' : 'manual' }
+      })
+      return ok(true)
+    } catch (err) {
+      return fail(err)
+    }
+  })
+
+  // Usage ledger: the cold-start read behind the 用量 tab (live rows ride OnEvent as usual).
+  ipcMain.handle(IPC.GetUsageSummary, (_e, args: { since?: number }): IpcResult => {
+    try {
+      return ok(getUsageSummary(typeof args?.since === 'number' ? { since: args.since } : {}))
     } catch (err) {
       return fail(err)
     }
@@ -180,9 +248,11 @@ export function registerLogsIpc(ctx: IpcCtx): void {
             pageId: mm.pageId,
             meta: { memMb: mm.memMb, limitMb: settings.memWarnMb ?? 0 }
           })
-          registry.restart(mm.pageId).catch((err) =>
-            console.warn('[metrics] memory restart failed:', (err as Error).message)
-          )
+          registry
+            .restart(mm.pageId)
+            .catch((err) =>
+              console.warn('[metrics] memory restart failed:', (err as Error).message)
+            )
         }
       }
       // A page that stopped (or dropped off the sample) may try the guard again next run.

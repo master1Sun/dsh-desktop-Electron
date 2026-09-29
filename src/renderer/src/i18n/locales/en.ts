@@ -1081,6 +1081,7 @@ const en: Dict = {
       manifest: 'Config',
       'container-mcp': 'Outbound MCP',
       autopilot: 'Autopilot',
+      usage: 'Usage',
       unknown: 'Event'
     },
     page: {
@@ -1121,6 +1122,7 @@ const en: Dict = {
     diagnostics: { export: 'diagnostic bundle exported' },
     'container-mcp': 'container outbound MCP server event',
     autopilot: 'autopilot task dispatch',
+    usage: 'token usage ledger event',
     app: {
       boot: 'container started (v{version})',
       crash: 'uncaught exception in the container main process'
@@ -1273,10 +1275,50 @@ const en: Dict = {
     finish: 'Finish',
     reopen: 'Reopen',
     deleteTask: 'Delete task',
+    viewTranscript: 'View output',
+    transcriptTitle: 'Execution record: {title}',
+    transcriptEmpty: 'No captured output yet (the executor wrote nothing, or the log was cleaned)',
+    msgTranscriptFail: 'Failed to read the execution record',
     msgTaskSaved: 'Task queue updated',
     msgTaskFail: 'Failed to update the task queue',
     msgCopied: 'Path copied to clipboard',
     msgCopyFail: 'Copy failed — select it manually'
+  },
+  /** Task board ▸ Usage tab: the token ledger (parsed CLI output / agent self-reports / manual rows). */
+  usageMgr: {
+    tab: 'Usage',
+    title: 'Token usage',
+    hint: 'Rows come from parsed known-CLI output lines, agents self-reporting over the container MCP, or manual backfills here; costs are estimates priced in USD per 1M tokens.',
+    range7: 'Last 7 days',
+    range30: 'Last 30 days',
+    empty: 'No usage rows in the selected window',
+    colPage: 'Page',
+    colInput: 'Input tokens',
+    colOutput: 'Output tokens',
+    colCalls: 'Rows',
+    colCost: 'Est. cost',
+    total: 'Total: {in} input / {out} output tokens',
+    noPricing: 'no pricing set — no cost estimate',
+    byDay: 'Usage by day',
+    pricingTitle: 'Pricing (USD / 1M tokens)',
+    pricingHint:
+      'Estimated costs appear only once a default or per-page price is set; a blank side counts as 0.',
+    priceDefault: 'Default',
+    priceInput: 'Input price',
+    priceOutput: 'Output price',
+    priceAddPage: 'Pick a page…',
+    priceAdd: 'Per-page price',
+    priceRemove: 'Remove this page price',
+    msgPriceSaved: 'Pricing saved',
+    msgPriceFail: 'Failed to save pricing',
+    manualTitle: 'Manual backfill',
+    manualHint: 'When an agent’s CLI prints no parseable usage line, record a row for it here.',
+    manualPage: 'Pick a page…',
+    manualAdd: 'Record',
+    manualNeedFields: 'Fill in the page and input/output tokens (non-negative numbers)',
+    msgManualOk: 'Usage row recorded',
+    msgManualFail: 'Failed to record the usage row',
+    msgLoadFail: 'Failed to load usage'
   },
   /** Rebindable shortcut action names (key = KeybindingAction). */
   kb: {

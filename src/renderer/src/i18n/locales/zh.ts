@@ -1056,6 +1056,7 @@ const zh: Dict = {
       mcp: 'MCP',
       'container-mcp': '对外 MCP',
       autopilot: '自动派发',
+      usage: '用量',
       unknown: '事件'
     },
     page: {
@@ -1095,6 +1096,7 @@ const zh: Dict = {
     diagnostics: { export: '诊断包已导出' },
     'container-mcp': '容器对外 MCP 服务事件',
     autopilot: '自动派发任务',
+    usage: '用量账本事件',
     app: { boot: '容器启动（v{version}）', crash: '容器主进程发生未捕获异常' }
   },
   svc: {
@@ -1233,10 +1235,49 @@ const zh: Dict = {
     finish: '完成',
     reopen: '重开',
     deleteTask: '删除任务',
+    viewTranscript: '查看输出',
+    transcriptTitle: '执行记录：{title}',
+    transcriptEmpty: '还没有捕获到输出（执行器未写入或日志已清理）',
+    msgTranscriptFail: '读取执行记录失败',
     msgTaskSaved: '任务队列已更新',
     msgTaskFail: '任务队列更新失败',
     msgCopied: '路径已复制到剪贴板',
     msgCopyFail: '复制失败，请手动选择'
+  },
+  /** 任务看板·用量 Tab：token 用量账本（解析 CLI 输出 / agent 自报 / 手动补录）。 */
+  usageMgr: {
+    tab: '用量',
+    title: 'Token 用量',
+    hint: '从已知 CLI 的输出行自动解析、由 agent 通过容器 MCP 自报，或在这里手动补录；成本按下方单价估算（USD / 1M tokens）。',
+    range7: '近 7 天',
+    range30: '近 30 天',
+    empty: '所选范围内还没有用量记录',
+    colPage: '页面',
+    colInput: '输入 tokens',
+    colOutput: '输出 tokens',
+    colCalls: '笔数',
+    colCost: '估算成本',
+    total: '合计：输入 {in} / 输出 {out} tokens',
+    noPricing: '未设单价，无成本估算',
+    byDay: '按日用量',
+    pricingTitle: '单价（USD / 1M tokens）',
+    pricingHint: '设置默认价或按页覆盖后，表里的估算成本才会显示；留空的列按 0 计。',
+    priceDefault: '默认',
+    priceInput: '输入价',
+    priceOutput: '输出价',
+    priceAddPage: '选择页面…',
+    priceAdd: '按页覆盖',
+    priceRemove: '移除该页单价',
+    msgPriceSaved: '单价已保存',
+    msgPriceFail: '单价保存失败',
+    manualTitle: '手动补录',
+    manualHint: 'agent 的 CLI 不打印可解析的用量行时，在这里替它记一笔。',
+    manualPage: '选择页面…',
+    manualAdd: '记一笔',
+    manualNeedFields: '请填写页面和输入/输出 tokens（非负数字）',
+    msgManualOk: '已补录一条用量',
+    msgManualFail: '补录用量失败',
+    msgLoadFail: '读取用量失败'
   },
   /** 可重绑快捷键的动作名（key = KeybindingAction）。 */
   kb: {

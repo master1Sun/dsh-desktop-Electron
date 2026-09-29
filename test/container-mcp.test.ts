@@ -71,7 +71,8 @@ const TOOL_NAMES = [
   'container_call_mcp_tool',
   'container_start_page',
   'container_stop_page',
-  'container_restart_page'
+  'container_restart_page',
+  'container_report_usage'
 ]
 
 beforeAll(() => {
@@ -130,7 +131,10 @@ describe('#11 container MCP server — HTTP guard + protocol', () => {
   it('rejects an unauthenticated request with 401', async () => {
     const res = await fetch(getContainerMcpServerInfo()!.url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream'
+      },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
     })
     expect(res.status).toBe(401)
