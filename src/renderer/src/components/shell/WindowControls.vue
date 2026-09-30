@@ -7,7 +7,7 @@ import { t } from '@renderer/i18n'
  * frameless-window traffic lights. Split out of MenuBar — these are leaf buttons whose
  * only logic is the window-control IPC, so they carry no shared state with the panels.
  *
- * The view actions are styled as bordered pills that mirror the 双屏 `.dual-btn` group
+ * The view actions are styled as bare icons (no ring) that mirror the 双屏 `.dual-btn` group
  * (same 28×26 footprint, 15px glyph, stroke 1.2) so the whole top-bar action strip reads
  * as one symmetric row around the page picker; the traffic lights stay flush full-height.
  */
@@ -246,10 +246,10 @@ async function close(): Promise<void> {
   color: #fff;
 }
 
-/* View actions (back / forward / reload / theme / detach): bordered pills that mirror the
-   双屏 `.dual-btn` group in MenuBar — same 28×26 footprint, 1px border, full radius, 15px
-   glyph — so the action strip is symmetric. They self-center in the 38px bar and carry a
-   3px side margin for the gap the flat traffic lights don't need. */
+/* View actions (back / forward / reload / theme / detach): bare icons that mirror the 双屏
+   `.dual-btn` group and the terminal `.act-btn` — same 28×26 footprint, 15px glyph, no ring.
+   A transparent border keeps the box geometry identical to the bordered look it replaces, so
+   removing the ring never shifts the strip. They self-center in the 38px bar with a 3px side margin. */
 .win-btn.view {
   width: 28px;
   height: 26px;
@@ -257,7 +257,7 @@ async function close(): Promise<void> {
   margin: 0 3px;
   font-size: 15px;
   background: none;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: 9999px;
   transition:
     border-color 0.15s ease,
@@ -267,7 +267,6 @@ async function close(): Promise<void> {
 
 .win-btn.view:hover:not(:disabled) {
   background: var(--dsh-wash-hover);
-  border-color: var(--accent);
   color: var(--accent);
   -webkit-backdrop-filter: var(--dsh-wash-frost);
   backdrop-filter: var(--dsh-wash-frost);
@@ -275,7 +274,6 @@ async function close(): Promise<void> {
 
 .win-btn.view:disabled {
   background: none;
-  border-color: var(--border);
   color: var(--text-dim);
   opacity: 0.5;
 }

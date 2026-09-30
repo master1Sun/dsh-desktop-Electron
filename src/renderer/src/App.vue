@@ -1562,7 +1562,6 @@ const showNav = computed(() =>
       <MenuBar
         v-if="!isPopout"
         :current="activePanel"
-        :outdated-count="updatesStore.outdated.length"
         :is-dark="isDark"
         :theme-mode="themeMode"
         :pages="pagesStore.pages"

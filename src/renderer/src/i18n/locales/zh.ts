@@ -84,8 +84,7 @@ const zh: Dict = {
     groupPages: '页面与应用',
     groupRuntime: '运行环境',
     groupBoard: '任务',
-    groupUi: '界面',
-    groupNetwork: '网络与隐私',
+    groupSettings: '设置',
     groupHelp: '帮助与诊断'
   },
   appmgr: {
@@ -353,6 +352,7 @@ const zh: Dict = {
     sysRuntimes: '运行栈',
     sysUserData: '用户数据',
     sysInstallDir: '安装目录',
+    sysEmpty: '尚未获取系统信息，点「刷新」重试',
     sysInterfaces: '网卡数',
     /* 网络与工具：实时网络信息 */
     netLiveTitle: '实时网络',
@@ -392,6 +392,15 @@ const zh: Dict = {
     tipUpdates:
       'git 项目一键 git pull --ff-only（有未提交改动自动跳过）；npm 项目比对 registry 最新版；DSH / OpenClaw 可直接升级（OpenClaw 重装后重启该页生效）。',
     aboutNode: '内置 Node',
+    aboutNodeDesc: '页面启动时使用的内置运行时版本',
+    /** 关于页的分组小标题（与「设置」各卡片同层级）。 */
+    aboutGroupRuntime: '运行时与版本',
+    aboutGroupUpdates: '更新',
+    aboutUpdatesTitle: '待更新',
+    aboutUpdatesDesc: '后台每 30 分钟自动巡检一次检测结果',
+    aboutUpdatesCount: '{n} 项待更新',
+    aboutUpdatesNone: '已是最新',
+    aboutUpdatesView: '查看列表',
     aboutRuntimePath: '运行时路径',
     nodeVersionPick: '搜索/选择版本',
     nodeVerEmpty: '暂无可用版本（离线或镜像不可达）',
@@ -409,6 +418,7 @@ const zh: Dict = {
     nodeUpdated: '内置 Node 已更新为 {v}，新启动的页面即会使用',
     nodeRestored: '已恢复为安装包内置的 Node',
     aboutPages: 'Pages',
+    aboutPagesDesc: '已安装页面中当前正在运行的数量',
     aboutDevMode:
       '开发者模式：F12 打开容器界面 DevTools；主界面工具条上的同名义按钮调试当前内嵌 page。',
     aboutMinimizeTip:

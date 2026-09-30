@@ -176,7 +176,7 @@ const STATIC_GROUPS: Group[] = [
     ]
   },
   {
-    titleKey: 'console.groupUi',
+    titleKey: 'console.groupSettings',
     items: [
       {
         id: 'settings:view',
@@ -205,12 +205,7 @@ const STATIC_GROUPS: Group[] = [
         tab: 'keys',
         labelKey: 'settings.tabKeys',
         icon: markRaw(Key)
-      }
-    ]
-  },
-  {
-    titleKey: 'console.groupNetwork',
-    items: [
+      },
       {
         id: 'settings:download',
         panel: 'settings',
@@ -342,6 +337,14 @@ function leafIdFor(panel: string, tab?: string): string {
 function select(leaf: Leaf): void {
   if (active.value?.id !== leaf.id) active.value = leaf
 }
+/**
+ * 子面板内部发起的同面板跳转（关于 ▸ 待更新 → 更新列表）：左导航是这里的所有权，
+ * 不能只等宿主传 `initial`，否则内容切了、导航选中项还停在旧 leaf。
+ */
+function gotoLeaf(panel: string, tab?: string): void {
+  const hit = flatLeaves.value.find((l) => l.id === leafIdFor(panel, tab))
+  if (hit) select(hit)
+}
 /** Apply a deep-link target: jump to the matching leaf whenever the host passes a new one. */
 watch(
   () => props.initial,
@@ -365,6 +368,17 @@ watch(flatLeaves, (leaves) => {
 
 const activeLabel = computed(() => (active.value ? leafLabel(active.value) : ''))
 
+/* The console sheet runs edge-to-edge, so a lone toggle on a settings row would drift to the far
+   right edge of a wide window. Narrow mode caps the settings / about panes (the captioned form-card
+   language) to a comfortable reading measure. Data panels — page/port tables, resource trends, the
+   board, MCP lists — keep the full width they need. */
+const narrowMeasure = computed(() => {
+  const a = active.value
+  if (!a) return false
+  if (a.panel === 'settings') return true
+  return a.panel === 'help' && a.tab === 'about'
+})
+
 function onClose(): void {
   emit('close')
 }
@@ -376,7 +390,7 @@ watch(active, (leaf) => {
 </script>
 
 <template>
-  <div class="console">
+  <div class="console" :class="{ narrow: narrowMeasure }">
     <aside class="console-nav">
       <button class="console-back" :aria-label="t('console.back')" @click="onClose">
         <el-icon><ArrowLeft /></el-icon>
@@ -424,6 +438,7 @@ watch(active, (leaf) => {
           @open-page="(id) => emit('open-page', id)"
           @open-terminal="(id) => emit('open-terminal', id)"
           @check-updates="emit('check-updates')"
+          @pane-jump="gotoLeaf(active!.panel, $event)"
           @close="onClose"
         />
       </div>
@@ -433,6 +448,7 @@ watch(active, (leaf) => {
 
 <style scoped>
 .console {
+  --console-col-w: 900px;
   display: flex;
   align-items: stretch;
   gap: 16px;
@@ -441,16 +457,19 @@ watch(active, (leaf) => {
   padding: 4px;
 }
 
-/* ---- left nav --------------------------------------------------------------- */
+/* ---- left nav ---------------------------------------------------------------
+   Modern desktop-app sidebar (VS Code / Windows 11 设置): a fixed, slightly wider rail with
+   comfortable rows, clear group captions and a soft active state. The column shares one measure
+   with the content via `--console-col-w` so the nav + page body read as a single grid. */
 .console-nav {
-  width: 244px;
+  width: 258px;
   flex: none;
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-height: 0;
-  padding: 6px 8px 6px 4px;
-  border-right: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border));
+  padding: 8px 10px 8px 6px;
+  border-right: 1px solid color-mix(in srgb, var(--accent) 12%, var(--border));
 }
 .console-back {
   display: inline-flex;
@@ -489,28 +508,32 @@ watch(active, (leaf) => {
   padding-right: 4px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 .nav-group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin-bottom: 10px;
+  gap: 3px;
+  margin-bottom: 18px;
 }
+.nav-group:last-child {
+  margin-bottom: 4px;
+}
+/* Group caption: a quiet, tracked section header sitting above its rows — the desktop-app cue that
+   separates clusters without drawing a box around them. */
 .nav-group-title {
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-  opacity: 0.75;
-  padding: 6px 12px 4px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: color-mix(in srgb, var(--text-dim) 82%, transparent);
+  padding: 6px 12px 6px;
   user-select: none;
 }
 .nav-item {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   width: 100%;
   padding: 9px 12px;
   font-size: 13.5px;
@@ -534,6 +557,10 @@ watch(active, (leaf) => {
 .nav-icon {
   flex: none;
   font-size: 16px;
+  opacity: 0.9;
+}
+.nav-item.active .nav-icon {
+  opacity: 1;
 }
 .nav-label {
   overflow: hidden;
@@ -542,14 +569,14 @@ watch(active, (leaf) => {
 .nav-item.active {
   color: var(--accent);
   font-weight: 600;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .nav-item.active::before {
   content: '';
   position: absolute;
   left: 0;
-  top: 20%;
-  bottom: 20%;
+  top: 24%;
+  bottom: 24%;
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--accent);
@@ -566,24 +593,38 @@ watch(active, (leaf) => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   overflow-y: auto;
   /* 内容列是控制台唯一的外层滚动容器：异步数据落位时滚动条出现/消失会带走 ~10px 宽，
      整列内容左右抖一下；恒预留槽位后宽度恒定。 */
   scrollbar-gutter: stable;
-  padding: 4px 8px 8px 4px;
+  padding: 8px 20px 12px 12px;
 }
+/* Page header: a moderate, grounded title over a hairline baseline instead of the old oversized
+   28px block floating in whitespace. Capped to `--console-col-w` (shared with the nav) and kept
+   flush-left so a wide window shows comfortable reading measure + margin, exactly like a desktop
+   settings page — rows stop stretching edge-to-edge across the whole viewport. */
 .console-title {
-  margin: 6px 0 2px;
-  font-size: 28px;
-  font-weight: 700;
+  margin: 0;
+  padding: 4px 2px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  font-size: 21px;
+  font-weight: 650;
   letter-spacing: -0.01em;
   color: var(--text);
   flex: none;
+  width: 100%;
 }
 .console-content {
   flex: 1 1 auto;
   min-height: 0;
+  width: 100%;
+}
+/* Narrow (settings / about): ground the title and card column to one measure, flush-left, so rows
+   stop stretching across the whole viewport. Data panels leave this off and run full width. */
+.console.narrow .console-title,
+.console.narrow .console-content {
+  max-width: var(--console-col-w);
 }
 /* The embedded panel owns its own scroll on a single-pane; drop the rail (already hidden via
    `pane`) and let the content fill the console body without a nested scroll container. */

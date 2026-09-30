@@ -10,7 +10,21 @@ import {
   Document,
   Tickets,
   TrendCharts,
-  Monitor
+  Monitor,
+  Refresh,
+  Position,
+  Cpu,
+  Bell,
+  InfoFilled,
+  FolderOpened,
+  Warning,
+  Odometer,
+  Clock,
+  Timer,
+  ChatLineSquare,
+  Grid,
+  Coin,
+  Box
 } from '@element-plus/icons-vue'
 import PageManager from '@renderer/components/panels/PageManager.vue'
 import DshManager from '@renderer/components/panels/DshManager.vue'
@@ -80,6 +94,8 @@ const emit = defineEmits<{
   'apply-theme': [mode: 'auto' | 'light' | 'dark']
   'open-page': [id: string]
   'open-terminal': [id: string]
+  /** 单栏（控制台）下请求宿主把左导航切到同面板的另一个 leaf（关于 ▸ 待更新跳转更新列表）。 */
+  'pane-jump': [tab: string]
   close: []
 }>()
 
@@ -364,6 +380,28 @@ async function doNodeRestore(): Promise<void> {
 
 /** 帮助面板的竖排分类 tab：关于 / 更新 / 诊断 / 日志 / 事件（与 SettingsPanel 同构）。 */
 const helpTab = ref(props.pane || props.initialTab || 'about')
+
+/** 关于页的待更新读数：后台巡检（启动 + 每 30min）写入 updates.outdated，这里只读。 */
+const pendingUpdateCount = computed(() => updates.outdated.length)
+const pendingUpdatesText = computed(() =>
+  pendingUpdateCount.value
+    ? t('panel.aboutUpdatesCount', { n: pendingUpdateCount.value })
+    : t('panel.aboutUpdatesNone')
+)
+
+/**
+ * 关于 ▸ 待更新行跳转：整栏模式里直接切 help 自己的竖排 rail；单栏（控制台）里
+ * rail 被隐藏，需要冒泡给父级同步左导航，否则内容切了、选中项还停在「关于」。
+ */
+async function goToUpdatesLeaf(): Promise<void> {
+  if (!props.pane) {
+    helpTab.value = 'updates'
+    return
+  }
+  emit('pane-jump', 'updates')
+  await nextTick()
+  helpTab.value = 'updates'
+}
 
 // A deep link arriving while the panel is already mounted must still move the rail — but only on
 // an actual change, otherwise it would yank the user back every time the parent re-renders.
@@ -965,173 +1003,339 @@ async function doImportSnapshot(): Promise<void> {
               ><el-icon><Help /></el-icon>{{ t('panel.tabAbout') }}</span
             >
           </template>
-          <div class="kv">
-            <span>{{ t('panel.aboutNode') }}</span>
-            <strong :class="props.runtime.ok ? 'ok-text' : 'err-text'">
-              {{ props.runtime.version || t('panel.notDetected') }}
-            </strong>
-            <el-tag v-if="props.runtime.override" size="small" effect="plain" round type="warning">
-              {{ t('panel.nodeTagUpdated') }}
-            </el-tag>
-            <span class="node-update-ctl">
-              <el-select
-                v-model="nodeSel"
-                size="small"
-                filterable
-                default-first-option
-                :reserve-keyword="false"
-                :placeholder="t('panel.nodeVersionPick')"
-                :loading="nodeLoading"
-                :disabled="updates.nodeBusy"
-                style="width: 190px"
-              >
-                <el-option
-                  v-for="v in nodeVersions"
-                  :key="v.version"
-                  :label="nodeVersionLabel(v)"
-                  :value="v.version"
-                  :disabled="v.version === props.runtime.version"
-                />
-              </el-select>
-              <el-button
-                size="small"
-                type="primary"
-                :disabled="!nodeSel || nodeSel === props.runtime.version"
-                :loading="updates.nodeBusy"
-                @click="doNodeUpdate"
-              >
-                {{ props.runtime.ok ? t('panel.nodeUpdateBtn') : t('panel.installBtn') }}
-              </el-button>
-              <el-tooltip
-                v-if="props.runtime.override"
-                :content="t('panel.nodeRestoreTip')"
-                placement="top"
-                popper-class="dsh-tip-popper"
-              >
-                <el-button size="small" text :disabled="updates.nodeBusy" @click="doNodeRestore">
-                  {{ t('panel.nodeRestoreBtn') }}
+          <!-- 与控制台「设置」同一套卡片行语言：分组小标题 + 大圆角卡片，
+               每行 = 图标 tile · 标题 + 灰色描述（左） · 值/控件（右），行间发丝虚线。 -->
+          <div class="about-groups">
+            <section class="about-group">
+              <h3 class="about-caption">{{ t('panel.aboutGroupRuntime') }}</h3>
+              <div class="about-card">
+                <div class="setting-row setting-row--stack">
+                  <span class="row-icon"
+                    ><el-icon><Refresh /></el-icon
+                  ></span>
+                  <div class="row-label">
+                    <span class="row-title">{{ t('panel.aboutNode') }}</span>
+                    <span class="row-desc">
+                      {{ t('panel.aboutNodeDesc') }}：
+                      <strong :class="props.runtime.ok ? 'ok-text' : 'err-text'">
+                        {{ props.runtime.version || t('panel.notDetected') }}
+                      </strong>
+                      <el-tag
+                        v-if="props.runtime.override"
+                        size="small"
+                        effect="plain"
+                        round
+                        type="warning"
+                      >
+                        {{ t('panel.nodeTagUpdated') }}
+                      </el-tag>
+                    </span>
+                  </div>
+                  <div class="row-control node-update-ctl">
+                    <el-select
+                      v-model="nodeSel"
+                      size="small"
+                      filterable
+                      default-first-option
+                      :reserve-keyword="false"
+                      :placeholder="t('panel.nodeVersionPick')"
+                      :loading="nodeLoading"
+                      :disabled="updates.nodeBusy"
+                      style="width: 190px"
+                    >
+                      <el-option
+                        v-for="v in nodeVersions"
+                        :key="v.version"
+                        :label="nodeVersionLabel(v)"
+                        :value="v.version"
+                        :disabled="v.version === props.runtime.version"
+                      />
+                    </el-select>
+
+                    <el-button
+                      size="small"
+                      type="primary"
+                      :disabled="!nodeSel || nodeSel === props.runtime.version"
+                      :loading="updates.nodeBusy"
+                      @click="doNodeUpdate"
+                    >
+                      {{ props.runtime.ok ? t('panel.nodeUpdateBtn') : t('panel.installBtn') }}
+                    </el-button>
+
+                    <el-tooltip
+                      v-if="props.runtime.override"
+                      :content="t('panel.nodeRestoreTip')"
+                      placement="top"
+                      popper-class="dsh-tip-popper"
+                    >
+                      <el-button
+                        size="small"
+                        text
+                        :disabled="updates.nodeBusy"
+                        @click="doNodeRestore"
+                      >
+                        {{ t('panel.nodeRestoreBtn') }}
+                      </el-button>
+                    </el-tooltip>
+
+                    <label class="node-incompat-toggle" :title="t('panel.nodeShowIncompatibleTip')">
+                      <el-switch
+                        v-model="showIncompatible"
+                        size="small"
+                        :disabled="updates.nodeBusy"
+                        @change="onToggleIncompatible"
+                      />
+                      <span>{{ t('panel.nodeShowIncompatible') }}</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div v-if="nodeError" class="node-load-err setting-row setting-row--stack">
+                  <span class="row-icon"
+                    ><el-icon><Warning /></el-icon
+                  ></span>
+                  <div class="row-label">
+                    <span class="row-title err-text">{{ nodeError }}</span>
+                  </div>
+                  <div class="row-control">
+                    <el-button size="small" text :loading="nodeLoading" @click="loadNodeVersions">
+                      {{ t('panel.retry') }}
+                    </el-button>
+                  </div>
+                </div>
+
+                <div v-if="updates.nodeProgress" class="upd-progress node-prog setting-row">
+                  <el-progress
+                    class="node-prog-bar"
+                    :percentage="
+                      updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)
+                    "
+                    :stroke-width="6"
+                    :indeterminate="
+                      updates.nodeProgress.phase === 'extract' ||
+                      (updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)) === 0
+                    "
+                    striped
+                    :striped-flow="updates.nodeProgress.phase === 'extract'"
+                  />
+                  <span class="cell-sub">{{ updates.nodeProgress.message }}</span>
+                </div>
+
+                <div class="setting-row setting-row--stack">
+                  <span class="row-icon"
+                    ><el-icon><FolderOpened /></el-icon
+                  ></span>
+                  <div class="row-label">
+                    <span class="row-title">{{ t('panel.aboutRuntimePath') }}</span>
+                  </div>
+                  <div class="row-control">
+                    <code class="path-value">{{ props.runtime.path || '-' }}</code>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="about-group">
+              <h3 class="about-caption">{{ t('panel.aboutGroupUpdates') }}</h3>
+              <div class="about-card">
+                <div class="setting-row">
+                  <span class="row-icon"
+                    ><el-icon><Bell /></el-icon
+                  ></span>
+                  <div class="row-label">
+                    <span class="row-title">{{ t('panel.aboutUpdatesTitle') }}</span>
+                    <span class="row-desc">{{ t('panel.aboutUpdatesDesc') }}</span>
+                  </div>
+                  <div class="row-control">
+                    <span class="row-value">{{ pendingUpdatesText }}</span>
+                    <el-button
+                      v-if="pendingUpdateCount"
+                      size="small"
+                      type="primary"
+                      plain
+                      @click="goToUpdatesLeaf"
+                    >
+                      {{ t('panel.aboutUpdatesView') }}
+                    </el-button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="about-group">
+              <h3 class="about-caption">
+                {{ t('panel.sysTitle') }}
+                <el-button size="small" text :loading="sysLoading" @click="loadSystemInfo">
+                  {{ t('panel.sysRefresh') }}
                 </el-button>
-              </el-tooltip>
-              <label class="node-incompat-toggle" :title="t('panel.nodeShowIncompatibleTip')">
-                <el-switch
-                  v-model="showIncompatible"
-                  size="small"
-                  :disabled="updates.nodeBusy"
-                  @change="onToggleIncompatible"
-                />
-                <span>{{ t('panel.nodeShowIncompatible') }}</span>
-              </label>
-            </span>
-          </div>
-          <div v-if="nodeError" class="node-load-err">
-            <span class="cell-sub err-text">{{ nodeError }}</span>
-            <el-button size="small" text :loading="nodeLoading" @click="loadNodeVersions">
-              {{ t('panel.retry') }}
-            </el-button>
-          </div>
-          <div v-if="updates.nodeProgress" class="upd-progress node-prog">
-            <el-progress
-              class="node-prog-bar"
-              :percentage="updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)"
-              :stroke-width="6"
-              :indeterminate="
-                updates.nodeProgress.phase === 'extract' ||
-                (updates.nodeProgress.percent ?? progressPercent(updates.nodeProgress)) === 0
-              "
-              striped
-              :striped-flow="updates.nodeProgress.phase === 'extract'"
-            />
-            <span class="cell-sub">{{ updates.nodeProgress.message }}</span>
-          </div>
-          <div class="kv">
-            <span>{{ t('panel.aboutRuntimePath') }}</span>
-            <code>{{ props.runtime.path || '-' }}</code>
-          </div>
-          <div class="kv">
-            <span>Pages</span>
-            <strong>{{
-              t('panel.aboutPagesRunning', { running: props.runningCount, total: props.totalCount })
-            }}</strong>
+              </h3>
+              <div class="about-card">
+                <div class="setting-row">
+                  <span class="row-icon"
+                    ><el-icon><Position /></el-icon
+                  ></span>
+                  <div class="row-label">
+                    <span class="row-title">{{ t('panel.aboutPages') }}</span>
+                    <span class="row-desc">{{ t('panel.aboutPagesDesc') }}</span>
+                  </div>
+                  <div class="row-value">
+                    {{
+                      t('panel.aboutPagesRunning', {
+                        running: props.runningCount,
+                        total: props.totalCount
+                      })
+                    }}
+                  </div>
+                </div>
+                <template v-if="sysInfo">
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><InfoFilled /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysAppVersion') }}</span>
+                    </div>
+                    <div class="row-value">
+                      {{ sysInfo.appVersion }}
+                      <el-tag size="small" effect="plain" round>
+                        {{ sysInfo.packaged ? t('panel.packagedYes') : t('panel.packagedNo') }}
+                      </el-tag>
+                    </div>
+                  </div>
+
+                  <div class="setting-row setting-row--stack">
+                    <span class="row-icon"
+                      ><el-icon><Cpu /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysRuntimes') }}</span>
+                    </div>
+                    <div class="row-value">
+                      Electron {{ sysInfo.electron }} · Chrome {{ sysInfo.chrome }} · Node
+                      {{ sysInfo.node }}
+                    </div>
+                  </div>
+
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><Monitor /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysOs') }}</span>
+                    </div>
+                    <div class="row-value">
+                      {{ sysInfo.osType }} {{ sysInfo.osRelease }} · {{ sysInfo.arch }}
+                    </div>
+                  </div>
+
+                  <div class="setting-row setting-row--stack">
+                    <span class="row-icon"
+                      ><el-icon><Connection /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysHost') }}</span>
+                    </div>
+                    <div class="row-value">{{ sysInfo.hostname }}</div>
+                  </div>
+
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><Odometer /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysCpu') }}</span>
+                    </div>
+                    <div class="row-value">
+                      {{ sysInfo.cpuModel || '?' }} ·
+                      {{ t('panel.sysCpuCores', { n: sysInfo.cpuCores }) }}
+                    </div>
+                  </div>
+
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><Coin /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysMem') }}</span>
+                    </div>
+                    <div class="row-value">
+                      {{
+                        t('panel.sysMemUsed', {
+                          used: fmtBytes(sysInfo.totalMem - sysInfo.freeMem),
+                          total: fmtBytes(sysInfo.totalMem)
+                        })
+                      }}
+                    </div>
+                  </div>
+
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><Clock /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysUptime') }}</span>
+                    </div>
+                    <div class="row-value">{{ fmtDuration(sysInfo.osUptimeSec) }}</div>
+                  </div>
+
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><Timer /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysAppUptime') }}</span>
+                    </div>
+                    <div class="row-value">{{ fmtDuration(sysInfo.appUptimeSec) }}</div>
+                  </div>
+
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><ChatLineSquare /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysLocale') }}</span>
+                    </div>
+                    <div class="row-value">
+                      {{ sysInfo.locale || '-' }} / {{ sysInfo.timezone || '-' }}
+                    </div>
+                  </div>
+
+                  <div class="setting-row">
+                    <span class="row-icon"
+                      ><el-icon><Grid /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysInterfaces') }}</span>
+                    </div>
+                    <div class="row-value">{{ sysInfo.interfaceCount }}</div>
+                  </div>
+
+                  <div class="setting-row setting-row--stack">
+                    <span class="row-icon"
+                      ><el-icon><FolderOpened /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysUserData') }}</span>
+                    </div>
+                    <div class="row-value full">{{ sysInfo.userData }}</div>
+                  </div>
+
+                  <div class="setting-row setting-row--stack">
+                    <span class="row-icon"
+                      ><el-icon><Box /></el-icon
+                    ></span>
+                    <div class="row-label">
+                      <span class="row-title">{{ t('panel.sysInstallDir') }}</span>
+                    </div>
+                    <div class="row-value full">{{ sysInfo.installDir }}</div>
+                  </div>
+                </template>
+                <div v-else class="sys-empty">{{ t('panel.sysEmpty') }}</div>
+              </div>
+            </section>
           </div>
 
-          <!-- System / runtime overview -->
-          <div class="line" />
-          <div class="head">
-            <span>{{ t('panel.sysTitle') }}</span>
-            <el-button size="small" text :loading="sysLoading" @click="loadSystemInfo">
-              {{ t('panel.sysRefresh') }}
-            </el-button>
-          </div>
-          <div v-if="sysInfo" class="sys-grid">
-            <div class="sys-row">
-              <span>{{ t('panel.sysOs') }}</span>
-              <code>{{ sysInfo.osType }} {{ sysInfo.osRelease }} · {{ sysInfo.arch }}</code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysHost') }}</span>
-              <code>{{ sysInfo.hostname }}</code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysCpu') }}</span>
-              <code>
-                {{ sysInfo.cpuModel || '?' }} ·
-                {{ t('panel.sysCpuCores', { n: sysInfo.cpuCores }) }}
-              </code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysMem') }}</span>
-              <code>{{
-                t('panel.sysMemUsed', {
-                  used: fmtBytes(sysInfo.totalMem - sysInfo.freeMem),
-                  total: fmtBytes(sysInfo.totalMem)
-                })
-              }}</code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysUptime') }}</span>
-              <code>{{ fmtDuration(sysInfo.osUptimeSec) }}</code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysAppUptime') }}</span>
-              <code>{{ fmtDuration(sysInfo.appUptimeSec) }}</code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysLocale') }}</span>
-              <code>{{ sysInfo.locale || '-' }} / {{ sysInfo.timezone || '-' }}</code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysAppVersion') }}</span>
-              <code>
-                {{ sysInfo.appVersion }}
-                <el-tag size="small" effect="plain" round>
-                  {{ sysInfo.packaged ? t('panel.packagedYes') : t('panel.packagedNo') }}
-                </el-tag>
-              </code>
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysRuntimes') }}</span>
-              <code
-                >Electron {{ sysInfo.electron }} · Chrome {{ sysInfo.chrome }} · Node
-                {{ sysInfo.node }}</code
-              >
-            </div>
-            <div class="sys-row">
-              <span>{{ t('panel.sysInterfaces') }}</span>
-              <code>{{ sysInfo.interfaceCount }}</code>
-            </div>
-            <div class="sys-row sys-wide">
-              <span>{{ t('panel.sysUserData') }}</span>
-              <code>{{ sysInfo.userData }}</code>
-            </div>
-            <div class="sys-row sys-wide">
-              <span>{{ t('panel.sysInstallDir') }}</span>
-              <code>{{ sysInfo.installDir }}</code>
-            </div>
-          </div>
-
-          <!-- Copyright footer sits outside the v-if sys-grid so it shows even before the
-               system snapshot has loaded. -->
-          <div class="line" />
+          <!-- 版权页脚在卡片流之外，系统快照未到（sysInfo 为空）时也能看到。 -->
           <div class="about-copyright">
             {{ t('panel.copyright', { year: copyrightYear }) }}
           </div>
@@ -1732,8 +1936,7 @@ async function doImportSnapshot(): Promise<void> {
   margin-top: 8px;
 }
 
-.tip code,
-.about code {
+.tip code {
   background: var(--glass-chip);
   border: 1px solid var(--border);
   border-radius: 5px;
@@ -1784,58 +1987,16 @@ async function doImportSnapshot(): Promise<void> {
   color: var(--el-color-danger);
 }
 
-.about p {
-  font-size: 12.5px;
-  color: var(--text-dim);
-  line-height: 1.7;
-  margin: 8px 0;
-}
-
-.about kbd {
-  border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  padding: 0 5px;
-  font-size: 11px;
-  color: var(--text);
-  background: var(--glass-chip);
-}
-
 .line {
   height: 1px;
   background: var(--border);
   margin: 10px 0;
-}
-
-.kv {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  font-size: 12.5px;
-  margin-bottom: 6px;
 }
 /* Update-list rows (关于与更新) get a glassy accent wash on hover, like the other lists (shared token). */
 .help :deep(.el-table__body tr:hover > td) {
   background: var(--dsh-wash-hover) !important;
   -webkit-backdrop-filter: blur(4px) saturate(125%);
   backdrop-filter: blur(4px) saturate(125%);
-}
-
-.kv span {
-  color: var(--text-dim);
-  flex: none;
-  width: 78px;
-}
-
-/* Bundled-Node upgrade controls ride the right end of the 内置 Node row. */
-.kv .node-update-ctl {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  width: auto;
-  margin-left: auto;
-  color: inherit;
 }
 
 /* Wrapping moves whole controls to the next line — their captions must never break mid-word. */
@@ -2031,133 +2192,165 @@ async function doImportSnapshot(): Promise<void> {
   margin-top: 2px;
 }
 
-/* 关于与运行 — system overview: one full-width row list (label left · value right),
-   matching the console's row rhythm; paths rows stay readable on their own line. */
-.sys-grid {
-  display: flex;
-  flex-direction: column;
-  font-size: 12.5px;
-}
-.sys-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
-}
-.sys-row > span {
-  color: var(--text-dim);
-  flex: none;
-  width: 84px;
-}
-.sys-row code {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  background: var(--glass-chip);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 0 6px;
-}
-.sys-row.sys-wide {
-  grid-column: auto;
-}
-.sys-row.sys-wide code {
-  white-space: normal;
-  word-break: break-all;
-}
+/* 关于页的系统行已全部走 .about-card 的 setting-row（与设置卡片同一行语言），
+   旧的 sys-grid / sys-row 文本流样式因此删除；空位由 .sys-empty 占位行接手。 */
 
-/* About ▸ copyright footer: a quiet, centered legal line under the system grid. */
+/* About ▸ copyright footer: a quiet, centered legal line under the last card. */
 .about-copyright {
-  padding: 2px 0 6px;
+  padding: 10px 0 6px;
   text-align: center;
   font-size: 12px;
   color: var(--text-dim);
   letter-spacing: 0.2px;
 }
 
-/* About ▸ the runtime + system overview sits in the same contained well as the sibling tabs' lists
-   (events / ports), so the flat kv rows and system grid read as one cohesive card instead of loose
-   text on the panel. The class lands on the el-tab-pane root via attribute fallthrough, so it only
-   wraps the About pane. The trailing copyright is the last block, so drop its bottom padding. */
-.help-tabs :deep(.about-pane.el-tab-pane) {
-  padding: 6px 18px 10px;
-  border: 1px solid var(--border);
-  /* 与控制台其它 tab 同配方的大卡片（淡面 + 16px 圆角），不再是小圆角 well。 */
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--text) 5%, var(--surface));
-}
-.help-tabs :deep(.about-pane .about-copyright) {
-  padding-bottom: 0;
-}
-/* About ▸ 每一块（运行时 / 系统概览）用小标题分组，与控制台左侧导航的分组标题同款。 */
-.help-tabs :deep(.about-pane .head) {
-  margin: 18px 0 6px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-dim);
-}
-.help-tabs :deep(.about-pane .head > span) {
-  font-size: 13px;
-  font-weight: 500;
-}
-/* About ▸ kv 行拉成整行：标签左、值右，行间发丝虚线，与设置卡片行同一节奏。
-   用 flex-wrap 而非固定列 grid：内置 Node 行有 4 个子节点（标签/版本/标签胶囊/控件簇），
-   固定两列会把多余子项塞进标签列导致按钮错位。 */
-.help-tabs :deep(.about-pane .kv) {
+/* ---- About ▸ 卡片行语言（与控制台「设置」同一配方）----
+   分组灰色小标题 + 淡面 16px 大圆角卡片；每行 = 36px 图标 tile · 标题 + 常驻灰色描述（左）
+   · 值/控件（右），行间发丝虚线。之前关于页是 kv 文本流（无 tile、控件挤在标签行右侧），
+   与设置卡片不同一套，现在统一。 */
+.about-groups {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 32px;
+  padding: 2px 2px 6px;
+}
+.about-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.about-caption {
+  display: flex;
   align-items: center;
-  column-gap: 12px;
-  row-gap: 8px;
-  width: 100%;
-  padding: 12px 2px;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding-left: 6px;
   font-size: 13px;
-  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
-}
-.help-tabs :deep(.about-pane .kv:last-of-type) {
-  border-bottom: none;
-}
-/* 标签列固定宽度居左，不被 flex 压缩。 */
-.help-tabs :deep(.about-pane .kv > span:first-child) {
-  flex: 0 0 auto;
-  min-width: 84px;
+  font-weight: 500;
   color: var(--text-dim);
 }
-/* 值（strong/code）靠右贴边，形成“标签左·值右”。 */
-.help-tabs :deep(.about-pane .kv > strong),
-.help-tabs :deep(.about-pane .kv > code) {
-  margin-left: auto;
+.about-card {
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.about-card .setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 20px 26px;
+}
+.about-card .setting-row + .setting-row {
+  border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+.about-card .row-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  font-size: 17px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 6%, var(--surface));
+  border: 1px solid var(--border);
+}
+.about-card .row-label {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
 }
-/* 内置 Node 的升级控件簇：独占一整行、靠右排列、可换行。 */
-.help-tabs :deep(.about-pane .kv .node-update-ctl) {
-  flex: 1 1 100%;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-/* 分隔线由 kv 行自身的发丝线承担，去掉旧的同义重复实线。 */
-.help-tabs :deep(.about-pane .line) {
-  display: none;
-}
-/* About ▸ system rows join the same full-width rhythm as the kv rows above. */
-.help-tabs :deep(.about-pane .sys-row) {
-  padding: 10px 2px;
-  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
-}
-.help-tabs :deep(.about-pane .sys-row:last-child) {
-  border-bottom: none;
-}
-.help-tabs :deep(.about-pane .sys-row > span) {
+.about-card .row-title {
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text);
-  font-size: 13px;
 }
-/* 控件里的文字（按钮/开关旁标签）不跟小标题同色同粗。 */
-.help-tabs :deep(.about-pane .head .el-button),
-.help-tabs :deep(.about-pane .node-incompat-toggle span) {
+.about-card .row-desc {
+  font-size: 12.5px;
   font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-width: 62ch;
+  word-break: break-word;
+}
+.about-card .row-control {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+/* 只读值（系统信息 / 运行中页）：右贴齐，与设置行的控件列同一槽位。 */
+.about-card .row-value {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--text);
+  text-align: right;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 长值/控件簇换行到标签下方整行（路径、CPU 主频、Node 升级控件）。 */
+.about-card .setting-row--stack {
+  flex-wrap: wrap;
+}
+.about-card .setting-row--stack .row-control,
+.about-card .setting-row--stack .row-value {
+  flex: 1 1 100%;
+  margin-left: 0;
+  justify-content: flex-end;
+  text-align: right;
+}
+.about-card .node-update-ctl {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.about-card .node-update-ctl .el-button,
+.about-card .node-incompat-toggle {
+  flex: none;
+  white-space: nowrap;
+}
+.about-card .path-value {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  text-align: right;
+  font-size: 12.5px;
+}
+.about-card .row-value.full {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+/* 内置 Node 升级失败 / 进度：卡片行内展示，进度条占主导宽度。 */
+.about-card .node-load-err .row-title {
+  font-size: 13px;
+  font-weight: 400;
+}
+.about-card .upd-progress.node-prog {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  margin-top: 0;
+  min-width: 0;
+}
+.about-card .node-prog .el-progress {
+  flex: 1 1 60%;
+  min-width: 160px;
+}
+.about-card .node-prog .cell-sub {
+  flex: 1 1 auto;
+  white-space: normal;
+}
+/* 系统信息未拉到时的占位行（只有刷新按钮可用）。 */
+.about-card .sys-empty {
+  padding: 18px 22px;
+  text-align: center;
+  font-size: 12.5px;
   color: var(--text-dim);
 }
 

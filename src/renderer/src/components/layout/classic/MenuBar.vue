@@ -29,7 +29,6 @@ export type PanelKind =
 
 const props = defineProps<{
   current: string | null
-  outdatedCount: number
   isDark: boolean
   themeMode: 'auto' | 'light' | 'dark'
   pages: PageState[]
@@ -117,7 +116,6 @@ interface MenuGroup {
   label: string
   /** Leading icon tile rendered before the label on the trigger (e.g. the console ▸ 设置 gear). */
   icon?: Component
-  badge?: string
   /** Quick-access rows shown in the dropdown (running pages, external sites…). */
   items: MenuItem[]
   /** Static command rows shown above the dynamic item list (e.g. view actions). */
@@ -128,8 +126,9 @@ interface MenuGroup {
 
 const groups = computed<MenuGroup[]>(() => {
   // Unified console: the classic menu bar collapses to a single entry. Its empty items/actions
-  // make `toggleMenu` open the console panel directly (no drop list); the pending-update count
-  // rides along as the trigger badge so 「有更新」 still surfaces up here. Every former panel
+  // make `toggleMenu` open the console panel directly (no drop list). The pending-update count
+  // used to ride on this trigger as a badge; it now lives in 控制台 ▸ 关于 (one home for the
+  // number and the list), so the gear entry stays a plain affordance. Every former panel
   // (设置 / 页面 / DSH / OpenClaw / 外部站点 / MCP / 共享上下文 / 看板 / 帮助 / 智能体应用)
   // is now reached from the console's left nav instead.
   return [
@@ -138,7 +137,6 @@ const groups = computed<MenuGroup[]>(() => {
       label: t('menu.console'),
       // 入口文案已改为「设置」，图标同步用齿轮（Setting）以匹配语义；markRaw 避免响应式代理开销。
       icon: markRaw(Setting),
-      badge: props.outdatedCount ? String(props.outdatedCount) : undefined,
       items: [],
       actions: []
     }
@@ -402,7 +400,6 @@ onBeforeUnmount(() => {
           >
             <el-icon v-if="g.icon" class="trigger-ic"><component :is="g.icon" /></el-icon>
             {{ g.label }}
-            <span v-if="g.badge" class="badge">{{ g.badge }}</span>
           </button>
           <div
             v-if="listGroup === g.kind && (g.items.length || g.actions?.length)"
@@ -960,7 +957,9 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: var(--text);
   background: none;
-  border: 1px solid var(--border);
+  /* Bare icon, no ring — matches the terminal `.act-btn` and the view `.win-btn.view`; a
+     transparent border keeps the 28×26 footprint so the strip never shifts. */
+  border: 1px solid transparent;
   border-radius: 9999px;
   padding: 0;
   cursor: pointer;
@@ -969,16 +968,15 @@ onBeforeUnmount(() => {
 
 .dual-btn:hover {
   background: var(--dsh-wash-hover);
-  border-color: var(--accent);
   color: var(--accent);
   -webkit-backdrop-filter: var(--dsh-wash-frost);
   backdrop-filter: var(--dsh-wash-frost);
 }
 
 .dual-btn.is-active {
-  border-color: var(--accent);
+  /* On-state reads from the swapped glyph (enter ▸ exit) + accent icon color alone — no
+     background pill, so the button stays a bare icon like the rest of the strip. */
   color: var(--accent);
-  background: var(--dsh-wash);
 }
 
 .dual-btn:disabled {
@@ -989,7 +987,6 @@ onBeforeUnmount(() => {
 
 .dual-btn:disabled:hover {
   background: none;
-  border-color: var(--border);
   color: var(--text-dim);
 }
 

@@ -86,8 +86,7 @@ const en: Dict = {
     groupPages: 'Pages & apps',
     groupRuntime: 'Runtimes',
     groupBoard: 'Tasks',
-    groupUi: 'Interface',
-    groupNetwork: 'Network & privacy',
+    groupSettings: 'Settings',
     groupHelp: 'Help & diagnostics'
   },
   appmgr: {
@@ -361,6 +360,7 @@ const en: Dict = {
     sysRuntimes: 'Runtimes',
     sysUserData: 'User data',
     sysInstallDir: 'Install dir',
+    sysEmpty: 'No system snapshot yet — press Refresh',
     sysInterfaces: 'Adapters',
     /* Network & Tools: live network info */
     netLiveTitle: 'Live network',
@@ -400,6 +400,15 @@ const en: Dict = {
     tipUpdates:
       'git projects: one-click git pull --ff-only (auto-skips if there are uncommitted changes); npm projects: compare against the registry latest; DSH / OpenClaw can upgrade directly (OpenClaw needs a page restart after reinstall).',
     aboutNode: 'Built-in Node',
+    aboutNodeDesc: 'The runtime version pages use when they start',
+    /** Group captions of the About pane (same level as the 设置 cards' captions). */
+    aboutGroupRuntime: 'Runtime & versions',
+    aboutGroupUpdates: 'Updates',
+    aboutUpdatesTitle: 'Pending updates',
+    aboutUpdatesDesc: 'A background survey re-runs every 30 minutes',
+    aboutUpdatesCount: '{n} pending',
+    aboutUpdatesNone: 'Up to date',
+    aboutUpdatesView: 'Open list',
     aboutRuntimePath: 'Runtime path',
     nodeVersionPick: 'Search or pick version',
     nodeVerEmpty: 'No versions available (offline or mirror unreachable)',
@@ -417,6 +426,7 @@ const en: Dict = {
     nodeUpdated: 'Bundled Node updated to {v}; newly started pages will use it',
     nodeRestored: 'Reverted to the installer-shipped Node',
     aboutPages: 'Pages',
+    aboutPagesDesc: 'How many installed pages are running now',
     aboutDevMode:
       'Dev mode: F12 opens the container DevTools; the identically-named toolbar button debugs the current embedded page.',
     aboutMinimizeTip:

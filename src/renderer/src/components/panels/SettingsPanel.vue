@@ -1293,7 +1293,9 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
                         @click="useRegistry(c.url)"
                       >
                         {{
-                          isCurrent(c.url) ? t('settings.registryCurrent') : t('settings.registryUse')
+                          isCurrent(c.url)
+                            ? t('settings.registryCurrent')
+                            : t('settings.registryUse')
                         }}
                       </el-button>
                     </div>
@@ -1744,17 +1746,17 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 .view-groups {
   display: flex;
   flex-direction: column;
-  gap: 22px;
-  padding: 2px;
+  gap: 32px;
+  padding: 2px 2px 6px;
 }
 .view-group {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .group-caption {
   margin: 0;
-  padding-left: 4px;
+  padding-left: 6px;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-dim);
@@ -1769,8 +1771,8 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  padding: 16px 22px;
+  gap: 28px;
+  padding: 20px 26px;
 }
 .setting-row + .setting-row {
   /* 参考图行与行之间是发丝虚线，不是实线：实线在长列表里把卡片切成表格，虚线更轻。 */

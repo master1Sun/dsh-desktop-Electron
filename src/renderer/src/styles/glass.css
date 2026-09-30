@@ -363,18 +363,17 @@ html.dark:not(.no-marquee) .el-dialog::after {
 }
 /* Custom (non-EP) action buttons — the floating popout start, the boot overlay's
    buttons and the switcher/menu icon tiles — join the same glow language, dialed
-   down since they sit on chrome surfaces. */
+   down since they sit on chrome surfaces. The top-bar 双屏 `.dual-btn` is intentionally
+   excluded: it now reads as a bare icon (no border, no halo) to match `.win-btn.view`. */
 .popout-btn,
 .boot-btn,
-.act-btn,
-.dual-btn {
+.act-btn {
   box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 16%, transparent);
   transition: box-shadow 0.2s ease;
 }
 .popout-btn:hover,
 .boot-btn:hover,
-.act-btn:hover,
-.dual-btn:hover {
+.act-btn:hover {
   box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 38%, transparent);
 }
 
@@ -567,16 +566,16 @@ html.dark .el-message-box__title {
    The popper engine stamps `data-popper-placement` on `.el-popper`, so a per-side negative margin
    pulls the tip back toward the trigger on whichever edge it opens — tightening the gap everywhere
    without re-editing every component that opts into `dsh-tip-popper`. */
-.dsh-tip-popper.el-popper[data-popper-placement^="top"] {
+.dsh-tip-popper.el-popper[data-popper-placement^='top'] {
   margin-bottom: -8px;
 }
-.dsh-tip-popper.el-popper[data-popper-placement^="bottom"] {
+.dsh-tip-popper.el-popper[data-popper-placement^='bottom'] {
   margin-top: -8px;
 }
-.dsh-tip-popper.el-popper[data-popper-placement^="left"] {
+.dsh-tip-popper.el-popper[data-popper-placement^='left'] {
   margin-right: -8px;
 }
-.dsh-tip-popper.el-popper[data-popper-placement^="right"] {
+.dsh-tip-popper.el-popper[data-popper-placement^='right'] {
   margin-left: -8px;
 }
 
@@ -749,5 +748,3 @@ html.dark .el-message-box__title {
 .tab-label .el-icon {
   font-size: 15px;
 }
-
-
