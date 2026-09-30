@@ -5,8 +5,6 @@ import {
   ArrowLeft,
   Search,
   Monitor,
-  Operation,
-  Bell,
   Key,
   Download,
   Connection,
@@ -27,8 +25,7 @@ import {
   Files,
   Link,
   Setting,
-  Refresh,
-  Tools
+  Refresh
 } from '@element-plus/icons-vue'
 import MenuPanelContent from '@renderer/components/panels/MenuPanelContent.vue'
 import { usePagesStore } from '@renderer/stores/pages'
@@ -186,20 +183,6 @@ const STATIC_GROUPS: Group[] = [
         icon: markRaw(Monitor)
       },
       {
-        id: 'settings:behavior',
-        panel: 'settings',
-        tab: 'behavior',
-        labelKey: 'settings.tabBehavior',
-        icon: markRaw(Operation)
-      },
-      {
-        id: 'settings:alerts',
-        panel: 'settings',
-        tab: 'alerts',
-        labelKey: 'settings.tabAlerts',
-        icon: markRaw(Bell)
-      },
-      {
         id: 'settings:keys',
         panel: 'settings',
         tab: 'keys',
@@ -252,13 +235,6 @@ const STATIC_GROUPS: Group[] = [
         tab: 'updates',
         labelKey: 'panel.tabUpdates',
         icon: markRaw(Refresh)
-      },
-      {
-        id: 'help:diagnose',
-        panel: 'help',
-        tab: 'diagnose',
-        labelKey: 'panel.tabDiagnose',
-        icon: markRaw(Tools)
       },
       {
         id: 'help:logs',

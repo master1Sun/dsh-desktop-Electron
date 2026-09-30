@@ -227,12 +227,12 @@ onBeforeUnmount(() => {
   margin: 0;
   max-height: 260px;
   overflow: auto;
-  background: var(--glass-well);
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 11.5px;
-  line-height: 1.55;
+  border-radius: 16px;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--text-dim);

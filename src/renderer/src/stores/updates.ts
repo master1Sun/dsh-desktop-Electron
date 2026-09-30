@@ -13,10 +13,14 @@ async function unwrap<T>(p: Promise<{ ok: boolean; data?: T; error?: string }>):
 export const useUpdatesStore = defineStore('updates', () => {
   const results = reactive<UpdateCheckResult[]>([])
   const checking = ref(false)
-  const updating = ref<string | null>(null)
+  /** 正在更新的行名集合：支持多行并发更新，每行各自流式进度。 */
+  const updating = reactive(new Set<string>())
+  const isUpdating = (name: string): boolean => updating.has(name)
   const lastCheckedAt = ref<number | null>(null)
   /** live download progress keyed by row name; only present while an update runs */
   const progress = reactive<Record<string, UpdateProgress>>({})
+  /** 批量「全部更新」汇总：running 时展示总进度条，done/total 记录已完成行。 */
+  const batch = reactive({ running: false, total: 0, done: 0 })
 
   /* ---- bundled-Node runtime upgrade ----
      Kept here (not in the panel component) so closing/reopening the Help panel mid-update
@@ -62,9 +66,22 @@ export const useUpdatesStore = defineStore('updates', () => {
     }
   }
 
-  /** Run one row's update; `pinned` installs an exact npm version over the channel latest. */
+  /** 并发更新时把「各自刷新」合并成一次：短延时去抖，减少 checkUpdates 抖动。 */
+  let checkTimer: ReturnType<typeof setTimeout> | undefined
+  function scheduleCheck(delay = 600): void {
+    if (checkTimer !== undefined) clearTimeout(checkTimer)
+    checkTimer = setTimeout(() => {
+      checkTimer = undefined
+      void check(true).catch(() => undefined)
+    }, delay)
+  }
+
+  /** Run one row's update; `pinned` installs an exact npm version over the channel latest.
+      Concurrency-safe: keyed by row name in the `updating` Set, so several rows can run at once,
+      each streaming its own progress. */
   async function perform(target: UpdateCheckResult, pinned?: string): Promise<void> {
-    updating.value = target.name
+    if (updating.has(target.name)) return
+    updating.add(target.name)
     delete progress[target.name]
     try {
       // Strip Vue reactive proxy before IPC — structuredClone can't serialize proxies.
@@ -96,12 +113,39 @@ export const useUpdatesStore = defineStore('updates', () => {
         }
         return
       }
-      await check(true)
+      // Debounced re-check: during a batch, many rows finish around the same time and each
+      // would otherwise fire its own checkUpdates; the short debounce collapses them.
+      scheduleCheck()
     } catch (err) {
       ElMessage.error((err as Error).message)
     } finally {
-      updating.value = null
+      updating.delete(target.name)
       delete progress[target.name]
+    }
+  }
+
+  /** 批量「全部更新」：并发跑所有「有更新」的行，batch 状态驱动总进度条。 */
+  async function performAll(): Promise<void> {
+    const targets = results.filter((r) => r.hasUpdate && r.canAutoUpdate && !updating.has(r.name))
+    if (!targets.length) return
+    batch.running = true
+    batch.total = targets.length
+    batch.done = 0
+    try {
+      await Promise.all(
+        targets.map(async (r) => {
+          try {
+            await perform(r)
+          } finally {
+            batch.done += 1
+          }
+        })
+      )
+    } finally {
+      batch.running = false
+      batch.total = 0
+      batch.done = 0
+      await check(true).catch(() => undefined)
     }
   }
 
@@ -136,12 +180,15 @@ export const useUpdatesStore = defineStore('updates', () => {
     outdated,
     checking,
     updating,
+    isUpdating,
     lastCheckedAt,
     progress,
+    batch,
     nodeBusy,
     nodeProgress,
     check,
     perform,
+    performAll,
     updateNode,
     restoreNode
   }

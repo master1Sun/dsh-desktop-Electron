@@ -333,6 +333,7 @@ const zh: Dict = {
     tabDiagnose: '网络与工具',
     tabLogs: '运行日志',
     snapshotTitle: '配置快照',
+    snapshotDesc: '将页面配置与相关设置导出为迁移包，或从迁移包导入恢复。',
     /* 关于与运行：系统/运行时概览 */
     sysTitle: '系统信息',
     sysRefresh: '刷新',
@@ -432,6 +433,8 @@ const zh: Dict = {
     aboutPagesRunning: '{running} / {total} 运行中',
     copyright: '© {year} 桌面控制台 · master1Sun · 专有软件 · 保留所有权利',
     updateBtn: '更新',
+    updateAllBtn: '全部更新 ({n})',
+    batchProgress: '已完成 {done}/{total} 项',
     installBtn: '安装',
     manualBtn: '手动',
     restartNowBtn: '立即重启',

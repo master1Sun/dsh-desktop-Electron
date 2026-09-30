@@ -327,7 +327,7 @@ onMounted(() => {
           v-if="updateRow.hasUpdate && updateRow.canAutoUpdate"
           size="small"
           type="primary"
-          :loading="updates.updating === updateRow.name"
+          :loading="updates.isUpdating(updateRow.name)"
           @click="updates.perform(updateRow)"
         >
           {{ t('panel.updateBtn') }}

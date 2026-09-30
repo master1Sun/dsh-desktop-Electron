@@ -408,7 +408,9 @@ const commands = computed<Command[]>(() => {
 
 /** Open (or focus) the settings panel on a given vertical tab (a palette deep link). */
 function openSettingsTab(tab: string): void {
-  openPanel('settings', tab)
+  // 行为规范 / 提醒告警 已并入「界面视图」单页，旧深链统一落到 view。
+  const target = tab === 'behavior' || tab === 'alerts' ? 'view' : tab
+  openPanel('settings', target)
 }
 
 /* ---- #5: command-palette deep search -------------------------------------------
@@ -422,14 +424,9 @@ const SETTINGS_SEARCH_INDEX: { tab: string; labelKey: string; kw: string }[] = [
   {
     tab: 'view',
     labelKey: 'settings.tabView',
-    kw: 'theme 主题 language 语言 layout 布局 accent 配色'
+    // 含已并入的 行为规范 / 提醒告警 关键词（它们不再是独立分区）。
+    kw: 'theme 主题 language 语言 layout 布局 accent 配色 startup 启动 autostart 自启 tray 托盘 crash 崩溃 terminal 终端 notify 通知 memory 内存 warn 告警'
   },
-  {
-    tab: 'behavior',
-    labelKey: 'settings.tabBehavior',
-    kw: 'startup 启动 autostart 自启 tray 托盘 crash 崩溃 terminal 终端'
-  },
-  { tab: 'alerts', labelKey: 'settings.tabAlerts', kw: 'notify 通知 memory 内存 warn 告警' },
   { tab: 'keys', labelKey: 'settings.tabKeys', kw: 'shortcut 快捷键 keybind 绑定' },
   { tab: 'download', labelKey: 'settings.tabDownload', kw: 'download 下载 dir 目录' },
   { tab: 'network', labelKey: 'settings.tabNetwork', kw: 'registry 镜像 npm network 网络' },

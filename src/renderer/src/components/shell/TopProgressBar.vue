@@ -84,7 +84,11 @@ const aggPercent = computed<number | null>(() => {
   width: 150px;
   font-size: 12px;
   color: var(--text-dim);
-  z-index: 70;
+  /* Must outrank the floating panels' `.panel-anchor` (z-index: 70 in MenuBar), which shares the
+     menubar stacking context. This widget establishes its own context (positioned + z-index), so
+     the nested hover detail card `.tb-drop` can never rise above the parent level relative to
+     siblings — at an equal 70 the panel wins by DOM order and covers the detail card. Lift to 80. */
+  z-index: 80;
 }
 
 /* The collapsed bar sits in a faint chip so it reads as an interactive control and

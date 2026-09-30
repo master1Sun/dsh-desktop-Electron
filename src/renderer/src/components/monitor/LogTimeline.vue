@@ -145,12 +145,13 @@ watch(
   position: relative;
   max-height: 300px;
   overflow: auto;
-  background: var(--glass-well);
+  /* 与关于页卡片同一表面/半径，让日志区不再以方角玻璃块“贴”在卡片语言里。 */
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 11.5px;
-  line-height: 1.55;
+  border-radius: 16px;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.6;
   color: var(--text-dim);
   user-select: text;
 }
@@ -248,6 +249,22 @@ watch(
 
 .lv-body {
   min-width: 0;
+  /* 每行一条“级别色条”：正文列左缘一根 3px 竖条，按级别着色，一眼区分 info/warn/error。 */
+  padding-left: 10px;
+  border-left: 3px solid color-mix(in srgb, var(--text-dim) 26%, transparent);
+}
+.lv-lv-info .lv-body {
+  border-left-color: var(--accent);
+}
+.lv-lv-warn .lv-body,
+.lv-lv-warning .lv-body {
+  border-left-color: #d97706;
+}
+.lv-lv-error .lv-body,
+.lv-lv-fatal .lv-body,
+.lv-lv-critical .lv-body,
+.lv-node.is-error .lv-body {
+  border-left-color: var(--err);
 }
 .lv-text {
   white-space: pre-wrap;

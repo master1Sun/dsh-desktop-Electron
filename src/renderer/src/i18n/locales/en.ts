@@ -341,6 +341,7 @@ const en: Dict = {
     tabDiagnose: 'Network & Tools',
     tabLogs: 'Run Logs',
     snapshotTitle: 'Config snapshot',
+    snapshotDesc: 'Export page configs and related settings into a migration package, or restore from one.',
     /* About & Runtime: system/runtime overview */
     sysTitle: 'System',
     sysRefresh: 'Refresh',
@@ -441,6 +442,8 @@ const en: Dict = {
     aboutPagesRunning: '{running} / {total} running',
     copyright: '© {year} DesktopContainer · master1Sun · Proprietary · All rights reserved',
     updateBtn: 'Update',
+    updateAllBtn: 'Update all ({n})',
+    batchProgress: '{done}/{total} done',
     installBtn: 'Install',
     manualBtn: 'Manual',
     restartNowBtn: 'Restart now',

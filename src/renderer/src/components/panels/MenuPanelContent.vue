@@ -12,10 +12,7 @@ import {
   TrendCharts,
   Monitor,
   Refresh,
-  Position,
-  Cpu,
   Bell,
-  InfoFilled,
   FolderOpened,
   Warning,
   Odometer,
@@ -53,15 +50,14 @@ import type {
   UpdateCheckResult,
   UpdateProgress,
   UpdateHistory,
-  NetProbeResult,
   SnapshotResult,
   SystemInfo,
-  NetworkStats,
   PageMetrics,
   PortRow
 } from '@shared/types'
 import { DISPLAY_TIME_ZONE, DISPLAY_TIME_ZONE_LABEL, parseAppPanel } from '@shared/types'
 import { t } from '@renderer/i18n'
+import whaleIcon from '@renderer/assets/whale.png'
 
 const props = defineProps<{
   /** PanelKind or an `app:<id>` key (generic agent-app manager). */
@@ -719,14 +715,24 @@ const subLabel = (r: {
       })
     : r.dir
 
-/** The container self-update streams a large app.asar: surface live download progress. */
+/** Rows stream live download progress while they update; keyed by row name so several
+    rows can animate at once (updates.updating is now a Set). */
 const progressOf = (row: { name: string }): UpdateProgress | undefined =>
-  updates.updating === row.name ? updates.progress[row.name] : undefined
+  updates.isUpdating(row.name) ? updates.progress[row.name] : undefined
 const progressPercent = (p: UpdateProgress): number =>
   p.percent ?? (p.total && p.received ? Math.floor((p.received / p.total) * 100) : 0)
 /** Indeterminate only while fetching release objects before the artifact size is known. */
 const progressIndeterminate = (p: UpdateProgress): boolean =>
   p.phase === 'fetch' && p.percent === undefined
+
+/* ---- 批量「全部更新」 ----
+   可自动更新的行数驱动「全部更新」按钮的显隐与计数；批量进度条按已完成行 / 总行给百分比。 */
+const updatableCount = computed(
+  () => updates.results.filter((r) => r.hasUpdate && r.canAutoUpdate).length
+)
+const batchPercent = computed(() =>
+  updates.batch.total ? Math.floor((updates.batch.done / updates.batch.total) * 100) : 0
+)
 
 /* ---- #17 container OTA version history ----
    Small read-only table distilled from update-meta.json: what's running now, the
@@ -757,33 +763,6 @@ const historyRows = computed(() => {
     rows.push({ label: t('panel.historyRollbackFrom'), version: h.rollbackFrom, tone: 'rollback' })
   return rows
 })
-
-/* ---- #21 network diagnostic wizard ----
-   Runs the main-process probe (loopback / GitHub / npm / mirror / proxy) and lists
-   each hop so the user sees exactly where the chain breaks. */
-const netProbing = ref(false)
-const netResult = useStaleCache<NetProbeResult | null>('panel.netProbe', null)
-const netStepLabel = (id: string): string =>
-  ({
-    gateway: t('panel.netStepGateway'),
-    github: t('panel.netStepGithub'),
-    npm: t('panel.netStepNpm'),
-    npmmirror: t('panel.netStepNpmmirror'),
-    proxy: t('panel.netStepProxy')
-  })[id] ?? id
-async function runNetProbe(): Promise<void> {
-  if (netProbing.value) return
-  netProbing.value = true
-  try {
-    const res = (await window.container.runNetworkProbe?.()) as IpcResult | null
-    if (res?.ok) netResult.value = (res.data as NetProbeResult) ?? null
-    else ElMessage.error(res?.error || t('panel.netProbeTitle'))
-  } catch (err) {
-    ElMessage.error((err as Error).message)
-  } finally {
-    netProbing.value = false
-  }
-}
 
 /* ---- Help 关于与运行: system / runtime overview ----
    A one-shot snapshot pulled when the help panel mounts and re-fetched by its 刷新 button. */
@@ -816,9 +795,6 @@ function fmtBytes(n: number): string {
   }
   return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`
 }
-function fmtRate(bps: number): string {
-  return `${fmtBytes(bps)}/s`
-}
 function fmtDuration(sec: number): string {
   const s = Math.max(0, Math.floor(sec))
   const d = Math.floor(s / 86400)
@@ -828,68 +804,6 @@ function fmtDuration(sec: number): string {
   if (h) return `${h}h ${m}m`
   return `${m}m ${s % 60}s`
 }
-
-/* ---- Help 网络与工具: live network interfaces + throughput ----
-   Polled every 2s while the diagnose tab is open; the byte counters are cumulative since
-   boot, so the rate is the delta between two samples over the elapsed wall-clock. The interface
-   list and last rate persist across open/close, so re-opening paints the previous reading at once
-   instead of an empty block until the first PowerShell sample returns. */
-const netStats = useStaleCache<NetworkStats | null>('panel.netStats', null)
-const netRxRate = useStaleCache<number>('panel.netRxRate', 0)
-const netTxRate = useStaleCache<number>('panel.netTxRate', 0)
-let netTimer: number | undefined
-let netSampling = false
-/** Baseline for the rate delta. Reset whenever the poll restarts so the first live tick re-baselines
- *  against a fresh sample instead of diffing an hours-old cached counter (which would smear the
- *  average over the whole gap); until then the cached rate stays on screen. */
-let netPrev: NetworkStats | null = null
-async function sampleNet(): Promise<void> {
-  if (netSampling) return
-  netSampling = true
-  try {
-    const res = (await window.container.getNetworkStats?.()) as IpcResult | null
-    if (!res?.ok) return
-    const cur = res.data as NetworkStats
-    const prev = netPrev
-    netPrev = cur
-    netStats.value = cur
-    if (prev?.counters && cur.counters) {
-      const dt = (cur.sampleAt - prev.sampleAt) / 1000
-      if (dt > 0) {
-        netRxRate.value = Math.max(0, (cur.counters.rxBytes - prev.counters.rxBytes) / dt)
-        netTxRate.value = Math.max(0, (cur.counters.txBytes - prev.counters.txBytes) / dt)
-      }
-    }
-    // No prev yet (first tick after (re)start): keep the cached rate showing; the next tick sets it.
-  } catch {
-    /* a failed tick is skipped; the next one retries */
-  } finally {
-    netSampling = false
-  }
-}
-function stopNetPoll(): void {
-  if (netTimer) {
-    clearInterval(netTimer)
-    netTimer = undefined
-  }
-}
-function startNetPoll(): void {
-  stopNetPoll()
-  netPrev = null
-  void sampleNet()
-  netTimer = window.setInterval(sampleNet, 2000)
-}
-
-// Drive the live poll only while the diagnose tab is actually showing, so we never keep
-// spawning PowerShell for a hidden panel. Covers both tab switches and panel unmount.
-watch(
-  () => [props.panel, helpTab.value] as const,
-  ([panel, tab]) => {
-    if (panel === 'help' && tab === 'diagnose') startNetPoll()
-    else stopNetPoll()
-  }
-)
-onBeforeUnmount(stopNetPoll)
 
 /* ---- #15 config snapshot / migration package ----
    Export bundles the page manifest + each container.json + relevant settings into a zip;
@@ -1003,6 +917,48 @@ async function doImportSnapshot(): Promise<void> {
               ><el-icon><Help /></el-icon>{{ t('panel.tabAbout') }}</span
             >
           </template>
+          <!-- 顶部 Hero 概览横幅：品牌 + 版本 + 运行栈 + 关键运行读数（运行中页面 / 内置 Node /
+               待更新）一屏收拢，作为整页视觉入口；下方卡片只留细节，不再重复这些头条读数。 -->
+          <div class="about-hero">
+            <div class="hero-id">
+              <img class="hero-logo" :src="whaleIcon" alt="" draggable="false" />
+              <div class="hero-meta">
+                <div class="hero-name">{{ t('app.title') }}</div>
+                <div class="hero-tags">
+                  <el-tag size="small" effect="dark" round class="hero-ver">
+                    v{{ sysInfo?.appVersion || '-' }}
+                  </el-tag>
+                  <el-tag v-if="sysInfo" size="small" effect="plain" round>
+                    {{ sysInfo.packaged ? t('panel.packagedYes') : t('panel.packagedNo') }}
+                  </el-tag>
+                </div>
+                <div v-if="sysInfo" class="hero-stack">
+                  Electron {{ sysInfo.electron }} · Chrome {{ sysInfo.chrome }}
+                </div>
+              </div>
+            </div>
+            <div class="hero-stats">
+              <div class="hero-stat">
+                <span class="hs-k">{{ t('panel.aboutPages') }}</span>
+                <span class="hs-v">
+                  {{ props.runningCount }}<span class="hs-unit">/{{ props.totalCount }}</span>
+                </span>
+              </div>
+              <div class="hero-stat">
+                <span class="hs-k">{{ t('panel.aboutNode') }}</span>
+                <span class="hs-v" :class="props.runtime.ok ? 'ok-text' : 'err-text'">
+                  {{ props.runtime.version || t('panel.notDetected') }}
+                </span>
+              </div>
+              <div class="hero-stat">
+                <span class="hs-k">{{ t('panel.aboutUpdatesTitle') }}</span>
+                <span class="hs-v" :class="{ 'is-warn': pendingUpdateCount }">
+                  {{ pendingUpdateCount }}
+                </span>
+              </div>
+            </div>
+          </div>
+
           <!-- 与控制台「设置」同一套卡片行语言：分组小标题 + 大圆角卡片，
                每行 = 图标 tile · 标题 + 灰色描述（左） · 值/控件（右），行间发丝虚线。 -->
           <div class="about-groups">
@@ -1029,6 +985,10 @@ async function doImportSnapshot(): Promise<void> {
                       >
                         {{ t('panel.nodeTagUpdated') }}
                       </el-tag>
+                    </span>
+                    <span class="row-desc node-path">
+                      {{ t('panel.aboutRuntimePath') }}：
+                      <code class="path-value">{{ props.runtime.path || '-' }}</code>
                     </span>
                   </div>
                   <div class="row-control node-update-ctl">
@@ -1121,15 +1081,30 @@ async function doImportSnapshot(): Promise<void> {
                   <span class="cell-sub">{{ updates.nodeProgress.message }}</span>
                 </div>
 
-                <div class="setting-row setting-row--stack">
+                <!-- #15 配置快照 / 迁移包：并入「运行与版本」卡片作为一行，导出/导入迁移包。 -->
+                <div class="setting-row">
                   <span class="row-icon"
-                    ><el-icon><FolderOpened /></el-icon
+                    ><el-icon><Box /></el-icon
                   ></span>
                   <div class="row-label">
-                    <span class="row-title">{{ t('panel.aboutRuntimePath') }}</span>
+                    <span class="row-title">{{ t('panel.snapshotTitle') }}</span>
+                    <span class="row-desc">{{ t('panel.snapshotDesc') }}</span>
                   </div>
                   <div class="row-control">
-                    <code class="path-value">{{ props.runtime.path || '-' }}</code>
+                    <el-button
+                      size="small"
+                      :loading="snapshotBusy === 'export'"
+                      @click="doExportSnapshot"
+                    >
+                      {{ t('panel.exportSnapshotBtn') }}
+                    </el-button>
+                    <el-button
+                      size="small"
+                      :loading="snapshotBusy === 'restore'"
+                      @click="doImportSnapshot"
+                    >
+                      {{ t('panel.importSnapshotBtn') }}
+                    </el-button>
                   </div>
                 </div>
               </div>
@@ -1170,166 +1145,93 @@ async function doImportSnapshot(): Promise<void> {
                 </el-button>
               </h3>
               <div class="about-card">
-                <div class="setting-row">
-                  <span class="row-icon"
-                    ><el-icon><Position /></el-icon
-                  ></span>
-                  <div class="row-label">
-                    <span class="row-title">{{ t('panel.aboutPages') }}</span>
-                    <span class="row-desc">{{ t('panel.aboutPagesDesc') }}</span>
-                  </div>
-                  <div class="row-value">
-                    {{
-                      t('panel.aboutPagesRunning', {
-                        running: props.runningCount,
-                        total: props.totalCount
-                      })
-                    }}
-                  </div>
-                </div>
-                <template v-if="sysInfo">
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><InfoFilled /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysAppVersion') }}</span>
-                    </div>
-                    <div class="row-value">
-                      {{ sysInfo.appVersion }}
-                      <el-tag size="small" effect="plain" round>
-                        {{ sysInfo.packaged ? t('panel.packagedYes') : t('panel.packagedNo') }}
-                      </el-tag>
-                    </div>
-                  </div>
-
-                  <div class="setting-row setting-row--stack">
-                    <span class="row-icon"
-                      ><el-icon><Cpu /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysRuntimes') }}</span>
-                    </div>
-                    <div class="row-value">
-                      Electron {{ sysInfo.electron }} · Chrome {{ sysInfo.chrome }} · Node
-                      {{ sysInfo.node }}
-                    </div>
-                  </div>
-
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><Monitor /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysOs') }}</span>
-                    </div>
-                    <div class="row-value">
+                <!-- 系统信息详情：响应式网格，每格 = 灰色小标题(带图标)在上 · 值在下；
+                     长值（主机/CPU）跨两列，路径整行铺满。版本/运行栈/运行中页面已上移到 Hero，此处不再重复。 -->
+                <div v-if="sysInfo" class="sys-detail-grid">
+                  <div class="sys-cell">
+                    <span class="sys-k"
+                      ><el-icon><Monitor /></el-icon>{{ t('panel.sysOs') }}</span
+                    >
+                    <span class="sys-v">
                       {{ sysInfo.osType }} {{ sysInfo.osRelease }} · {{ sysInfo.arch }}
-                    </div>
+                    </span>
                   </div>
 
-                  <div class="setting-row setting-row--stack">
-                    <span class="row-icon"
-                      ><el-icon><Connection /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysHost') }}</span>
-                    </div>
-                    <div class="row-value">{{ sysInfo.hostname }}</div>
+                  <div class="sys-cell sys-cell--wide">
+                    <span class="sys-k"
+                      ><el-icon><Connection /></el-icon>{{ t('panel.sysHost') }}</span
+                    >
+                    <span class="sys-v">{{ sysInfo.hostname }}</span>
                   </div>
 
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><Odometer /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysCpu') }}</span>
-                    </div>
-                    <div class="row-value">
+                  <div class="sys-cell sys-cell--wide">
+                    <span class="sys-k"
+                      ><el-icon><Odometer /></el-icon>{{ t('panel.sysCpu') }}</span
+                    >
+                    <span class="sys-v">
                       {{ sysInfo.cpuModel || '?' }} ·
                       {{ t('panel.sysCpuCores', { n: sysInfo.cpuCores }) }}
-                    </div>
+                    </span>
                   </div>
 
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><Coin /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysMem') }}</span>
-                    </div>
-                    <div class="row-value">
+                  <div class="sys-cell">
+                    <span class="sys-k"
+                      ><el-icon><Coin /></el-icon>{{ t('panel.sysMem') }}</span
+                    >
+                    <span class="sys-v">
                       {{
                         t('panel.sysMemUsed', {
                           used: fmtBytes(sysInfo.totalMem - sysInfo.freeMem),
                           total: fmtBytes(sysInfo.totalMem)
                         })
                       }}
-                    </div>
+                    </span>
                   </div>
 
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><Clock /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysUptime') }}</span>
-                    </div>
-                    <div class="row-value">{{ fmtDuration(sysInfo.osUptimeSec) }}</div>
+                  <div class="sys-cell">
+                    <span class="sys-k"
+                      ><el-icon><Clock /></el-icon>{{ t('panel.sysUptime') }}</span
+                    >
+                    <span class="sys-v">{{ fmtDuration(sysInfo.osUptimeSec) }}</span>
                   </div>
 
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><Timer /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysAppUptime') }}</span>
-                    </div>
-                    <div class="row-value">{{ fmtDuration(sysInfo.appUptimeSec) }}</div>
+                  <div class="sys-cell">
+                    <span class="sys-k"
+                      ><el-icon><Timer /></el-icon>{{ t('panel.sysAppUptime') }}</span
+                    >
+                    <span class="sys-v">{{ fmtDuration(sysInfo.appUptimeSec) }}</span>
                   </div>
 
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><ChatLineSquare /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysLocale') }}</span>
-                    </div>
-                    <div class="row-value">
+                  <div class="sys-cell">
+                    <span class="sys-k"
+                      ><el-icon><ChatLineSquare /></el-icon>{{ t('panel.sysLocale') }}</span
+                    >
+                    <span class="sys-v">
                       {{ sysInfo.locale || '-' }} / {{ sysInfo.timezone || '-' }}
-                    </div>
+                    </span>
                   </div>
 
-                  <div class="setting-row">
-                    <span class="row-icon"
-                      ><el-icon><Grid /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysInterfaces') }}</span>
-                    </div>
-                    <div class="row-value">{{ sysInfo.interfaceCount }}</div>
+                  <div class="sys-cell">
+                    <span class="sys-k"
+                      ><el-icon><Grid /></el-icon>{{ t('panel.sysInterfaces') }}</span
+                    >
+                    <span class="sys-v">{{ sysInfo.interfaceCount }}</span>
                   </div>
 
-                  <div class="setting-row setting-row--stack">
-                    <span class="row-icon"
-                      ><el-icon><FolderOpened /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysUserData') }}</span>
-                    </div>
-                    <div class="row-value full">{{ sysInfo.userData }}</div>
+                  <div class="sys-cell sys-cell--full">
+                    <span class="sys-k"
+                      ><el-icon><FolderOpened /></el-icon>{{ t('panel.sysUserData') }}</span
+                    >
+                    <span class="sys-v mono">{{ sysInfo.userData }}</span>
                   </div>
 
-                  <div class="setting-row setting-row--stack">
-                    <span class="row-icon"
-                      ><el-icon><Box /></el-icon
-                    ></span>
-                    <div class="row-label">
-                      <span class="row-title">{{ t('panel.sysInstallDir') }}</span>
-                    </div>
-                    <div class="row-value full">{{ sysInfo.installDir }}</div>
+                  <div class="sys-cell sys-cell--full">
+                    <span class="sys-k"
+                      ><el-icon><Box /></el-icon>{{ t('panel.sysInstallDir') }}</span
+                    >
+                    <span class="sys-v mono">{{ sysInfo.installDir }}</span>
                   </div>
-                </template>
+                </div>
                 <div v-else class="sys-empty">{{ t('panel.sysEmpty') }}</div>
               </div>
             </section>
@@ -1347,265 +1249,199 @@ async function doImportSnapshot(): Promise<void> {
               ><el-icon><Download /></el-icon>{{ t('panel.tabUpdates') }}</span
             >
           </template>
-          <div class="head neon">
-            <span>{{ t('panel.updatesTitle') }}</span>
-            <el-button size="small" :loading="updates.checking" @click="emit('check-updates')">
-              {{ t('panel.checkUpdates') }}
-            </el-button>
-          </div>
-          <el-table
-            class="upd-table"
-            :data="updates.results"
-            size="small"
-            :empty-text="t('panel.updatesEmpty')"
-          >
-            <el-table-column :label="t('panel.colName')" min-width="200">
-              <template #default="{ row }">
-                <span>{{ row.name }}</span>
-                <el-tag
-                  v-if="row.isContainer"
-                  size="small"
-                  effect="plain"
-                  round
-                  style="margin-left: 8px"
-                  >{{ t('panel.tagContainer') }}</el-tag
-                >
-                <el-tag
-                  v-else-if="sourceTag(row)"
-                  size="small"
-                  effect="plain"
-                  round
-                  :type="sourceTag(row)!.type"
-                  style="margin-left: 8px"
-                  >{{ sourceTag(row)!.label }}</el-tag
-                >
-                <div class="cell-sub">{{ subLabel(row) }}</div>
-                <div v-if="progressOf(row)" class="upd-progress">
-                  <el-progress
-                    :percentage="progressPercent(progressOf(row)!)"
-                    :stroke-width="6"
-                    :show-text="false"
-                    :indeterminate="progressIndeterminate(progressOf(row)!)"
-                    striped
-                    :striped-flow="progressIndeterminate(progressOf(row)!)"
-                  />
-                  <span class="cell-sub">{{ progressOf(row)?.message }}</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('panel.colBranch')" width="120">
-              <template #default="{ row }">
-                <code v-if="refLabel(row)">{{ refLabel(row) }}</code>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('panel.colStatus')" width="120">
-              <template #default="{ row }">
-                <el-tag size="small" round :type="statusType(row)">{{ statusLabel(row) }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column :label="t('panel.colAction')" width="176" align="right">
-              <template #default="{ row }">
-                <div class="act-cell">
+          <!-- 更新检测 + 版本历史：与关于/诊断同一套卡片分组语言（灰色小标题 + 动作按钮右贴），
+               表格沿用同一卡片化，取代旧的裸 .head neon + <div class="line"/> 头。 -->
+          <div class="about-groups upd-groups">
+            <section class="about-group">
+              <h3 class="about-caption">
+                {{ t('panel.updatesTitle') }}
+                <span class="tools-ctl">
                   <el-button
-                    v-if="row.pendingRestart"
+                    v-if="updatableCount"
                     size="small"
                     type="primary"
-                    round
-                    @click="relaunchNow"
+                    :loading="updates.batch.running"
+                    :disabled="updates.batch.running"
+                    @click="updates.performAll()"
                   >
-                    {{ t('panel.restartNowBtn') }}
+                    {{ t('panel.updateAllBtn', { n: updatableCount }) }}
                   </el-button>
                   <el-button
-                    v-else-if="notInstalledBuiltin(row)"
                     size="small"
-                    type="primary"
-                    round
-                    :loading="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
-                    @click="installBuiltinRow(row)"
+                    :loading="updates.checking"
+                    @click="emit('check-updates')"
                   >
-                    {{ t('panel.installBtn') }}
+                    {{ t('panel.checkUpdates') }}
                   </el-button>
-                  <el-button
-                    v-else-if="row.hasUpdate && row.canAutoUpdate"
-                    size="small"
-                    type="primary"
-                    round
-                    :loading="updates.updating === row.name"
-                    @click="updates.perform(row)"
-                  >
-                    {{ t('panel.updateBtn') }}
-                  </el-button>
-                  <el-button
-                    v-else-if="row.isContainer && row.canRollback"
-                    size="small"
-                    round
-                    type="warning"
-                    plain
-                    @click="rollbackNow(row)"
-                  >
-                    {{ t('panel.rollbackBtn') }}
-                  </el-button>
-                  <el-tooltip
-                    v-else-if="row.hasUpdate"
-                    :content="t('panel.manualTip')"
-                    placement="top"
-                  >
-                    <el-button size="small" round disabled>{{ t('panel.manualBtn') }}</el-button>
-                  </el-tooltip>
-                  <el-button
-                    v-else-if="row.pageId"
-                    size="small"
-                    round
-                    :loading="resetting === row.name"
-                    @click="resetBuiltinRow(row)"
-                  >
-                    {{ t('panel.resetBtn') }}
-                  </el-button>
-                  <!-- B3: a built-in runtime can always be re-provisioned at an exact version, and
+                </span>
+              </h3>
+              <!-- 批量总进度：多行并发更新时给一个完成度概览（已完成行 / 总行），
+                   逐行的下载动画进度仍在各自行内展示。 -->
+              <div v-if="updates.batch.running" class="upd-batch">
+                <el-progress
+                  :percentage="batchPercent"
+                  :stroke-width="8"
+                  striped
+                  striped-flow
+                />
+                <span class="cell-sub">{{
+                  t('panel.batchProgress', {
+                    done: updates.batch.done,
+                    total: updates.batch.total
+                  })
+                }}</span>
+              </div>
+              <el-table
+                class="upd-table"
+                :data="updates.results"
+                size="small"
+                :empty-text="t('panel.updatesEmpty')"
+              >
+                <el-table-column :label="t('panel.colName')" min-width="200">
+                  <template #default="{ row }">
+                    <span>{{ row.name }}</span>
+                    <el-tag
+                      v-if="row.isContainer"
+                      size="small"
+                      effect="plain"
+                      round
+                      style="margin-left: 8px"
+                      >{{ t('panel.tagContainer') }}</el-tag
+                    >
+                    <el-tag
+                      v-else-if="sourceTag(row)"
+                      size="small"
+                      effect="plain"
+                      round
+                      :type="sourceTag(row)!.type"
+                      style="margin-left: 8px"
+                      >{{ sourceTag(row)!.label }}</el-tag
+                    >
+                    <div class="cell-sub">{{ subLabel(row) }}</div>
+                    <div v-if="progressOf(row)" class="upd-progress">
+                      <el-progress
+                        :percentage="progressPercent(progressOf(row)!)"
+                        :stroke-width="6"
+                        :show-text="false"
+                        :indeterminate="progressIndeterminate(progressOf(row)!)"
+                        striped
+                        :striped-flow="progressIndeterminate(progressOf(row)!)"
+                      />
+                      <span class="cell-sub">{{ progressOf(row)?.message }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column :label="t('panel.colBranch')" width="120">
+                  <template #default="{ row }">
+                    <code v-if="refLabel(row)">{{ refLabel(row) }}</code>
+                  </template>
+                </el-table-column>
+                <el-table-column :label="t('panel.colStatus')" width="120">
+                  <template #default="{ row }">
+                    <el-tag size="small" round :type="statusType(row)">{{
+                      statusLabel(row)
+                    }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column :label="t('panel.colAction')" width="176" align="right">
+                  <template #default="{ row }">
+                    <div class="act-cell">
+                      <el-button
+                        v-if="row.pendingRestart"
+                        size="small"
+                        type="primary"
+                        round
+                        @click="relaunchNow"
+                      >
+                        {{ t('panel.restartNowBtn') }}
+                      </el-button>
+                      <el-button
+                        v-else-if="notInstalledBuiltin(row)"
+                        size="small"
+                        type="primary"
+                        round
+                        :loading="tasks.busyBuiltin(builtinKind(row) || 'dsh')"
+                        @click="installBuiltinRow(row)"
+                      >
+                        {{ t('panel.installBtn') }}
+                      </el-button>
+                      <el-button
+                        v-else-if="row.hasUpdate && row.canAutoUpdate"
+                        size="small"
+                        type="primary"
+                        round
+                        :loading="updates.isUpdating(row.name)"
+                        @click="updates.perform(row)"
+                      >
+                        {{ t('panel.updateBtn') }}
+                      </el-button>
+                      <el-button
+                        v-else-if="row.isContainer && row.canRollback"
+                        size="small"
+                        round
+                        type="warning"
+                        plain
+                        @click="rollbackNow(row)"
+                      >
+                        {{ t('panel.rollbackBtn') }}
+                      </el-button>
+                      <el-tooltip
+                        v-else-if="row.hasUpdate"
+                        :content="t('panel.manualTip')"
+                        placement="top"
+                      >
+                        <el-button size="small" round disabled>{{
+                          t('panel.manualBtn')
+                        }}</el-button>
+                      </el-tooltip>
+                      <el-button
+                        v-else-if="row.pageId"
+                        size="small"
+                        round
+                        :loading="resetting === row.name"
+                        @click="resetBuiltinRow(row)"
+                      >
+                        {{ t('panel.resetBtn') }}
+                      </el-button>
+                      <!-- B3: a built-in runtime can always be re-provisioned at an exact version, and
                        an imported npm page gets the same hatch off the registry version list (the
                        更新 button can never offer a rollback — it only appears once a *newer*
                        release exists). -->
-                  <el-button
-                    v-if="versionRow(row)"
-                    size="small"
-                    round
-                    :disabled="
-                      builtinKind(row)
-                        ? tasks.busyBuiltin(builtinKind(row) || 'dsh')
-                        : updates.updating === row.name
-                    "
-                    @click="openVersionDlg(row)"
-                  >
-                    {{ t('panel.versionBtn') }}
-                  </el-button>
+                      <el-button
+                        v-if="versionRow(row)"
+                        size="small"
+                        round
+                        :disabled="
+                          builtinKind(row)
+                            ? tasks.busyBuiltin(builtinKind(row) || 'dsh')
+                            : updates.isUpdating(row.name)
+                        "
+                        @click="openVersionDlg(row)"
+                      >
+                        {{ t('panel.versionBtn') }}
+                      </el-button>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </section>
+
+            <!-- #17 容器 OTA 版本历史：点线时间轴（当前 → 待生效 → 备份），独立分组卡片。 -->
+            <section v-if="historyRows.length" class="about-group">
+              <h3 class="about-caption">{{ t('panel.historyTitle') }}</h3>
+              <div class="history-grid">
+                <div
+                  v-for="r in historyRows"
+                  :key="r.label"
+                  class="history-node"
+                  :class="`tone-${r.tone}`"
+                >
+                  <span class="history-dot" aria-hidden="true" />
+                  <span class="history-label">{{ r.label }}</span>
+                  <code class="history-ver">{{ r.version }}</code>
                 </div>
-              </template>
-            </el-table-column>
-          </el-table>
-
-          <!-- #17 container OTA version history: one compact timeline well — dots on a joined spine
-               read the rows as an update chain (当前 → 待生效 → 备份), colour carries the role. -->
-          <template v-if="historyRows.length">
-            <div class="line" />
-            <div class="head">
-              <span>{{ t('panel.historyTitle') }}</span>
-            </div>
-            <div class="history-grid">
-              <div
-                v-for="r in historyRows"
-                :key="r.label"
-                class="history-node"
-                :class="`tone-${r.tone}`"
-              >
-                <span class="history-dot" aria-hidden="true" />
-                <span class="history-label">{{ r.label }}</span>
-                <code class="history-ver">{{ r.version }}</code>
               </div>
-            </div>
-          </template>
-        </el-tab-pane>
-
-        <el-tab-pane name="diagnose">
-          <template #label>
-            <span class="tab-label"
-              ><el-icon><Connection /></el-icon>{{ t('panel.tabDiagnose') }}</span
-            >
-          </template>
-          <!-- Live network: interfaces + real-time throughput (sampled every 2s while open) -->
-          <div class="head">
-            <span>{{ t('panel.netLiveTitle') }}</span>
-            <el-button size="small" text :loading="!netStats" @click="sampleNet">
-              {{ t('panel.netRefresh') }}
-            </el-button>
-          </div>
-          <div v-if="netStats" class="net-live">
-            <div class="net-rate">
-              <span class="rate-down"
-                >{{ t('panel.netRx') }} <b>{{ fmtRate(netRxRate) }}</b></span
-              >
-              <span class="rate-up"
-                >{{ t('panel.netTx') }} <b>{{ fmtRate(netTxRate) }}</b></span
-              >
-              <span v-if="netStats.counters" class="rate-total cell-sub">
-                {{ t('panel.netTotal') }} ↓{{ fmtBytes(netStats.counters.rxBytes) }} · ↑{{
-                  fmtBytes(netStats.counters.txBytes)
-                }}
-              </span>
-            </div>
-            <div v-if="!netStats.counters" class="cell-sub">{{ t('panel.netNoCounter') }}</div>
-            <div class="net-sub-label">{{ t('panel.netInterfaces') }}</div>
-            <div v-if="netStats.interfaces.length" class="iface-list">
-              <div
-                v-for="it in netStats.interfaces"
-                :key="it.name"
-                class="iface-row"
-                :class="{ 'iface-internal': it.internal }"
-              >
-                <span class="iface-name">{{ it.name }}</span>
-                <code v-if="it.address" class="iface-addr">{{ it.address }}</code>
-                <span v-if="it.mac" class="iface-mac cell-sub">{{ it.mac }}</span>
-                <el-tag v-if="it.internal" size="small" effect="plain" round>{{
-                  t('panel.netInternal')
-                }}</el-tag>
-              </div>
-            </div>
-            <div v-else class="cell-sub">{{ t('panel.netNoInterface') }}</div>
-          </div>
-
-          <div class="line" />
-          <!-- #15 config snapshot / migration package -->
-          <div class="head">
-            <span>{{ t('panel.snapshotTitle') }}</span>
-            <span class="tools-ctl">
-              <el-button
-                size="small"
-                :loading="snapshotBusy === 'export'"
-                @click="doExportSnapshot"
-              >
-                {{ t('panel.exportSnapshotBtn') }}
-              </el-button>
-              <el-button
-                size="small"
-                :loading="snapshotBusy === 'restore'"
-                @click="doImportSnapshot"
-              >
-                {{ t('panel.importSnapshotBtn') }}
-              </el-button>
-            </span>
-          </div>
-          <!-- #21 network diagnostic wizard -->
-          <div class="head" style="margin-top: 12px">
-            <span>{{ t('panel.netProbeTitle') }}</span>
-            <el-button size="small" type="primary" :loading="netProbing" @click="runNetProbe">
-              {{ netResult ? t('panel.netRerun') : t('panel.netProbeBtn') }}
-            </el-button>
-          </div>
-          <div v-if="netProbing && !netResult" class="cell-sub">{{ t('panel.netProbing') }}</div>
-          <div v-if="netResult" class="net-result">
-            <div class="net-summary" :class="netResult.healthy ? 'ok-text' : 'err-text'">
-              {{ netResult.healthy ? t('panel.netHealthy') : t('panel.netUnhealthy') }}
-            </div>
-            <div v-for="s in netResult.steps" :key="s.id" class="net-step">
-              <span class="net-dot" :class="s.ok ? 'net-ok' : 'net-fail'" />
-              <span class="net-name">{{ netStepLabel(s.id) }}</span>
-              <span v-if="s.ms != null" class="net-ms">{{ s.ms }}ms</span>
-              <span v-if="s.detail" class="net-detail cell-sub">{{ s.detail }}</span>
-            </div>
-            <div v-if="netResult.proxy" class="net-proxy cell-sub">
-              {{
-                t('panel.netProxy', {
-                  p:
-                    [
-                      netResult.proxy.https && `https=${netResult.proxy.https}`,
-                      netResult.proxy.http && `http=${netResult.proxy.http}`
-                    ]
-                      .filter(Boolean)
-                      .join(' ') ||
-                    netResult.proxy.no ||
-                    '-'
-                })
-              }}
-            </div>
+            </section>
           </div>
         </el-tab-pane>
 
@@ -1650,60 +1486,74 @@ async function doImportSnapshot(): Promise<void> {
               ><el-icon><Tickets /></el-icon>{{ t('panel.tabEvents') }}</span
             >
           </template>
-          <div class="head">
-            <span>{{ t('panel.tabEvents') }}</span>
-            <el-select
-              v-model="eventFilters.level"
-              size="small"
-              style="width: 110px"
-              @change="loadEvents"
-            >
-              <el-option value="" :label="t('panel.eventsLevelAll')" />
-              <el-option value="info" :label="t('panel.eventsLevelInfo')" />
-              <el-option value="warn" :label="t('panel.eventsLevelWarn')" />
-              <el-option value="error" :label="t('panel.eventsLevelError')" />
-            </el-select>
-            <el-select v-model="eventFilters.pageId" size="small" style="width: 150px">
-              <el-option value="" :label="t('panel.eventsPageAll')" />
-              <el-option :value="EVENT_PAGE_OTHER" :label="t('panel.eventsPageOther')" />
-              <el-option v-for="p in eventPageOptions" :key="p.id" :value="p.id" :label="p.name" />
-            </el-select>
-            <el-button size="small" :loading="eventsLoading" @click="loadEvents">
-              {{ t('panel.eventsReload') }}
-            </el-button>
-            <el-button size="small" @click="openLogDir">{{
-              t('panel.eventsOpenLogDir')
-            }}</el-button>
-            <span class="evt-count">{{ t('panel.eventsCount', { n: shownEvents.length }) }}</span>
-          </div>
-          <div class="cell-sub evt-tip">{{ t('panel.eventsTip') }}</div>
-          <div v-if="!shownEvents.length" class="evt-empty">{{ t('panel.eventsEmpty') }}</div>
-          <div v-else class="evt-list">
-            <div
-              v-for="(ev, i) in shownEvents"
-              :key="`${ev.ts}-${i}`"
-              class="evt-row"
-              :title="t('panel.eventsJumpLog')"
-              @click="jumpToLog(ev)"
-            >
-              <span class="evt-dot" :class="`lv-${ev.level}`" />
-              <span class="evt-time">{{ eventTime(ev) }}</span>
-              <el-tag
-                size="small"
-                effect="plain"
-                round
-                :title="t('panel.eventsRawKind', { kind: ev.kind })"
-              >
-                {{ eventGroup(ev) }}
-              </el-tag>
-              <span class="evt-text">
-                {{ eventText(ev) }}
-                <span v-if="ev.pageId" class="evt-page">{{
-                  pagesStore.pages.find((p) => p.id === ev.pageId)?.name || ev.pageId
-                }}</span>
-                <div v-if="ev.detail" class="evt-detail cell-sub">{{ ev.detail }}</div>
-              </span>
-            </div>
+          <div class="about-groups evt-groups">
+            <section class="about-group">
+              <h3 class="about-caption">
+                <span>{{ t('panel.tabEvents') }}</span>
+                <span class="evt-ctl">
+                  <el-select
+                    v-model="eventFilters.level"
+                    size="small"
+                    style="width: 110px"
+                    @change="loadEvents"
+                  >
+                    <el-option value="" :label="t('panel.eventsLevelAll')" />
+                    <el-option value="info" :label="t('panel.eventsLevelInfo')" />
+                    <el-option value="warn" :label="t('panel.eventsLevelWarn')" />
+                    <el-option value="error" :label="t('panel.eventsLevelError')" />
+                  </el-select>
+                  <el-select v-model="eventFilters.pageId" size="small" style="width: 150px">
+                    <el-option value="" :label="t('panel.eventsPageAll')" />
+                    <el-option :value="EVENT_PAGE_OTHER" :label="t('panel.eventsPageOther')" />
+                    <el-option
+                      v-for="p in eventPageOptions"
+                      :key="p.id"
+                      :value="p.id"
+                      :label="p.name"
+                    />
+                  </el-select>
+                  <el-button size="small" :loading="eventsLoading" @click="loadEvents">
+                    {{ t('panel.eventsReload') }}
+                  </el-button>
+                  <el-button size="small" @click="openLogDir">{{
+                    t('panel.eventsOpenLogDir')
+                  }}</el-button>
+                  <span class="evt-count">{{
+                    t('panel.eventsCount', { n: shownEvents.length })
+                  }}</span>
+                </span>
+              </h3>
+              <div class="cell-sub evt-tip">{{ t('panel.eventsTip') }}</div>
+              <div v-if="!shownEvents.length" class="evt-empty">{{ t('panel.eventsEmpty') }}</div>
+              <div v-else class="evt-list">
+                <div
+                  v-for="(ev, i) in shownEvents"
+                  :key="`${ev.ts}-${i}`"
+                  class="evt-row"
+                  :class="`lv-${ev.level}`"
+                  :title="t('panel.eventsJumpLog')"
+                  @click="jumpToLog(ev)"
+                >
+                  <span class="evt-dot" :class="`lv-${ev.level}`" />
+                  <span class="evt-time">{{ eventTime(ev) }}</span>
+                  <el-tag
+                    size="small"
+                    effect="plain"
+                    round
+                    :title="t('panel.eventsRawKind', { kind: ev.kind })"
+                  >
+                    {{ eventGroup(ev) }}
+                  </el-tag>
+                  <span class="evt-text">
+                    {{ eventText(ev) }}
+                    <span v-if="ev.pageId" class="evt-page">{{
+                      pagesStore.pages.find((p) => p.id === ev.pageId)?.name || ev.pageId
+                    }}</span>
+                    <div v-if="ev.detail" class="evt-detail cell-sub">{{ ev.detail }}</div>
+                  </span>
+                </div>
+              </div>
+            </section>
           </div>
         </el-tab-pane>
 
@@ -1913,7 +1763,7 @@ async function doImportSnapshot(): Promise<void> {
   --el-table-bg-color: transparent;
   /* inner-wrapper 的底色挂在 --el-bg-color 上，不透明化会盖掉根上的卡片底色。 */
   --el-bg-color: transparent;
-  border-radius: 12px;
+  border-radius: 16px;
   overflow: hidden;
   background: color-mix(in srgb, var(--text) 5%, var(--surface));
 }
@@ -1971,6 +1821,13 @@ async function doImportSnapshot(): Promise<void> {
   gap: 2px;
   margin-top: 4px;
   min-width: 160px;
+}
+/* 批量总进度条：位于标题行与表格之间，给多行并发更新一个整体完成度概览。 */
+.upd-batch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 6px 12px;
 }
 
 /* 指定版本 dialog: one stacked column — the installed/latest reading, the picker (or the
@@ -2045,8 +1902,8 @@ async function doImportSnapshot(): Promise<void> {
   flex-direction: column;
   padding: 4px 10px 6px;
   border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--glass-well);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
   font-size: 12.5px;
   user-select: text;
 }
@@ -2133,6 +1990,23 @@ async function doImportSnapshot(): Promise<void> {
   align-items: center;
   gap: 6px;
 }
+/* 网络与工具分区：沿用关于页的 about-group 卡片语言，纵向节奏由默认 32px 收到 24px，
+   让实时网络/配置快照/网络诊断三个分区与卡片、按钮簇间距更紧凑统一。 */
+.diag-groups {
+  gap: 24px;
+  padding-top: 4px;
+}
+.diag-groups .about-caption .tools-ctl {
+  gap: 8px;
+}
+.diag-loading {
+  padding: 2px 2px 0;
+}
+/* 更新检测分区：与诊断同一套卡片分组语言，纵向节奏收到 24px。 */
+.upd-groups {
+  gap: 24px;
+  padding-top: 4px;
+}
 .net-result {
   display: flex;
   flex-direction: column;
@@ -2140,22 +2014,31 @@ async function doImportSnapshot(): Promise<void> {
   margin-top: 6px;
   padding: 8px 14px;
   border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--glass-well);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
 }
 .net-summary {
   padding: 6px 0;
   font-size: 13px;
   font-weight: 600;
 }
-/* 诊断步骤：整行 + 发丝虚线分隔，状态点左、步骤名、耗时靠右、详情换行不推。 */
+/* 诊断步骤：整行 + 发丝虚线分隔 + 行左一条 ok/fail 色条（与日志/事件行同一色条语言），
+   状态点左、步骤名（不压缩、不折行）、耗时靠右、详情换行不推。 */
 .net-step {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
-  padding: 8px 0;
+  padding: 8px 0 8px 10px;
   font-size: 12.5px;
   border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+  border-left: 3px solid transparent;
+}
+.net-step.is-ok {
+  border-left-color: color-mix(in srgb, var(--ok) 55%, transparent);
+}
+.net-step.is-fail {
+  border-left-color: var(--err);
 }
 .net-step:last-of-type {
   border-bottom: none;
@@ -2173,10 +2056,11 @@ async function doImportSnapshot(): Promise<void> {
   background: var(--err);
 }
 .net-name {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: 84px;
   font-weight: 550;
   color: var(--text);
+  white-space: nowrap;
 }
 .net-ms {
   flex: none;
@@ -2186,7 +2070,7 @@ async function doImportSnapshot(): Promise<void> {
 .net-detail {
   flex: 1 1 100%;
   min-width: 0;
-  padding-left: 18px;
+  padding-left: 21px;
 }
 .net-proxy {
   margin-top: 2px;
@@ -2202,6 +2086,107 @@ async function doImportSnapshot(): Promise<void> {
   font-size: 12px;
   color: var(--text-dim);
   letter-spacing: 0.2px;
+}
+
+/* ---- About ▸ 顶部 Hero 概览横幅 ----
+   品牌（56px logo + 产品名）+ 版本/运行栈居左，关键运行读数（运行中页面 / 内置 Node /
+   待更新）徽章靠右。accent 左上晕染 + 大圆角，作为整页视觉入口；窄屏自动换行不溢出。 */
+.about-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 20px 28px;
+  margin-bottom: 26px;
+  padding: 22px 26px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  background:
+    radial-gradient(
+      130% 130% at 0% -20%,
+      color-mix(in srgb, var(--accent) 20%, transparent),
+      transparent 55%
+    ),
+    color-mix(in srgb, var(--text) 4%, var(--surface));
+  box-shadow: var(--shadow);
+}
+.hero-id {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.hero-logo {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  padding: 6px;
+  border-radius: 14px;
+  object-fit: contain;
+  background: var(--glass-chip, color-mix(in srgb, var(--text) 6%, var(--surface)));
+  border: 1px solid var(--border);
+}
+.hero-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.hero-name {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+.hero-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hero-ver {
+  font-variant-numeric: tabular-nums;
+}
+.hero-stack {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.hero-stats {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.hero-stat {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 96px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  border: 1px solid var(--border);
+}
+.hs-k {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.hs-v {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.hs-v .hs-unit {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.hs-v.is-warn {
+  color: var(--warn);
 }
 
 /* ---- About ▸ 卡片行语言（与控制台「设置」同一配方）----
@@ -2321,6 +2306,13 @@ async function doImportSnapshot(): Promise<void> {
   word-break: break-all;
   text-align: right;
   font-size: 12.5px;
+  /* 路径与系统信息里的等宽路径同一字体，斜杠/反斜杠对齐更好读。 */
+  font-family: ui-monospace, Consolas, Menlo, monospace;
+}
+/* 运行时路径已合并进「内置 Node」行的描述列：左贴、与描述同色，不再单独占一行。 */
+.about-card .node-path .path-value {
+  margin-left: 2px;
+  text-align: left;
 }
 .about-card .row-value.full {
   overflow-wrap: anywhere;
@@ -2353,6 +2345,59 @@ async function doImportSnapshot(): Promise<void> {
   font-size: 12.5px;
   color: var(--text-dim);
 }
+/* ---- 系统信息详情网格 ----
+   与上方「运行中页面」行同居一张 about-card：卡片内改用响应式详情网格，每格 = 灰色小
+   标题（带图标）在上 · 值在下。格间以 1px 发丝缝（grid gap + 卡背 border 色）分隔，
+   长值跨两列、路径跨整行，扫读性优于旧的左右两端行。 */
+.about-card .sys-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 1px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+  border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+}
+.about-card .sys-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 16px 22px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+}
+.about-card .sys-cell--wide {
+  grid-column: span 2;
+}
+.about-card .sys-cell--full {
+  grid-column: 1 / -1;
+}
+.about-card .sys-k {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.about-card .sys-k .el-icon {
+  font-size: 14px;
+}
+.about-card .sys-v {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.about-card .sys-v.mono {
+  font-family: ui-monospace, Consolas, Menlo, monospace;
+  font-size: 12.5px;
+  font-weight: 400;
+  word-break: break-all;
+}
 
 /* 网络与工具 — live throughput + interface list. */
 .net-live {
@@ -2362,8 +2407,8 @@ async function doImportSnapshot(): Promise<void> {
   margin-bottom: 4px;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--glass-well);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
 }
 /* 实时速率：胶囊徽章化，箭头着色，读数加粗等宽数字。 */
 .net-rate {
@@ -2444,8 +2489,23 @@ async function doImportSnapshot(): Promise<void> {
 }
 
 /* ---- A1 activity timeline ---- */
+/* 事件动态：与控制台其它分区同一套 about-group/about-caption 卡片语言，标题行右侧
+   收放筛选/刷新/打开日志控件簇；列表卡片大圆角淡面，每行左侧一根级别色条。 */
+.evt-groups {
+  gap: 24px;
+  padding-top: 4px;
+}
+.evt-ctl {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.evt-ctl .evt-count {
+  margin-left: 2px;
+}
 .evt-tip {
-  margin-bottom: 8px;
+  margin-bottom: 2px;
 }
 
 /* 资源趋势平铺：每个页面占满整行（百分百自适应），曲线随控制台宽度拉伸；
@@ -2493,23 +2553,34 @@ async function doImportSnapshot(): Promise<void> {
      to the viewport minus the surrounding chrome gives “occupy the screen, then scroll”. */
   max-height: calc(100vh - 260px);
   overflow: auto;
-  /* 与控制台大卡片同圆角体系（14px），与表格/趋势格子同一家族。 */
+  /* 与关于页卡片同一表面/半径，取代旧的 14px glass-well 方角块。 */
   border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--glass-well);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
   scrollbar-gutter: stable;
 }
 .evt-row {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  /* 行间发丝虚线 + 行左一条级别色条，与运行日志每行色条同一语言。 */
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--text-dim) 26%, transparent);
   font-size: 12px;
   cursor: pointer;
 }
 .evt-row:last-child {
   border-bottom: none;
+}
+.evt-row.lv-info {
+  border-left-color: var(--accent);
+}
+.evt-row.lv-warn {
+  border-left-color: var(--warn);
+}
+.evt-row.lv-error {
+  border-left-color: var(--err);
 }
 .evt-row:hover {
   background: var(--surface);

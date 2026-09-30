@@ -102,6 +102,11 @@ watch(
 /* 环境目录 moved out of 设置: per-page directory env is now configured in the Pages panel
    (PageManager → 环境目录 tab), so Settings no longer owns any env-var UI. */
 
+/* ---- 界面视图合并页（控制台单栏） ----
+   行为规范 / 提醒警告 已并入「界面视图」：当 pane==='view' 时，用 CSS 把 view/behavior/alerts
+   三个 tab-pane 纵向堆叠成一页（无 scroll-spy、无左导航同步）；其余分区各自独立单栏。 */
+const merged = computed(() => props.pane === 'view')
+
 /* ---- C1 editable shortcuts ----
    Only overrides live in settings: an absent key means "shipped default", an empty string means
    the user deliberately unbound it. Both are shown so 恢复默认 is never a surprise. */
@@ -640,7 +645,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 </script>
 
 <template>
-  <div class="settings-panel" :class="{ 'single-pane': !!pane }">
+  <div class="settings-panel" :class="{ 'single-pane': !!pane, merged }">
     <el-tabs
       v-model="activeTab"
       class="settings-tabs v-tabs"
@@ -765,13 +770,14 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
                   <span class="row-desc">{{ t('settings.languageDesc') }}</span>
                 </div>
                 <div class="row-control">
-                  <el-radio-group
+                  <el-select
+                    class="set-ctl"
                     :model-value="settingsStore.settings.locale"
                     @update:model-value="onLocaleChange($event as 'zh' | 'en')"
                   >
-                    <el-radio-button value="zh">{{ t('settings.langZh') }}</el-radio-button>
-                    <el-radio-button value="en">{{ t('settings.langEn') }}</el-radio-button>
-                  </el-radio-group>
+                    <el-option value="zh" :label="t('settings.langZh')" />
+                    <el-option value="en" :label="t('settings.langEn')" />
+                  </el-select>
                 </div>
               </div>
             </div>
@@ -867,14 +873,15 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
                   <span class="row-desc">{{ t('settings.reduceMotionTip') }}</span>
                 </div>
                 <div class="row-control">
-                  <el-radio-group
+                  <el-select
+                    class="set-ctl"
                     :model-value="settingsStore.settings.reduceMotion || 'auto'"
                     @update:model-value="patch({ reduceMotion: $event as 'auto' | 'on' | 'off' })"
                   >
-                    <el-radio-button value="auto">{{ t('settings.themeAuto') }}</el-radio-button>
-                    <el-radio-button value="on">{{ t('settings.alwaysOn') }}</el-radio-button>
-                    <el-radio-button value="off">{{ t('settings.alwaysOff') }}</el-radio-button>
-                  </el-radio-group>
+                    <el-option value="auto" :label="t('settings.themeAuto')" />
+                    <el-option value="on" :label="t('settings.alwaysOn')" />
+                    <el-option value="off" :label="t('settings.alwaysOff')" />
+                  </el-select>
                 </div>
               </div>
 
@@ -1031,17 +1038,14 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
                   <span class="row-desc">{{ t('settings.memLimitActionTip') }}</span>
                 </div>
                 <div class="row-control">
-                  <el-radio-group
+                  <el-select
+                    class="set-ctl"
                     :model-value="settingsStore.settings.memLimitAction || 'notify'"
                     @update:model-value="patch({ memLimitAction: $event as 'notify' | 'restart' })"
                   >
-                    <el-radio-button value="notify">{{
-                      t('settings.memLimitNotify')
-                    }}</el-radio-button>
-                    <el-radio-button value="restart">{{
-                      t('settings.memLimitRestart')
-                    }}</el-radio-button>
-                  </el-radio-group>
+                    <el-option value="notify" :label="t('settings.memLimitNotify')" />
+                    <el-option value="restart" :label="t('settings.memLimitRestart')" />
+                  </el-select>
                 </div>
               </div>
 
@@ -1054,18 +1058,17 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
                   <span class="row-desc">{{ t('settings.trayPageEntriesTip') }}</span>
                 </div>
                 <div class="row-control">
-                  <el-radio-group
+                  <el-select
+                    class="set-ctl"
                     :model-value="settingsStore.settings.trayPageEntries || 'all'"
                     @update:model-value="
                       patch({ trayPageEntries: $event as 'all' | 'running' | 'off' })
                     "
                   >
-                    <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
-                    <el-radio-button value="running">{{
-                      t('settings.trayRunning')
-                    }}</el-radio-button>
-                    <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
-                  </el-radio-group>
+                    <el-option value="all" :label="t('settings.trayAll')" />
+                    <el-option value="running" :label="t('settings.trayRunning')" />
+                    <el-option value="off" :label="t('settings.trayOff')" />
+                  </el-select>
                 </div>
               </div>
 
@@ -1078,16 +1081,15 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
                   <span class="row-desc">{{ t('settings.trayBadgeTip') }}</span>
                 </div>
                 <div class="row-control">
-                  <el-radio-group
+                  <el-select
+                    class="set-ctl"
                     :model-value="settingsStore.settings.trayBadge || 'all'"
                     @update:model-value="patch({ trayBadge: $event as 'all' | 'alert' | 'off' })"
                   >
-                    <el-radio-button value="all">{{ t('settings.trayAll') }}</el-radio-button>
-                    <el-radio-button value="alert">{{
-                      t('settings.trayAlertOnly')
-                    }}</el-radio-button>
-                    <el-radio-button value="off">{{ t('settings.trayOff') }}</el-radio-button>
-                  </el-radio-group>
+                    <el-option value="all" :label="t('settings.trayAll')" />
+                    <el-option value="alert" :label="t('settings.trayAlertOnly')" />
+                    <el-option value="off" :label="t('settings.trayOff')" />
+                  </el-select>
                 </div>
               </div>
 
@@ -1100,17 +1102,16 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
                   <span class="row-desc">{{ t('settings.externalOpenModeTip') }}</span>
                 </div>
                 <div class="row-control">
-                  <el-radio-group
+                  <el-select
+                    class="set-ctl"
                     :model-value="settingsStore.settings.openExternalIn"
                     @update:model-value="
                       patch({ openExternalIn: $event as 'embedded' | 'system-browser' })
                     "
                   >
-                    <el-radio-button value="embedded">{{ t('settings.embedded') }}</el-radio-button>
-                    <el-radio-button value="system-browser">{{
-                      t('settings.systemBrowser')
-                    }}</el-radio-button>
-                  </el-radio-group>
+                    <el-option value="embedded" :label="t('settings.embedded')" />
+                    <el-option value="system-browser" :label="t('settings.systemBrowser')" />
+                  </el-select>
                 </div>
               </div>
             </div>
@@ -1120,6 +1121,10 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 
       <!-- C1: 快捷键 —— every action the shell binds, recorded straight into settings.keybindings. -->
       <el-tab-pane name="keys">
+        <h2 class="set-sec-head" data-sec="keys">
+          <el-icon><Key /></el-icon>
+          <span>{{ t('settings.tabKeys') }}</span>
+        </h2>
         <template #label>
           <span class="tab-label"
             ><el-icon><Key /></el-icon>{{ t('settings.tabKeys') }}</span
@@ -1191,6 +1196,10 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
       </el-tab-pane>
 
       <el-tab-pane name="download">
+        <h2 class="set-sec-head" data-sec="download">
+          <el-icon><Download /></el-icon>
+          <span>{{ t('settings.tabDownload') }}</span>
+        </h2>
         <template #label>
           <span class="tab-label"
             ><el-icon><Download /></el-icon>{{ t('settings.tabDownload') }}</span
@@ -1248,6 +1257,10 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 
       <!-- #26: 网络镜像。一个设置决定容器带动的所有安装去哪拉包。 -->
       <el-tab-pane name="network">
+        <h2 class="set-sec-head" data-sec="network">
+          <el-icon><Connection /></el-icon>
+          <span>{{ t('settings.tabNetwork') }}</span>
+        </h2>
         <template #label>
           <span class="tab-label"
             ><el-icon><Connection /></el-icon>{{ t('settings.tabNetwork') }}</span
@@ -1368,6 +1381,10 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 
       <!-- #26: 隐私数据。所有 <webview> 共用一个 session，所以这里说清楚每次清理的范围。 -->
       <el-tab-pane name="privacy">
+        <h2 class="set-sec-head" data-sec="privacy">
+          <el-icon><Lock /></el-icon>
+          <span>{{ t('settings.tabPrivacy') }}</span>
+        </h2>
         <template #label>
           <span class="tab-label"
             ><el-icon><Lock /></el-icon>{{ t('settings.tabPrivacy') }}</span
@@ -1532,6 +1549,10 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 
       <!-- #8: 存储。容器占用磁盘的分项仪表盘；只有 webcache / logs 两行可在此清理。 -->
       <el-tab-pane name="storage">
+        <h2 class="set-sec-head" data-sec="storage">
+          <el-icon><Coin /></el-icon>
+          <span>{{ t('settings.tabStorage') }}</span>
+        </h2>
         <template #label>
           <span class="tab-label"
             ><el-icon><Coin /></el-icon>{{ t('settings.tabStorage') }}</span
@@ -1715,6 +1736,42 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   min-height: 0;
   padding: 0;
   overflow: visible !important;
+}
+/* ---- merged 单页：只把 view/behavior/alerts 三个 tab-pane 展开纵向堆叠（EP 默认 v-show
+   隐藏非活跃 pane，这里用 !important 压过其行内 display:none）；其余 pane 保持隐藏（各自独立）。 */
+.settings-panel.merged :deep(.el-tabs__content) {
+  display: block;
+}
+.settings-panel.merged :deep(#pane-view),
+.settings-panel.merged :deep(#pane-behavior),
+.settings-panel.merged :deep(#pane-alerts) {
+  display: block !important;
+  padding: 0;
+}
+.settings-panel.merged :deep(#pane-behavior),
+.settings-panel.merged :deep(#pane-alerts) {
+  margin-top: 40px;
+}
+/* 分区标题：合并页里取代旧 tab 名的可见锚点（图标 accent + 15px 标题），滚动时贴顶留白。 */
+.settings-panel.merged .set-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 0 2px;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  scroll-margin-top: 14px;
+}
+.settings-panel.merged .set-sec-head .el-icon {
+  font-size: 17px;
+  color: var(--accent);
+}
+/* 非合并（经典/弹窗）下分区标题不显示，仍靠 tab rail 区分。 */
+.settings-panel:not(.merged) .set-sec-head {
+  display: none;
 }
 /* EP 对竖排 tab 默认是 `justify-content:flex-end; text-align:right`（选择器
    `.el-tabs--left .el-tabs__item.is-left`，特异性 0,3,0），单类 :deep 规则压不过，
