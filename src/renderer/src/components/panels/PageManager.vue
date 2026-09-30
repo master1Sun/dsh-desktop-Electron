@@ -1645,16 +1645,12 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
   font-size: 13px;
   margin: 4px 0 14px;
 }
-/* 顶栏显示 tab: tip banner sits above the per-entry switch list with a little breathing room. */
-.switcher-wrap .switcher-tip {
-  margin-bottom: 14px;
-}
-/* One-click show/hide-all buttons, right-aligned above the table. */
+/* One-click show/hide-all buttons, right-aligned above the table. Vertical rhythm is owned by
+   the .switcher-wrap card gap now, so no per-child bottom margins here. */
 .switcher-actions {
   display: flex;
   justify-content: flex-end;
   gap: 4px;
-  margin-bottom: 6px;
 }
 .hint code {
   background: var(--glass-chip);
@@ -1789,15 +1785,30 @@ async function setAllSwitcher(visible: boolean): Promise<void> {
 .page-manager :deep(.el-form-item .el-input) {
   max-width: 440px;
 }
-.installed {
+/* 已安装页面 / 顶栏显示 used to render as a bare stack beside the carded 导入 / 环境目录 panes —
+   the head / hint and the table ran flush to the pane edges with no breathing room. Give them the
+   same rounded faint-surface well + even 14px gaps as 导入, so every pages tab shares one measure. */
+.installed,
+.switcher-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
   min-width: 0;
+  width: 100%;
+  padding: 18px 20px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 16px;
 }
 .installed-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-weight: 600;
-  margin-bottom: 8px;
+}
+/* The card gap owns the vertical rhythm now, so drop the base hint's bottom margin here. */
+.switcher-wrap .hint {
+  margin: 0;
 }
 .cell-name {
   display: flex;

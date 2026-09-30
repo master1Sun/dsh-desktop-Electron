@@ -1675,8 +1675,8 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   /* 每一行的可用内容宽：.el-form-item 是 7px 8px 内衬 + 12px 下边距，标签列固定 166px。 */
   --settings-row-w: calc(100% - 16px);
   --settings-content-w: calc(var(--settings-row-w) - var(--settings-label-w));
-  /* 独立控件（输入框 / 下拉）统一的轨宽：不再逐处写死 340px，装不下就随列收窄。 */
-  --settings-control-w: min(var(--settings-content-w), 340px);
+  /* 独立控件（输入框 / 下拉）统一的轨宽：随列宽拉伸填满，只在最宽处封顶避免过宽。 */
+  --settings-control-w: min(var(--settings-content-w), 640px);
   /* 带尾随控件的行（滑条 + 读数 + 重置）：给尾部留出空间。下限只防窄窗口，
      正常宽度下仍是 260px 主导。 */
   --settings-slider-w: clamp(140px, calc(var(--settings-content-w) - 80px), 260px);
@@ -1852,7 +1852,8 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 }
 .row-label {
   display: flex;
-  flex: 1 1 auto;
+  /* Content-sized (no grow) so the control track can absorb the extra width and stretch to fill. */
+  flex: 0 1 auto;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
@@ -1874,15 +1875,20 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
   max-width: 62ch;
 }
 .row-control {
-  flex: none;
+  /* Grow to fill whatever width the label leaves, so stretchable controls (`.set-ctl`, tables)
+     scale with the column instead of parking a fixed-width field on the right. */
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 12px;
 }
-/* The default-page select reads as a wide rounded rectangle in the mockup; keep it off the
-   shared 340px control width so the row stays balanced. */
+/* Wide fields fill the grown control track (up to a tasteful cap) instead of a fixed 240px, so
+   the row scales with the column like the installed-pages table does. */
 .setting-row .set-ctl {
-  width: 240px;
+  width: 100%;
+  max-width: 480px;
 }
 /* 主题模式下拉：只有三个短选项，收窄成与参考图一致的紧凑胶囊。 */
 .setting-row .theme-select {
@@ -1900,7 +1906,8 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
    so `.el-form-item__content` (flex-wrap: wrap) dropped their buttons onto a second line. That
    is the ragged right edge. Rows now derive their width from the column instead of fighting it. */
 .set-ctl {
-  width: var(--settings-control-w);
+  width: 100%;
+  max-width: var(--settings-control-w);
 }
 /* 内存告警阈值：数字输入框取代旧滑条，宽度与主题下拉同一节奏。 */
 .settings-panel .mem-input {
@@ -2025,7 +2032,7 @@ async function toggleContainerMcp(value: boolean): Promise<void> {
 .env-root-row .set-ctl {
   flex: 1 1 240px;
   min-width: 0;
-  max-width: 420px;
+  max-width: 560px;
 }
 .env-root-row .row-status {
   margin-top: 6px;

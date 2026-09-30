@@ -344,16 +344,10 @@ watch(flatLeaves, (leaves) => {
 
 const activeLabel = computed(() => (active.value ? leafLabel(active.value) : ''))
 
-/* The console sheet runs edge-to-edge, so a lone toggle on a settings row would drift to the far
-   right edge of a wide window. Narrow mode caps the settings / about panes (the captioned form-card
-   language) to a comfortable reading measure. Data panels — page/port tables, resource trends, the
-   board, MCP lists — keep the full width they need. */
-const narrowMeasure = computed(() => {
-  const a = active.value
-  if (!a) return false
-  if (a.panel === 'settings') return true
-  return a.panel === 'help' && a.tab === 'about'
-})
+/* Every console panel now shares one measure: the content column follows the window up to
+   `--console-col-w`, then stays at that width and centers in the body — the same grounding the
+   settings / about panes always had, applied to the data panels too (tables keep their own
+   horizontal scroll inside the capped column). */
 
 function onClose(): void {
   emit('close')
@@ -366,7 +360,7 @@ watch(active, (leaf) => {
 </script>
 
 <template>
-  <div class="console" :class="{ narrow: narrowMeasure }">
+  <div class="console">
     <aside class="console-nav">
       <button class="console-back" :aria-label="t('console.back')" @click="onClose">
         <el-icon><ArrowLeft /></el-icon>
@@ -596,11 +590,15 @@ watch(active, (leaf) => {
   min-height: 0;
   width: 100%;
 }
-/* Narrow (settings / about): ground the title and card column to one measure, flush-left, so rows
-   stop stretching across the whole viewport. Data panels leave this off and run full width. */
-.console.narrow .console-title,
-.console.narrow .console-content {
+/* Ground the title and card column to one measure so rows stop stretching across the whole
+   viewport. The column follows the window up to `--console-col-w`; past that it stays at the
+   measure and centers in the body (`auto` margins resolve because both children are flex items of
+   the column-direction `.console-body`), instead of hugging the nav with a dead right margin. */
+.console .console-title,
+.console .console-content {
   max-width: var(--console-col-w);
+  margin-left: auto;
+  margin-right: auto;
 }
 /* The embedded panel owns its own scroll on a single-pane; drop the rail (already hidden via
    `pane`) and let the content fill the console body without a nested scroll container. */

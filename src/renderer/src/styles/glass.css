@@ -665,6 +665,15 @@ html.dark .el-message-box__title {
 .v-tabs .el-tabs__header {
   margin: 0 16px 0 0;
 }
+/* The content column is a flex item of the row-flex `.v-tabs`. EP's default `overflow: hidden`
+   makes its automatic min-width resolve to 0, but the console overrides it to `overflow: visible`
+   (so poppers / the pane's own scroll aren't clipped) — which re-enables `min-width: auto` = the
+   table's min-content. A nowrap el-table then grows with the window but refuses to shrink past its
+   min-content. Pin `min-width: 0` so the pane tracks the column both ways and the table scrolls
+   internally instead of forcing the whole panel wide. */
+.v-tabs .el-tabs__content {
+  min-width: 0;
+}
 /* IM popup variant: `tab-position="top"` adds `.el-tabs--top` to the same root. The base block is
    tuned for the left rail (row flex + min-height), so flip it back to a column and move the header
    margin beneath the tab strip; `.is-left` rules above stay inert for top items (`.is-top`). */

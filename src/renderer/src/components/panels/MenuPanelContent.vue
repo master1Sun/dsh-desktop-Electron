@@ -629,6 +629,10 @@ const pageLogKey = (id: string): string => `pages/${id.replace(/[^\w.-]/g, '_')}
 /** Jump a timeline row to its log: the container-wide rows land on main.log. */
 async function jumpToLog(ev: ContainerEvent): Promise<void> {
   const key = ev.pageId ? pageLogKey(ev.pageId) : 'main'
+  // Single-pane (unified console / IM sidebar) hides the help rail, so switching to 运行日志 here
+  // must bubble the tab change up — otherwise the content moves but the left-nav selection stays
+  // on 事件动态. Mirrors goToUpdatesLeaf. The host flips `pane`, whose watcher also sets helpTab.
+  if (props.pane) emit('pane-jump', 'logs')
   // Clear first so re-clicking the same page still re-reads (the prop did not "change").
   logFocus.value = ''
   helpTab.value = 'logs'
@@ -883,28 +887,28 @@ async function doImportSnapshot(): Promise<void> {
       <PageManager :tab-position="tabPosition" :pane="pane" @close="emit('close')" />
     </section>
 
-    <section v-else-if="props.panel === 'external'" class="sec">
+    <section v-else-if="props.panel === 'external'" class="sec framed">
       <ExternalSitesManager @preview="emit('preview-site', $event)" />
     </section>
 
-    <section v-else-if="props.panel === 'dsh'" class="sec">
+    <section v-else-if="props.panel === 'dsh'" class="sec framed">
       <DshManager :tab-position="tabPosition" :pane="pane" />
     </section>
 
-    <section v-else-if="props.panel === 'openclaw'" class="sec">
+    <section v-else-if="props.panel === 'openclaw'" class="sec framed">
       <OpenclawManager />
     </section>
 
-    <section v-else-if="props.panel === 'mcp'" class="sec">
+    <section v-else-if="props.panel === 'mcp'" class="sec framed">
       <McpManager />
     </section>
 
-    <section v-else-if="props.panel === 'workspace'" class="sec">
+    <section v-else-if="props.panel === 'workspace'" class="sec framed">
       <WorkspaceContext />
     </section>
 
     <!-- 看板: rail / 视图 row / palette page; TaskBoard owns the board / dependency-topology / call-feed tabs. -->
-    <section v-else-if="props.panel === 'board'" class="sec">
+    <section v-else-if="props.panel === 'board'" class="sec framed">
       <TaskBoard :tab-position="tabPosition" :pane="pane" />
     </section>
 
@@ -1664,6 +1668,17 @@ async function doImportSnapshot(): Promise<void> {
 <style scoped>
 .sec {
   padding: 2px;
+}
+/* The manager panels (DSH / OpenClaw / MCP / 共享上下文 / 外部地址 / 看板) render their content
+   flush to the console column, so it read as an unframed block beside the already-carded
+   设置 / 页面 tabs. Wrap them in the same rounded faint-surface well (padding + hairline + 16px
+   radius) so every right-side panel shares one measure and has breathing room. */
+.sec.framed {
+  min-width: 0;
+  padding: 18px 20px;
+  background: color-mix(in srgb, var(--text) 5%, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 16px;
 }
 /* The help section sits inside a flex content column; without min-width:0 a wide child (the port
    table) can't shrink and instead stretches the card horizontally. */
