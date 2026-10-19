@@ -16,6 +16,7 @@
  *            event log, i18n, tray & notifications, window bounds, web data, user-data
  */
 import { app, BrowserWindow, dialog, shell } from 'electron'
+import type { WebContents } from 'electron'
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
@@ -26,6 +27,7 @@ import { startContainerMcpServer, stopContainerMcpServer } from './runtime/mcp/c
 import { initAutopilot, disposeAutopilot } from './runtime/autopilot/autopilot'
 import { setMcpPackagesRoot } from './runtime/mcp/mcp-packages'
 import { registerIpc, flushPopoutBounds } from './shell/ipc'
+import { externalWindowOptions, openExternalWindow } from './shell/external-window'
 import { ensureDefaultOpenclawPage, ensureBuiltinPages } from './runtime/cli/openclaw'
 import { pnpmBinDirs } from './runtime/cli/dsh'
 import {
@@ -168,9 +170,10 @@ function createWindow(): void {
       preload: resolvePreload(),
       // Deliberate trade-off (container host): sandbox:false so the preload can expose node
       // helpers; webviewTag:true so managed pages run embedded. The blast radius is kept in
-      // check by the authoritative web-contents-created handler below — every webview guest
-      // gets window.open denied and navigated in place, so no guest escapes to a popup or
-      // the system browser. Don't remove either without re-checking that handler.
+      // check by the authoritative web-contents-created handler below — every ordinary webview
+      // guest gets window.open denied and navigated in place; dsh/openclaw guests spill outbound
+      // links into their own window so a live scene is never replaced. Don't remove either
+      // without re-checking that handler.
       sandbox: false,
       webviewTag: true
     }
@@ -232,6 +235,40 @@ function resolvePreload(): string {
     if (existsSync(join(dir, name))) return join(dir, name)
   }
   return join(dir, 'index.mjs')
+}
+
+/**
+ * Canonical origin of an absolute URL, or null when it cannot be parsed (about:blank, '').
+ * `localhost` and `127.0.0.1` are folded together: a managed page may boot on one and redirect
+ * to the other, and that is still the same server — not an "elsewhere" jump.
+ */
+function safeOrigin(raw: string | undefined): string | null {
+  if (!raw) return null
+  try {
+    const url = new URL(raw)
+    const host = url.hostname === 'localhost' ? '127.0.0.1' : url.hostname
+    return `${url.protocol}//${host}${url.port ? `:${url.port}` : ''}`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The runtime kind this guest is hosting right now, or null for a plain page. Matched by origin
+ * against the registry, which is enough because a dsh/openclaw guest never gets to leave its
+ * origin (any outbound navigation is spilled into a separate window before it can happen).
+ */
+function hostedRuntimeKind(contents: WebContents): 'dsh' | 'openclaw' | null {
+  if (!registry) return null
+  const origin = safeOrigin(contents.getURL())
+  if (!origin) return null
+  for (const page of registry.running()) {
+    if (page.kind !== 'dsh' && page.kind !== 'openclaw') continue
+    for (const candidate of [page.url, page.launchUrl]) {
+      if (candidate && safeOrigin(candidate) === origin) return page.kind
+    }
+  }
+  return null
 }
 
 function showWindow(): void {
@@ -358,10 +395,11 @@ if (!gotLock) {
     applyNpmRegistryEnv()
     app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
-    // Embedded <webview> guests: keep window.open / target=_blank inside the SAME view
+    // Embedded <webview> guests keep window.open / target=_blank inside the SAME view
     // (navigate in place) instead of popping a new window or handing off to the system
-    // browser. This main-process handler is authoritative and takes precedence over the
-    // renderer `new-window` event, so nothing can slip out to an external window.
+    // browser. Exception: dsh/openclaw pages own a live scene in their guest — a link must
+    // not replace it, so those get a separate window. This main-process handler is
+    // authoritative and takes precedence over the renderer `new-window` event.
     app.on('web-contents-created', (_e, contents) => {
       if (contents.getType() === 'webview') {
         // Persistent-services black screen (root cause): a managed <webview> navigates while the
@@ -391,8 +429,34 @@ if (!gotLock) {
           }, 120)
         })
         contents.setWindowOpenHandler(({ url }) => {
+          if (hostedRuntimeKind(contents)) {
+            // window.open / target=_blank / empty popup: let Electron raise it separately so
+            // the opener stays intact and the dsh/openclaw scene is never replaced.
+            if (url === '' || url === 'about:blank' || /^https?:/i.test(url)) {
+              return {
+                action: 'allow',
+                overrideBrowserWindowOptions: externalWindowOptions()
+              }
+            }
+            // A non-web scheme cannot live in a BrowserWindow; hand it to the OS handler.
+            if (/^(mailto|tel):/i.test(url)) shell.openExternal(url).catch(() => undefined)
+            return { action: 'deny' }
+          }
           contents.loadURL(url).catch(() => undefined)
           return { action: 'deny' }
+        })
+        // A plain link (no target=_blank) is a full navigation in THIS guest. On dsh/openclaw a
+        // cross-origin jump would strand the user on an unrelated page with no back button (the
+        // top bar only shows history for external views), so spill it into its own window and
+        // leave the live scene untouched. Same-origin loads stay in place (SPA/login reloads).
+        contents.on('will-navigate', (event, url) => {
+          if (!/^https?:/i.test(url)) return
+          if (!hostedRuntimeKind(contents)) return
+          const from = safeOrigin(contents.getURL())
+          const to = safeOrigin(url)
+          if (!from || !to || from === to) return
+          event.preventDefault()
+          openExternalWindow(url)
         })
       }
     })

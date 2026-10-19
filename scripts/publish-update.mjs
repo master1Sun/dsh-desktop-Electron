@@ -82,14 +82,30 @@ const idx = join(root, '.git', `dsh-${branch}-index`)
 try {
   // Resolve the current remote tip; a transient network failure must not be mistaken
   // for "first publish" (that would silently create an orphan the push then rejects).
+  // `resolved` separates "origin says this branch is absent" (a valid first publish) from
+  // "origin could not be reached" — both end with a null base, only the latter may retry/fail.
   let base = null
-  for (let attempt = 0; attempt < 3 && base === null; attempt++) {
+  let resolved = false
+  let lastError = null
+  for (let attempt = 0; attempt < 3 && !resolved; attempt++) {
     try {
       base = git(['ls-remote', '--heads', 'origin', branch]).split('\n')[0].trim().split(/\s+/)[0] || null
-    } catch {
-      if (attempt === 2) throw new Error('[publish] cannot reach origin — refusing to guess whether this is the first publish')
-      execFileSync('sleep', ['3'])
+      resolved = true
+    } catch (err) {
+      lastError = err
+      if (attempt === 2) break
+      // Portable pause: `sleep` does not exist on Windows (spawnSync would ENOENT and mask
+      // the real network error before the retry could ever run).
+      console.warn(`[publish] origin unreachable (attempt ${attempt + 1}/3), retrying in 3s…`)
+      await new Promise((resolve) => setTimeout(resolve, 3000))
     }
+  }
+  if (!resolved) {
+    throw new Error(
+      `[publish] cannot reach origin — refusing to guess whether this is the first publish: ${
+        lastError?.message || lastError
+      }`
+    )
   }
   if (!base) console.log(`[publish] no ${branch} branch on origin yet — creating the first orphan commit`)
 
