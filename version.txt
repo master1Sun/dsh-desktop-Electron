@@ -1,2 +1,2 @@
-0.2.3
-e3cb1fd9eeebe82149172f7797ff17b25dab9d8a
+0.2.4
+aac5a63888f242ef8bf437cff4bd6ad0e63b7fc8
